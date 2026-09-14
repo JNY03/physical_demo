@@ -1,0 +1,742 @@
+"""demo/test/navigate_to_target_service.py
+
+implements: 사용자 지시 -- "이 코드도 2번과 마찬가지로 다른 기기 mac으로 보낼
+예정. 나중에 그 주소만 입력하면 전송되도록 코드 구현해둠. 일단 내 저장소에
+결과물 저장만. 이제 지정 클래스 앞으로 가라는 명령을 받았을 때 우선 평면도
+이미지 원본 저장. 문의 위치와 단상 위치를 depth로 계산해서 로봇 위치를 점으로
+찍고 단상과 문과의 거리 작성한 이미지 저장. 회전 각도와 최소 경로 계산하고
+demo/test/unidepth_localization/path_overlay.jpg과 같이 오버레이해서 저장."
+
+**2026-09-10 재구성(사용자 지시)**: "어떤 명령이 오든 로봇은 환경 탐색을 위해
+한바퀴 돌며 8프레임을 찍도록 할거고... door와 pedestal는 로봇이 본인 위치
+추정하기 위해 자동으로 먼저 계산하도록 하고 위치가 나오면 이제 명령을
+수행하는거지. 지정 클래스가 door나 pedestal라면 자동 위치 추정에서 이미
+산출이 된거고 아니면 처음에 환경 인식 때 그 클래스도 추가로 탐색하도록 하고.
+그리고 전진 명령이라면 경로도 산출하도록." 이에 따라 이 서비스를 3단계로
+나눴다:
+  1. `localize(detections_by_class)` -- 8프레임이 끝나면 명령 종류와 무관하게
+     항상 먼저 실행. pedestal 관측(class_finder_service가 CLIP 파이프라인으로
+     실제 검출한 결과, 더 이상 하드코딩 bbox 아님)으로 로봇의 지도상 위치와
+     현재 진행방향(회전 프레임 각도 -> 지도 방위각 오프셋)을 추정한다.
+  2. `resolve_target_position(target_class, ...)` -- target_class가 door/
+     pedestal이면 이미 알려진 도면상 고정 위치를 쓰고, 그 외 일반 클래스면
+     그 클래스가 검출된 프레임의 회전각+depth를 1단계에서 구한 오프셋과
+     결합해 지도 좌표를 추정한다(검출 실패나 depth 유효범위 밖이면 위치
+     없음으로 정직하게 보고).
+  3. `on_go_to_class_command(...)` -- 2단계 위치가 나오면 회전각+최소경로를
+     계산해 path_overlay.jpg를 만든다("전진 명령이라면 경로도 산출").
+
+**정직한 한계**:
+- localize()의 로봇 위치 추정 자체가 "로봇이 단상을 바라보며 촬영한 시점의
+  시선 방향이 곧 단상->문 방향과 일치한다"는 이번 시연 환경 특유의 기하 가정에
+  기반한다(단상 표면 지점에서 단상->문 방향으로 pedestal_distance_avg_cm만큼
+  나아간 지점을 로봇 위치로 본다). 일반적인 다각도 삼변측량이 아니다.
+- 문의 도면상 실제 위치(스윙도어 경첩+문짝)는 카메라로 "검출"한 게 아니라
+  datasets/25300_gt.png의 GT 점으로 고정한 값이다(DOOR_PX) -- 자체 depth
+  추정치는 유효범위를 벗어나 위치 추정에 쓰지 않는다.
+- door/pedestal이 아닌 일반 클래스의 위치는 로봇 위치+회전 오프셋+그 클래스
+  자신의 depth 측정에 의존하므로, 문처럼 depth가 유효범위를 벗어나는 먼
+  물체는 위치를 못 구할 수 있다(정직하게 실패로 보고, 임의 추정하지 않음).
+- 회전각 계산은 문 자신의 관측값이 아니라 단상 관측값으로 교차검증한 값을
+  쓴다 -- 문 자신의 관측값을 쓰면 순환 논리가 된다는 것을 실측으로 확인했다.
+
+전송(다른 기기로 MAC 주소를 통해 보내기)은 아직 구현하지 않고 호출 지점만
+주석 처리해뒀다(`_send_to_device` 참고).
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import math
+import sys
+from pathlib import Path
+
+_VENV_SITE = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+for _lib_dir in [_VENV_SITE / "nvidia" / "cu13" / "lib", _VENV_SITE / "nvidia" / "cudnn" / "lib"]:
+    if _lib_dir.is_dir():
+        for _so in sorted(_lib_dir.glob("*.so*")):
+            try:
+                ctypes.CDLL(str(_so), mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
+
+import cv2
+import numpy as np
+import torch
+from unidepth.models import UniDepthV2
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# 2026-09-11 사용자 지시: 실행 폴더(try1) 밑에 프레임별 결과 + localization/ +
+# navigation/을 함께 둔다 -- class_finder_service.RUN_DIR과 동일 경로.
+RUN_DIR = Path(__file__).resolve().parent / "try1"
+OUT_DIR = RUN_DIR / "localization"  # 자기 위치 추정 전용(클래스 무관)
+NAV_DIR = RUN_DIR / "navigation"    # 경로 계획 전용
+MAP_PATH = REPO_ROOT / "datasets" / "25300.png"
+DATASET_ROT8_DIR = REPO_ROOT / "datasets" / "20260910-134818_rot8"
+
+ROOM_CM = (757.0, 689.0)
+INFER_SIZE = (320, 240)  # UniDepth 464x400 직접입력 버그 우회(실측 발견, 아래 _run_unidepth 참고)
+
+MAP_ROOM_TOPLEFT_PX = (156.0, 149.25)
+MAP_ROOM_BOTTOMRIGHT_PX = (1094.5, 961.75)
+
+# 단상의 도면상 고정 위치(실측 확정값, 그대로 유지) -- 단상 자체를 "검출"하는
+# 것은 이제 class_finder_service의 CLIP 파이프라인이 담당하고, 이 값은 그
+# 검출된 단상의 depth 측정을 지도 좌표로 환산할 때 쓰는 고정 기준점이다.
+PEDESTAL_CENTER_CM = (178.5, 110.0)
+PEDESTAL_BOX_CM = (150.0, 80.0, 207.0, 140.0)
+
+BORDER_CROP_BOX = (114, 80, 351, 321)
+
+# 문의 실제 도면상 위치. 2026-09-10 재확인: datasets/25300_gt.png의 파란 점(문
+# GT)을 색상 임계값으로 다시 추출한 결과 px=(1300.1, 535.8) -- 사용자가 "문
+# 위치가 너무 멀게 잡힘. gt 다시 확인하고 문을 그 위치로 고정"이라고 지시해
+# GT 점 자체를 authoritative 문 위치로 고정해서 쓴다.
+DOOR_PX = (1300.1, 535.8)
+
+# door/pedestal은 도면상 고정 위치가 이미 알려진 랜드마크라 class_finder의
+# depth 측정으로 위치를 다시 구하지 않는다(class_finder_service.py의
+# LOCALIZATION_CLASSES와 동일 목록이어야 함).
+LANDMARK_MAP_POSITIONS_CM = {
+    "door": None,  # px_to_cm(*DOOR_PX)로 런타임에 계산(아래 참고)
+    "pedestal": PEDESTAL_CENTER_CM,
+}
+
+# 목적지 정지 거리: 타겟 클래스별로 다르게 둔다(사용자 지시 "목적지는 타겟
+# 클래스가 문이라면 문 80cm 앞이 목적지로"). 다른 클래스는 아직 정해진 값이
+# 없어 기존 30cm를 기본값으로 유지.
+STANDOFF_CM_BY_CLASS = {"door": 80.0}
+STANDOFF_CM_DEFAULT = 30.0
+
+CALIBRATION_VALID_REL_DEPTH_MAX = 4.0
+
+
+def _send_to_device(payload: dict, tag: str, target_mac: str | None = None) -> None:
+    """class_finder_service.py와 동일한 자리 -- 지금은 저장만, 전송은 주석 처리."""
+    # TODO(추후 통합): target_mac만 채우면 활성화.
+    # import some_transport_provider
+    # some_transport_provider.send(target_mac=target_mac, tag=tag, payload=payload)
+    pass
+
+
+def px_to_cm(px_x, px_y):
+    x0, y0 = MAP_ROOM_TOPLEFT_PX
+    x1, y1 = MAP_ROOM_BOTTOMRIGHT_PX
+    w_cm, h_cm = ROOM_CM
+    return (px_x - x0) / (x1 - x0) * w_cm, (px_y - y0) / (y1 - y0) * h_cm
+
+
+def cm_to_map_px(cm_x, cm_y):
+    x0, y0 = MAP_ROOM_TOPLEFT_PX
+    x1, y1 = MAP_ROOM_BOTTOMRIGHT_PX
+    w_cm, h_cm = ROOM_CM
+    return x0 + (cm_x / w_cm) * (x1 - x0), y0 + (cm_y / h_cm) * (y1 - y0)
+
+
+def calibrate_depth_to_cm(rel_depth, bbox=None, image_w=464, image_h=400):
+    """사용자가 로봇으로 직접 거리를 재서 만든 보정식(docs/obsidian/ideas/unidepth_dual_yolo.py 원본)."""
+    if rel_depth is None or not np.isfinite(rel_depth):
+        return None
+    distance_cm = (
+        -4.61006769 * (rel_depth ** 3) + 28.91334586 * (rel_depth ** 2)
+        - 11.16168081 * rel_depth + 15.20770323
+    )
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        nx, ny = (cx - image_w / 2.0) / (image_w / 2.0), (cy - image_h / 2.0) / (image_h / 2.0)
+        r = min(1.0, max(0.0, (nx ** 2 + ny ** 2) ** 0.5))
+        if r < 0.55:
+            distance_cm *= 1.0 - 0.16 * (1.0 - r / 0.55)
+        if r > 0.42:
+            er = min(1.0, max(0.0, (r - 0.42) / 0.58))
+            distance_cm *= min(1.0 + 0.45 * (er ** 1.35), 1.35)
+    return max(0.0, float(distance_cm))
+
+
+def get_object_depth(depth, x1, y1, x2, y2):
+    w, h = int(x2 - x1), int(y2 - y1)
+    if w <= 0 or h <= 0:
+        return None
+    mx, my = int(w * 0.18), int(h * 0.18)
+    rx1, ry1, rx2, ry2 = int(x1 + mx), int(y1 + my), int(x2 - mx), int(y2 - my)
+    if rx2 <= rx1 or ry2 <= ry1 or (rx2 - rx1) * (ry2 - ry1) < 20:
+        rx1, ry1, rx2, ry2 = int(x1), int(y1), int(x2), int(y2)
+    roi = depth[ry1:ry2, rx1:rx2]
+    valid = roi[np.isfinite(roi) & (roi > 0)]
+    return float(np.percentile(valid, 40)) if valid.size else None
+
+
+def segment_intersects_box(p0, p1, box) -> bool:
+    x0, y0 = p0
+    x1, y1 = p1
+    bx1, by1, bx2, by2 = box
+    dx, dy = x1 - x0, y1 - y0
+    t_min, t_max = 0.0, 1.0
+    for p, q in [(-dx, x0 - bx1), (dx, bx2 - x0), (-dy, y0 - by1), (dy, by2 - y0)]:
+        if p == 0:
+            if q < 0:
+                return False
+        else:
+            t = q / p
+            if p < 0:
+                t_min = max(t_min, t)
+            else:
+                t_max = min(t_max, t)
+    return t_min <= t_max
+
+
+def _best_instance(det: dict) -> dict | None:
+    """class_finder_service.py가 2026-09-11부터 프레임당 여러 인스턴스를 허용하도록
+    바뀌었다("찾으려는 클래스는 프레임마다 하나가 아니라 여러개 존재할 수도
+    있어") -- det["instances"]는 이미 점수 내림차순으로 정렬돼 있으므로 첫 번째가
+    가장 강한 근거를 가진 인스턴스다. 위치 추정처럼 "이 프레임에서 이 클래스가
+    어디 있었나"를 대표값 하나로 알아야 하는 계산에는 이 함수로 대표 인스턴스를
+    골라 쓴다(box_xyxy/score 키로 이전 단일-인스턴스 시절과 동일한 형태를 유지)."""
+    instances = det.get("instances") or []
+    if not instances:
+        return None
+    best = instances[0]
+    return {"box_xyxy": best["box_xyxy"], "score": best["final_score"]}
+
+
+class NavigateToTargetService:
+    def __init__(self) -> None:
+        self.model: UniDepthV2 | None = None
+
+    def _run_unidepth(self, image_path: Path):
+        if self.model is None:
+            self.model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitb14").to("cuda").eval()
+        bgr_full = cv2.imread(str(image_path))
+        h0, w0 = bgr_full.shape[:2]
+        r = cv2.resize(bgr_full, INFER_SIZE, interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(r, cv2.COLOR_BGR2RGB)
+        t = torch.from_numpy(rgb.copy()).permute(2, 0, 1)
+        with torch.inference_mode():
+            out = self.model.infer(t, camera=None, normalize=True)
+        # 2026-09-11 사용자 지적("270도에서 문이 중앙보다 살짝 오른쪽, 315도에서
+        # 왼쪽이니 그 사이로 보간하면 되지 않나")에 따라 회전 보정에 카메라
+        # 내부파라미터(fx, cx)도 함께 쓴다 -- UniDepth가 camera=None으로 매
+        # 프레임마다 스스로 추정하는 값이며 INFER_SIZE 픽셀 좌표계 기준이다.
+        intr = out["intrinsics"][0].cpu().numpy()
+        fx, cx = float(intr[0, 0]), float(intr[0, 2])
+        return out["depth"][0, 0].cpu().numpy(), (w0, h0), (fx, cx)
+
+    def _measure_depth_cm(self, frame_name: str, box_border_cropped):
+        """class_finder가 검출한 box(border-cropped 좌표)를 원본 좌표로
+        되돌려 UniDepth로 depth를 측정하고 cm로 환산한다. door/pedestal/일반
+        클래스 모두 이 한 함수를 공유한다."""
+        depth, wh, _intr = self._run_unidepth(DATASET_ROT8_DIR / frame_name)
+        cl, ct = BORDER_CROP_BOX[0], BORDER_CROP_BOX[1]
+        box_orig = (box_border_cropped[0] + cl, box_border_cropped[1] + ct,
+                    box_border_cropped[2] + cl, box_border_cropped[3] + ct)
+        sx, sy = INFER_SIZE[0] / wh[0], INFER_SIZE[1] / wh[1]
+        box_infer = (box_orig[0] * sx, box_orig[1] * sy, box_orig[2] * sx, box_orig[3] * sy)
+        rel_depth = get_object_depth(depth, *box_infer)
+        distance_cm = calibrate_depth_to_cm(rel_depth, bbox=box_orig, image_w=wh[0], image_h=wh[1])
+        in_range = rel_depth is not None and rel_depth <= CALIBRATION_VALID_REL_DEPTH_MAX
+        return rel_depth, distance_cm, in_range
+
+    def _bearing_offset_deg(self, frame_name: str, box_border_cropped):
+        """탐지 박스가 그 프레임 안에서 화면 중앙으로부터 좌우로 얼마나
+        치우쳐 있는지를 pinhole 카메라 모델(atan2(x_offset, fx))로 각도로
+        환산한다.
+
+        **왜 필요한가(2026-09-11 사용자 지적으로 발견된 근본 원인)**: 회전
+        스캔은 8단계(45도 간격)만 있어서, "그 프레임에서 탐지된 물체가 화면
+        정중앙에 있다"고 가정해버리면 절대 방위각 계산이 rotation_deg 값
+        자체(0/45/90/.../315)에만 의존하게 되고, 그 결과 회전 지시각이 항상
+        45의 배수로만 나온다(수식으로 검증됨: turn = f(rotation_deg들) 형태로
+        환원되어 실제 물리적 위치·거리와 무관해짐 -- 로그 참고).
+        박스가 실제로는 화면 중앙에서 벗어나 있을 수 있으므로 그 벗어난
+        정도를 각도로 보정하면 45도 배수라는 인위적 제약이 없는 연속값을
+        얻을 수 있다. 박스가 화면 폭의 상당 부분을 채우는 경우(예: 초근접
+        촬영된 단상)는 중심점 자체가 신뢰할 수 없어 보정하지 않고 None을
+        반환한다."""
+        _depth, wh, (fx, cx) = self._run_unidepth(DATASET_ROT8_DIR / frame_name)
+        x1, y1, x2, y2 = box_border_cropped
+        box_w_frac = (x2 - x1) / (BORDER_CROP_BOX[2] - BORDER_CROP_BOX[0])
+        if box_w_frac > 0.6:
+            return None
+        cl = BORDER_CROP_BOX[0]
+        sx = INFER_SIZE[0] / wh[0]
+        center_x_infer = ((x1 + cl) + (x2 + cl)) / 2.0 * sx
+        return math.degrees(math.atan2(center_x_infer - cx, fx))
+
+    @staticmethod
+    def _frame_image_paths(class_name: str, frame_name: str) -> dict:
+        """class_finder_service.py가 원본/RPN/전체확정 오버레이는 프레임 폴더
+        (try1/<frame_stem>/)에, 클래스 전용 오버레이+크롭은 그 안의 클래스
+        폴더(try1/<frame_stem>/<class_name>/)에 저장하므로 여기서도 같은
+        경로를 만든다(2026-09-11 재구성)."""
+        stem = Path(frame_name).stem
+        frame_dir = RUN_DIR / stem
+        class_dir = frame_dir / class_name
+        return {
+            "original_image": str(frame_dir / "original.jpg"),
+            "rpn_overlay_image": str(frame_dir / "rpn_overlay.jpg"),
+            "confirmed_overlay_image": str(frame_dir / "confirmed_overlay.jpg"),
+            "target_overlay_image": str(class_dir / "target_overlay.jpg"),
+        }
+
+    # ── 1단계: 자기 위치 추정 -- 명령 종류와 무관하게 8프레임 후 항상 먼저 실행 ──
+    def localize(self, detections_by_class: dict[str, dict[float, dict]], target_class: str | None = None) -> dict:
+        out_dir = OUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        map_original = cv2.imread(str(MAP_PATH))
+        cv2.imwrite(str(out_dir / "map_original.jpg"), map_original)
+
+        door_map_cm = px_to_cm(*DOOR_PX)
+
+        # 단상은 이제 class_finder_service가 CLIP 파이프라인으로 실제 검출한
+        # 결과를 쓴다(더 이상 하드코딩 bbox 아님) -- found=True인 프레임 전부
+        # 사용해 depth를 각각 측정하고 평균낸다(1개든 여러 개든 대응).
+        pedestal_dets = detections_by_class.get("pedestal", {})
+        pedestal_measurements = []
+        for rot, det in sorted(pedestal_dets.items()):
+            best = _best_instance(det)
+            if best is None:
+                continue
+            rel_depth, distance_cm, in_range = self._measure_depth_cm(det["frame"], best["box_xyxy"])
+            pedestal_measurements.append({
+                "frame": det["frame"], "rotation_deg": rot, "clip_score": best["score"],
+                "rel_depth": rel_depth, "distance_cm": distance_cm, "in_valid_calibration_range": in_range,
+                "instance_count_this_frame": len(det.get("instances") or []),
+                **self._frame_image_paths("pedestal", det["frame"]),
+            })
+            print(f"[navigate] {det['frame']}(회전 {rot}도) 단상: rel_depth={rel_depth:.3f} -> {distance_cm:.1f}cm")
+
+        # door/pedestal뿐 아니라 이번 명령이 요청한 target_class(둘과 다르면)까지
+        # 포함해 8프레임 전체에서 어떤 클래스가 몇 도 프레임에서 검출됐는지 전부
+        # 남긴다(사용자 지시: "target class를 검출한 프레임의 각도는 몇인지도
+        # 작성되어야 함").
+        classes_to_report = list(dict.fromkeys(["door", "pedestal"] + ([target_class] if target_class else [])))
+        observations_by_class = {}
+        for class_name in classes_to_report:
+            dets = detections_by_class.get(class_name, {})
+            observations_by_class[class_name] = [
+                {"frame": det["frame"], "rotation_deg": rot, "instance_count": len(det["instances"]),
+                 "clip_score": det["instances"][0]["final_score"],
+                 **self._frame_image_paths(class_name, det["frame"])}
+                for rot, det in sorted(dets.items()) if det.get("found")
+            ]
+        # pedestal 관측에는 depth 측정까지 포함된 상세 버전을 쓴다.
+        observations_by_class["pedestal"] = pedestal_measurements
+
+        # 사용자 지시: "어떤 각도에서 찍은 프레임인지도. 45도씩 오른쪽으로 돈
+        # 이미지 8개임을 참고해서" -- door/pedestal은 매 프레임 항상 탐색하는
+        # LOCALIZATION_CLASSES라 그 검출 결과 dict의 key(rotation_deg)를 모으면
+        # 검출 성공 여부와 무관하게 8프레임 전체의 회전각 목록을 얻을 수 있다.
+        all_rotation_degs = sorted(set(detections_by_class.get("door", {}).keys())
+                                    | set(detections_by_class.get("pedestal", {}).keys()))
+        frame_by_rotation = {}
+        for dets in detections_by_class.values():
+            for rot, det in dets.items():
+                frame_by_rotation.setdefault(rot, det["frame"])
+        rotation_sequence = {
+            "description": "로봇이 오른쪽(시계) 방향으로 정확히 45도씩 회전하며 촬영한 8개 프레임"
+                            "(0/45/90/135/180/225/270/315도).",
+            "rotation_direction": "clockwise (오른쪽)",
+            "nominal_step_deg": 45.0,
+            "frames": [{"frame": frame_by_rotation[rot], "rotation_deg": rot} for rot in all_rotation_degs],
+        }
+
+        localized = len(pedestal_measurements) > 0
+        result = {"ok": localized}
+        if not localized:
+            result["reason"] = "pedestal이 어느 프레임에서도 검출되지 않아 로봇 위치를 추정할 수 없음"
+            print(f"[navigate] 위치 추정 실패: {result['reason']}")
+            with open(out_dir / "localization_evidence.json", "w", encoding="utf-8") as f:
+                json.dump({"ok": False, "reason": result["reason"], "rotation_sequence": rotation_sequence,
+                           "observations": observations_by_class}, f,
+                          ensure_ascii=False, indent=2)
+            return result
+
+        pedestal_distance_avg_cm = sum(m["distance_cm"] for m in pedestal_measurements) / len(pedestal_measurements)
+        pedestal_bearing_deg = sum(m["rotation_deg"] for m in pedestal_measurements) / len(pedestal_measurements)
+
+        # 단상 표면 지점(ray-box exit point) + 단상->문 방향으로 실측 거리만큼
+        # 나아간 지점을 로봇 위치로 본다(이 시연 환경의 기하 가정 -- 모듈
+        # docstring "정직한 한계" 참고).
+        dx = door_map_cm[0] - PEDESTAL_CENTER_CM[0]
+        dy = door_map_cm[1] - PEDESTAL_CENTER_CM[1]
+        length = math.hypot(dx, dy)
+        ux, uy = dx / length, dy / length
+
+        px1, py1, px2, py2 = PEDESTAL_BOX_CM
+        cx, cy = PEDESTAL_CENTER_CM
+        t_x = ((px2 if ux > 0 else px1) - cx) / ux if ux != 0 else float("inf")
+        t_y = ((py2 if uy > 0 else py1) - cy) / uy if uy != 0 else float("inf")
+        t_exit = min(t_x, t_y)
+        pedestal_surface_point_cm = (cx + t_exit * ux, cy + t_exit * uy)
+        robot_position_cm = (
+            pedestal_surface_point_cm[0] + pedestal_distance_avg_cm * ux,
+            pedestal_surface_point_cm[1] + pedestal_distance_avg_cm * uy,
+        )
+
+        # 회전 프레임 각도 -> 지도 방위각 오프셋: 문 자신의 관측각으로 구하면
+        # 순환 논리가 되므로(실측으로 확인) 단상 관측각으로 교차검증한다.
+        map_bearing_to_pedestal_deg = math.degrees(math.atan2(
+            pedestal_surface_point_cm[1] - robot_position_cm[1], pedestal_surface_point_cm[0] - robot_position_cm[0]
+        )) % 360.0
+        current_heading_map_deg = (map_bearing_to_pedestal_deg - pedestal_bearing_deg) % 360.0
+
+        # map_overlay: 로봇 위치 + 단상/문까지 거리 단서
+        overlay = map_original.copy()
+        pos_px = cm_to_map_px(*robot_position_cm)
+        ped_px = cm_to_map_px(*pedestal_surface_point_cm)
+        door_px_map = cm_to_map_px(*door_map_cm)
+        dist_to_door = math.hypot(robot_position_cm[0] - door_map_cm[0], robot_position_cm[1] - door_map_cm[1])
+        cv2.line(overlay, (int(pos_px[0]), int(pos_px[1])), (int(ped_px[0]), int(ped_px[1])), (0, 128, 0), 2)
+        cv2.line(overlay, (int(pos_px[0]), int(pos_px[1])), (int(door_px_map[0]), int(door_px_map[1])), (255, 0, 0), 2)
+        ped_mid = ((pos_px[0] + ped_px[0]) / 2, (pos_px[1] + ped_px[1]) / 2)
+        door_mid = ((pos_px[0] + door_px_map[0]) / 2, (pos_px[1] + door_px_map[1]) / 2)
+        cv2.putText(overlay, f"{pedestal_distance_avg_cm:.1f} cm", (int(ped_mid[0]) - 55, int(ped_mid[1]) - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 128, 0), 3)
+        cv2.putText(overlay, f"{dist_to_door:.1f} cm", (int(door_mid[0]) - 75, int(door_mid[1]) - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 0), 3)
+        cv2.circle(overlay, (int(pos_px[0]), int(pos_px[1])), 8, (0, 0, 255), -1)
+        cv2.imwrite(str(out_dir / "map_overlay.jpg"), overlay)
+
+        # rotation_deg(프레임 촬영 시점의 로봇 회전각)와 구분해, 각 관측이 맵
+        # 좌표계 기준으로 어느 절대 방위각에 있었는지도 계산한다(사용자 지시:
+        # "맵 중심 처음 로봇이 돌기 전 기준으로 어느 절대 각도에 검출한
+        # 타겟이 있는지 계산"). 수식은 순수 식으로만 쓰고 한국어 설명은 별도
+        # note 필드로 분리한다.
+        absolute_bearing_formula = "absolute_bearing_deg = (rotation_deg + current_heading_map_deg) mod 360"
+        for class_name, obs_list in observations_by_class.items():
+            for o in obs_list:
+                o["absolute_bearing_deg"] = round((o["rotation_deg"] + current_heading_map_deg) % 360.0, 1)
+                o["absolute_bearing_formula"] = absolute_bearing_formula
+
+        pedestal_distance_avg_formula = {
+            "formula": "pedestal_distance_avg_cm = mean(distance_cm_i for i in pedestal_observations)",
+            "substituted": f"mean({', '.join(f'{m['distance_cm']:.1f}' for m in pedestal_measurements)}) "
+                           f"= {pedestal_distance_avg_cm:.1f}",
+        }
+        pedestal_bearing_formula = {
+            "formula": "pedestal_bearing_rotation_frame_deg = mean(rotation_deg_i for i in pedestal_observations)",
+            "substituted": f"mean({', '.join(f'{m['rotation_deg']:.1f}' for m in pedestal_measurements)}) "
+                           f"= {pedestal_bearing_deg:.1f}",
+        }
+
+        localization_evidence = {
+            "ok": True,
+            "rotation_sequence": rotation_sequence,
+            "observations": observations_by_class,
+            "pedestal_distance_avg_cm": round(pedestal_distance_avg_cm, 1),
+            "pedestal_distance_avg_formula": pedestal_distance_avg_formula,
+            "pedestal_bearing_rotation_frame_deg": pedestal_bearing_deg,
+            "pedestal_bearing_formula": pedestal_bearing_formula,
+            "pedestal_surface_point_cm": [round(v, 1) for v in pedestal_surface_point_cm],
+            "door_position_cm_fixed_from_gt": [round(v, 1) for v in door_map_cm],
+            "robot_position_cm": [round(v, 1) for v in robot_position_cm],
+            "map_bearing_to_pedestal_deg": round(map_bearing_to_pedestal_deg, 1),
+            "current_heading_map_deg": round(current_heading_map_deg, 1),
+            "rotation_calculation": {
+                "step1_map_bearing_to_pedestal": {
+                    "formula": "atan2(pedestal_surface_point_cm.y - robot_position_cm.y, "
+                               "pedestal_surface_point_cm.x - robot_position_cm.x) mod 360",
+                    "substituted": f"atan2({pedestal_surface_point_cm[1]:.1f} - {robot_position_cm[1]:.1f}, "
+                                   f"{pedestal_surface_point_cm[0]:.1f} - {robot_position_cm[0]:.1f}) mod 360 "
+                                   f"= {map_bearing_to_pedestal_deg:.1f}",
+                },
+                "step2_pedestal_bearing_rotation_frame": pedestal_bearing_formula,
+                "step3_current_heading_map_deg": {
+                    "formula": "current_heading_map_deg = (map_bearing_to_pedestal_deg - "
+                               "pedestal_bearing_rotation_frame_deg) mod 360",
+                    "substituted": f"({map_bearing_to_pedestal_deg:.1f} - {pedestal_bearing_deg:.1f}) mod 360 "
+                                   f"= {current_heading_map_deg:.1f}",
+                    "note": "문 자신의 관측각으로 오프셋을 구하면 순환 논리가 되므로(실측으로 확인됨) "
+                            "단상 관측각으로 교차검증한다.",
+                },
+                "step4_absolute_bearing_per_observation": {"formula": absolute_bearing_formula},
+            },
+        }
+        with open(out_dir / "localization_evidence.json", "w", encoding="utf-8") as f:
+            json.dump(localization_evidence, f, ensure_ascii=False, indent=2)
+        _send_to_device(localization_evidence, tag="localization")  # 주석 처리된 실제 전송, 지금은 저장만
+
+        print(f"[navigate] 로봇 위치(cm): {[round(v,1) for v in robot_position_cm]}, "
+              f"현재 방위각 오프셋: {current_heading_map_deg:.1f}도")
+
+        result.update({
+            "robot_position_cm": robot_position_cm,
+            "current_heading_map_deg": current_heading_map_deg,
+            "pedestal_surface_point_cm": pedestal_surface_point_cm,
+            "door_map_cm": door_map_cm,
+            "map_original": map_original,
+        })
+        return result
+
+    # ── 2단계: 지정 클래스의 지도 위치 결정 ──────────────────────────────
+    def resolve_target_position(self, target_class: str, detections_by_class: dict, loc: dict) -> dict:
+        """target_class가 door/pedestal이면 도면상 고정 위치를 쓰고, 그 외
+        일반 클래스면 검출된 프레임의 회전각+depth를 로봇 위치/방위각 오프셋과
+        결합해 지도 좌표를 추정한다. 못 구하면 position=None + reason으로
+        정직하게 보고한다(임의 추정 금지)."""
+        if target_class == "door":
+            return {"target_class": target_class, "position_cm": loc["door_map_cm"], "source": "gt_fixed",
+                    "detail": "datasets/25300_gt.png GT 점으로 고정된 도면상 위치"}
+        if target_class == "pedestal":
+            return {"target_class": target_class, "position_cm": PEDESTAL_CENTER_CM, "source": "floorplan_fixed",
+                    "detail": "실측 확정된 도면상 고정 위치(PEDESTAL_CENTER_CM)"}
+
+        dets = detections_by_class.get(target_class, {})
+        found = [(rot, det) for rot, det in sorted(dets.items()) if det.get("found")]
+        if not found:
+            return {"target_class": target_class, "position_cm": None, "source": "not_found",
+                    "detail": f"8프레임 중 '{target_class}'가 검출된 프레임이 없음"}
+
+        rot, det = found[0]
+        best = _best_instance(det)
+        rel_depth, distance_cm, in_range = self._measure_depth_cm(det["frame"], best["box_xyxy"])
+        if not in_range:
+            return {"target_class": target_class, "position_cm": None, "source": "depth_out_of_range",
+                    "detail": f"{det['frame']}(회전 {rot}도)에서 검출됐으나 depth 추정치(rel_depth={rel_depth})가 "
+                              f"보정식 유효범위(<= {CALIBRATION_VALID_REL_DEPTH_MAX})를 벗어남 -- 위치 추정 불가",
+                    "frame": det["frame"], "rotation_deg": rot, "rel_depth": rel_depth}
+
+        bearing_deg = (rot + loc["current_heading_map_deg"]) % 360.0
+        rx, ry = loc["robot_position_cm"]
+        position_cm = (rx + distance_cm * math.cos(math.radians(bearing_deg)),
+                       ry + distance_cm * math.sin(math.radians(bearing_deg)))
+        return {
+            "target_class": target_class, "position_cm": position_cm, "source": "bearing_and_depth",
+            "detail": f"{det['frame']}(회전 {rot}도)에서 검출, depth={distance_cm:.1f}cm, "
+                      f"지도 방위각={bearing_deg:.1f}도(=회전 {rot}도 + 오프셋 {loc['current_heading_map_deg']:.1f}도)",
+            "frame": det["frame"], "rotation_deg": rot, "rel_depth": rel_depth, "distance_cm": distance_cm,
+            "bearing_deg": bearing_deg,
+        }
+
+    def save_target_observation_summary(self, target_class: str, detections_by_class: dict, loc: dict) -> None:
+        """사용자 지시: "target이 몇도 회전한 어느 프레임에 어느 각도 어느
+        거리에 있었는지 정보를 담은 json 생성". try1/navigation/에 8프레임
+        전체를 훑어 저장한다(2026-09-11: 경로+위치추정 산출물과 함께 try1
+        밑에 각자 폴더로) -- go-to-class 명령 여부와 무관하게, 위치 추정(loc)이
+        성공했으면 항상 호출 가능."""
+        out_dir = NAV_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        dets = detections_by_class.get(target_class, {})
+        frames = []
+        for rot, det in sorted(dets.items()):
+            instances = det.get("instances") or []
+            entry = {"frame": det["frame"], "rotation_deg": rot, "found": det.get("found", False),
+                      "instance_count": len(instances)}
+            if instances and loc.get("ok"):
+                # 2026-09-11: 프레임당 여러 인스턴스를 허용하므로(예: person 2명)
+                # 각 인스턴스마다 절대 방위각·거리를 따로 계산해 리스트로 남긴다.
+                bearing_deg = round((rot + loc["current_heading_map_deg"]) % 360.0, 1)
+                inst_entries = []
+                for inst in instances:
+                    rel_depth, distance_cm, in_range = self._measure_depth_cm(det["frame"], inst["box_xyxy"])
+                    inst_entries.append({
+                        "box_xyxy": inst["box_xyxy"], "final_score": inst["final_score"],
+                        "absolute_bearing_deg": bearing_deg, "rel_depth": rel_depth,
+                        "distance_cm": round(distance_cm, 1) if distance_cm is not None else None,
+                        "in_valid_calibration_range": in_range,
+                    })
+                entry["instances"] = inst_entries
+            frames.append(entry)
+
+        summary = {
+            "target_class": target_class,
+            "localization_ok": loc.get("ok", False),
+            "absolute_bearing_formula": "absolute_bearing_deg = (rotation_deg + current_heading_map_deg) mod 360",
+            "distance_formula": "distance_cm = calibrate_depth_to_cm(rel_depth, bbox)",
+            "distance_note": "이 distance_cm은 target_class 자신의 depth 추정치다 -- door/pedestal처럼 "
+                              "도면상 고정 위치가 따로 있는 랜드마크는 실제 경로 계산에는 이 값 대신 고정 "
+                              "위치까지의 거리를 쓴다(해당 클래스 디렉터리의 evidence.json 참고).",
+            "frames": frames,
+        }
+        with open(out_dir / "target_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        _send_to_device(summary, tag=f"{target_class}:summary")  # 주석 처리된 실제 전송, 지금은 저장만
+        print(f"[navigate] Saved {out_dir / 'target_summary.json'}")
+
+    # ── 3단계: go-to-class -- 위치가 나오면 회전각+최소경로 산출 ──────────
+    def on_go_to_class_command(self, target_class: str, detections_by_class: dict, loc: dict) -> None:
+        # 2026-09-11 사용자 지시: 경로(path) 산출물은 try1/navigation/에 독립
+        # 폴더로 모은다(localization/과 대칭 구조).
+        out_dir = NAV_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if not loc.get("ok"):
+            print(f"[navigate] go_to_class({target_class}) 처리 불가: 자기 위치 추정 실패 -- {loc.get('reason')}")
+            with open(out_dir / "evidence.json", "w", encoding="utf-8") as f:
+                json.dump({"target_class": target_class, "ok": False,
+                           "reason": f"localization failed: {loc.get('reason')}"}, f, ensure_ascii=False, indent=2)
+            return
+
+        target = self.resolve_target_position(target_class, detections_by_class, loc)
+        if target["position_cm"] is None:
+            print(f"[navigate] go_to_class({target_class}) 처리 불가: {target['detail']}")
+            with open(out_dir / "evidence.json", "w", encoding="utf-8") as f:
+                json.dump({"target_class": target_class, "ok": False, "target_resolution": target},
+                          f, ensure_ascii=False, indent=2)
+            return
+
+        robot_position_cm = loc["robot_position_cm"]
+        current_heading_map_deg = loc["current_heading_map_deg"]
+        target_position_cm = target["position_cm"]
+
+        dx = target_position_cm[0] - robot_position_cm[0]
+        dy = target_position_cm[1] - robot_position_cm[1]
+        distance_to_target_cm = math.hypot(dx, dy)
+        ux, uy = (dx / distance_to_target_cm, dy / distance_to_target_cm) if distance_to_target_cm > 0 else (1.0, 0.0)
+
+        map_bearing_to_target_deg = math.degrees(math.atan2(dy, dx)) % 360.0
+        turn_amount_signed = (map_bearing_to_target_deg - current_heading_map_deg + 180.0) % 360.0 - 180.0
+
+        # 2026-09-11 사용자 지적으로 발견된 근본 원인 수정: door/pedestal처럼
+        # 도면상 위치가 GT로 고정된 랜드마크는 원래 map_bearing_to_target_deg
+        # (로봇 추정위치 -> 고정위치)와 current_heading_map_deg(단상 관측으로
+        # 교차검증한 오프셋)를 빼서 회전각을 구했는데, 이 둘 다 결국
+        # rotation_deg(0/45/.../315 8단계뿐)에만 의존하게 되어 있어 회전
+        # 지시각이 항상 45의 배수로만 나오는 구조적 결함이 있었다(수식 전개로
+        # 확인: turn = rotation_deg들의 선형결합 -> 45의 배수). 이 랜드마크
+        # 자신이 검출된 프레임(들)의 박스가 화면 중앙에서 얼마나 벗어났는지를
+        # _bearing_offset_deg로 각도 보정해 얻은 연속값 회전각이 있으면 그것을
+        # 우선 사용한다 -- door/pedestal은 도면상 위치가 이미 알려져 있으므로
+        # "그 위치를 보려면 시작 방향 기준 몇 도를 돌아야 하는가"를 그 자신의
+        # 관측만으로 직접 구할 수 있고, map 좌표를 거칠 필요가 없다(오히려
+        # map 좌표 경로는 로봇 위치 자체가 이 랜드마크 위치에 종속적으로
+        # 유도된 값이라 부정확).
+        bearing_refinement = None
+        if target_class in LANDMARK_MAP_POSITIONS_CM:
+            dets_own = detections_by_class.get(target_class, {})
+            found_own = [(rot, det) for rot, det in sorted(dets_own.items()) if det.get("found")]
+            refined_rotations = []
+            per_frame = []
+            for rot, det in found_own:
+                best = _best_instance(det)
+                offset_deg = self._bearing_offset_deg(det["frame"], best["box_xyxy"])
+                entry = {"frame": det["frame"], "rotation_deg": rot, "pixel_offset_angle_deg":
+                         round(offset_deg, 2) if offset_deg is not None else None}
+                if offset_deg is not None:
+                    refined = (rot + offset_deg) % 360.0
+                    refined_rotations.append(refined)
+                    entry["refined_rotation_deg"] = round(refined, 2)
+                else:
+                    entry["skipped_reason"] = "박스가 프레임 폭의 60% 이상을 채워 중심점을 신뢰할 수 없음"
+                per_frame.append(entry)
+            if refined_rotations:
+                # 원형 평균(circular mean) -- 값들이 0/360 경계를 넘나들 수 있으므로
+                # 단순 산술평균 대신 sin/cos 평균으로 wrap-around를 피한다.
+                sin_sum = sum(math.sin(math.radians(r)) for r in refined_rotations)
+                cos_sum = sum(math.cos(math.radians(r)) for r in refined_rotations)
+                refined_target_rotation_deg = math.degrees(math.atan2(sin_sum, cos_sum)) % 360.0
+                turn_amount_signed = (refined_target_rotation_deg + 180.0) % 360.0 - 180.0
+                bearing_refinement = {
+                    "method": "각 관측 프레임에서 검출 박스의 화면 중심 대비 픽셀 오프셋을 "
+                              "UniDepth가 그 프레임에서 추정한 카메라 내부파라미터(fx, cx)로 "
+                              "각도 환산해 rotation_deg(45도 단위)에 더한 연속값을 구하고, "
+                              "복수 관측이면 원형평균(circular mean)한다.",
+                    "formula": "refined_rotation_i = (rotation_deg_i + degrees(atan2(box_center_x_infer - cx, fx))) mod 360; "
+                               "refined_target_rotation_deg = degrees(atan2(mean(sin(refined_rotation_i)), mean(cos(refined_rotation_i))))",
+                    "per_frame": per_frame,
+                    "refined_target_rotation_deg": round(refined_target_rotation_deg, 2),
+                    "spread_deg": round(max(refined_rotations) - min(refined_rotations), 2) if len(refined_rotations) > 1 else None,
+                    "note": "회전 지시각이 항상 45의 배수로만 나오던 문제(로봇/단상/문 위치가 "
+                            "map 좌표상 서로 종속적으로 유도되어 rotation_deg 8단계에만 의존하던 "
+                            "구조적 결함)를 이 랜드마크 자신의 관측만으로 직접 구한 연속값으로 대체해 해결.",
+                }
+
+        turn_direction = "왼쪽(반시계)" if turn_amount_signed < 0 else "오른쪽(시계)"
+        turn_amount_deg = abs(turn_amount_signed)
+
+        standoff_cm = STANDOFF_CM_BY_CLASS.get(target_class, STANDOFF_CM_DEFAULT)
+        forward_distance_cm = distance_to_target_cm - standoff_cm
+        goal_cm = (robot_position_cm[0] + forward_distance_cm * ux, robot_position_cm[1] + forward_distance_cm * uy)
+        pedestal_clear = not segment_intersects_box(robot_position_cm, goal_cm, PEDESTAL_BOX_CM)
+
+        map_original = loc.get("map_original")
+        if map_original is None:
+            map_original = cv2.imread(str(MAP_PATH))
+        path_overlay = map_original.copy()
+        p0 = cm_to_map_px(*robot_position_cm)
+        p1 = cm_to_map_px(*goal_cm)
+        cv2.arrowedLine(path_overlay, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])), (0, 0, 255), 3, tipLength=0.04)
+        cv2.circle(path_overlay, (int(p0[0]), int(p0[1])), 8, (0, 0, 255), -1)
+        cv2.drawMarker(path_overlay, (int(p1[0]), int(p1[1])), (0, 0, 255),
+                        markerType=cv2.MARKER_TILTED_CROSS, markerSize=18, thickness=3)
+        mid_px = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+        cv2.putText(path_overlay, f"{forward_distance_cm:.1f} cm", (int(mid_px[0]) - 90, int(mid_px[1]) - 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 3)
+        ref_end = (p0[0] + 130.0 * math.cos(math.radians(current_heading_map_deg)),
+                   p0[1] + 130.0 * math.sin(math.radians(current_heading_map_deg)))
+        cv2.arrowedLine(path_overlay, (int(p0[0]), int(p0[1])), (int(ref_end[0]), int(ref_end[1])),
+                         (120, 120, 120), 2, tipLength=0.1)
+        # bearing_refinement가 적용된 경우 turn_amount_deg가 더 이상
+        # map_bearing_to_target_deg - current_heading_map_deg와 정확히 일치하지
+        # 않으므로(랜드마크 자신의 관측으로 직접 재보정했기 때문), 호(arc)
+        # 그림도 실제로 표시되는 각도(turn_amount_deg)와 일치하도록 도착
+        # 방위각을 current_heading_map_deg + turn_amount_signed로 다시 잡는다.
+        arc_target_bearing_deg = (current_heading_map_deg + turn_amount_signed) % 360.0 \
+            if bearing_refinement is not None else map_bearing_to_target_deg
+        cv2.ellipse(path_overlay, (int(p0[0]), int(p0[1])), (70, 70), 0,
+                    arc_target_bearing_deg, current_heading_map_deg, (0, 0, 255), 2)
+        cv2.putText(path_overlay, f"{turn_amount_deg:.1f} deg", (int(p0[0]) - 30, int(p0[1]) + 130),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
+        cv2.imwrite(str(out_dir / "path_overlay.jpg"), path_overlay)
+
+        path_calculation = {
+            "step1_map_bearing_to_target": {
+                "formula": "atan2(target_position_cm.y - robot_position_cm.y, "
+                           "target_position_cm.x - robot_position_cm.x) mod 360",
+                "substituted": f"atan2({dy:.1f}, {dx:.1f}) mod 360 = {map_bearing_to_target_deg:.1f}",
+            },
+            "step2_turn_amount": (
+                {
+                    "formula": "turn_amount_deg = |((refined_target_rotation_deg + 180) mod 360) - 180| "
+                               "(bearing_refinement 참고 -- 랜드마크 자신의 관측을 각도 보정해 직접 구함)",
+                    "substituted": f"|(({bearing_refinement['refined_target_rotation_deg']:.1f} + 180) mod 360) - 180| "
+                                   f"= {turn_amount_deg:.1f} ({turn_direction})",
+                } if bearing_refinement is not None else {
+                    "formula": "turn_amount_deg = |((map_bearing_to_target_deg - current_heading_map_deg + 180) mod 360) - 180|",
+                    "substituted": f"|(({map_bearing_to_target_deg:.1f} - {current_heading_map_deg:.1f} + 180) mod 360) - 180| "
+                                   f"= {turn_amount_deg:.1f} ({turn_direction})",
+                }
+            ),
+            "step3_distance_to_target": {
+                "formula": "distance_to_target_cm = hypot(target_position_cm.x - robot_position_cm.x, "
+                           "target_position_cm.y - robot_position_cm.y)",
+                "substituted": f"hypot({dx:.1f}, {dy:.1f}) = {distance_to_target_cm:.1f}",
+            },
+            "step4_forward_distance": {
+                "formula": "forward_distance_cm = distance_to_target_cm - standoff_cm(target_class)",
+                "substituted": f"{distance_to_target_cm:.1f} - {standoff_cm:.1f} = {forward_distance_cm:.1f}",
+            },
+            "step5_goal_position": {
+                "formula": "goal_cm = robot_position_cm + forward_distance_cm * unit_vector(robot->target)",
+                "substituted": f"({robot_position_cm[0]:.1f}, {robot_position_cm[1]:.1f}) + {forward_distance_cm:.1f} * "
+                               f"({ux:.3f}, {uy:.3f}) = ({goal_cm[0]:.1f}, {goal_cm[1]:.1f})",
+            },
+        }
+        nav_evidence = {
+            "target_class": target_class,
+            "ok": True,
+            "target_resolution": target,
+            "robot_position_cm": [round(v, 1) for v in robot_position_cm],
+            "current_heading_map_deg": round(current_heading_map_deg, 1),
+            "target_position_cm": [round(v, 1) for v in target_position_cm],
+            "map_bearing_to_target_deg": round(map_bearing_to_target_deg, 1),
+            "turn_instruction": f"{turn_direction}으로 {turn_amount_deg:.1f}도 회전",
+            "distance_to_target_cm": round(distance_to_target_cm, 1),
+            "standoff_cm": standoff_cm,
+            "forward_distance_cm": round(forward_distance_cm, 1),
+            "goal_cm": [round(v, 1) for v in goal_cm],
+            "path_calculation": path_calculation,
+            "bearing_refinement": bearing_refinement,
+            "pedestal_obstacle_clear": pedestal_clear,
+        }
+        with open(out_dir / "evidence.json", "w", encoding="utf-8") as f:
+            json.dump(nav_evidence, f, ensure_ascii=False, indent=2)
+        _send_to_device(nav_evidence, tag=f"{target_class}:navigate")  # 주석 처리된 실제 전송, 지금은 저장만
+
+        print(f"[navigate] 지시: {turn_direction}으로 {turn_amount_deg:.1f}도 회전 -> "
+              f"{forward_distance_cm:.1f}cm 직진 ({target_class} {standoff_cm:.0f}cm 앞 정지)")
+        print(f"[navigate] Saved to {out_dir}: path_overlay.jpg, evidence.json")
