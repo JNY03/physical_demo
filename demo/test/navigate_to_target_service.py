@@ -88,6 +88,12 @@ PEDESTAL_CENTER_CM = (178.5, 110.0)
 PEDESTAL_BOX_CM = (150.0, 80.0, 207.0, 140.0)
 
 BORDER_CROP_BOX = (114, 80, 351, 321)
+# class_finder_service.py와 동일한 값 -- 원본이 정확히 이 크기일 때만 테두리를
+# 잘라낸다. 2026-09-14 MQTT 실시간 수신 통합으로 추가: 로봇 카메라 프레임은
+# 해상도가 다를 수 있는데, 그때 class_finder는 자르지 않으므로 검출 박스를 원본
+# 좌표로 되돌릴 때도 같은 조건에서만 오프셋을 더해야 한다(무조건 더하면 박스가
+# 통째로 어긋나 depth와 방위각이 전부 틀어진다).
+BORDER_CROP_SOURCE_SIZE = (464, 400)
 
 # 문의 실제 도면상 위치. 2026-09-10 재확인: datasets/25300_gt.png의 파란 점(문
 # GT)을 색상 임계값으로 다시 추출한 결과 px=(1300.1, 535.8) -- 사용자가 "문
@@ -108,6 +114,10 @@ LANDMARK_MAP_POSITIONS_CM = {
 # 없어 기존 30cm를 기본값으로 유지.
 STANDOFF_CM_BY_CLASS = {"door": 80.0}
 STANDOFF_CM_DEFAULT = 30.0
+
+# 로봇 `move_forward { distance_m }` 이 받는 범위(detection-protocol_0914.md §4).
+ROBOT_FORWARD_M_MIN = 0.05
+ROBOT_FORWARD_M_MAX = 10.0
 
 CALIBRATION_VALID_REL_DEPTH_MAX = 4.0
 
@@ -187,6 +197,42 @@ def segment_intersects_box(p0, p1, box) -> bool:
     return t_min <= t_max
 
 
+# 프레임 원본이 있는 폴더. 기본은 데이터셋 재생 경로 그대로이고, 로봇 실시간
+# 수신(mqtt_stream_receiver.py)이 시작할 때 자기가 프레임을 받아 두는 폴더로
+# 바꿔 준다. **추측하지 않고 명시로 두는 이유**: 실시간 프레임 이름이
+# frame_000001.jpg처럼 데이터셋 파일명과 겹칠 수 있어서, 폴더를 자동으로 고르면
+# 엉뚱한 이미지의 depth를 재게 된다.
+FRAME_SOURCE_DIR: Path | None = None
+
+
+def _resolve_frame_path(frame_name: str) -> Path:
+    """depth를 다시 재야 하는 프레임의 **자르지 않은 원본** 경로.
+
+    2026-09-14 MQTT 실시간 수신 통합으로 추가: 예전에는 DATASET_ROT8_DIR에서만
+    찾아서 로봇이 보낸 프레임을 열 수 없었다. class_finder_service가 저장해 둔
+    try1/<stem>/original.jpg를 마지막 대비책으로 두되 **먼저 쓰지는 않는다** --
+    그건 JPEG 재인코딩본이라 원본과 픽셀이 미세하게 달라 depth 값이 흔들린다."""
+    for base in (FRAME_SOURCE_DIR, DATASET_ROT8_DIR):
+        if base is None:
+            continue
+        candidate = base / frame_name
+        if candidate.is_file():
+            return candidate
+    saved_original = RUN_DIR / Path(frame_name).stem / "original.jpg"
+    if saved_original.is_file():
+        return saved_original
+    return DATASET_ROT8_DIR / frame_name
+
+
+def _border_crop_offset(frame_wh):
+    """(cl, ct, 검출이 이뤄진 이미지의 가로폭) -- class_finder_service.on_frame()의
+    자르기 조건과 반드시 같아야 한다(위 BORDER_CROP_SOURCE_SIZE 주석 참고)."""
+    if tuple(frame_wh) == BORDER_CROP_SOURCE_SIZE:
+        return float(BORDER_CROP_BOX[0]), float(BORDER_CROP_BOX[1]), \
+            float(BORDER_CROP_BOX[2] - BORDER_CROP_BOX[0])
+    return 0.0, 0.0, float(frame_wh[0])
+
+
 def _best_instance(det: dict) -> dict | None:
     """class_finder_service.py가 2026-09-11부터 프레임당 여러 인스턴스를 허용하도록
     바뀌었다("찾으려는 클래스는 프레임마다 하나가 아니라 여러개 존재할 수도
@@ -204,8 +250,16 @@ def _best_instance(det: dict) -> dict | None:
 class NavigateToTargetService:
     def __init__(self) -> None:
         self.model: UniDepthV2 | None = None
+        # 2026-09-14 추가: 같은 프레임에 대해 localize() -> 관측요약 -> 경로계산이
+        # 각각 UniDepth를 다시 돌리고 있었다(프레임당 3회 이상). 관제 웹이 1.5초
+        # 주기로 폴링하는 실시간 연동에서는 이 중복이 그대로 지연이 되므로
+        # 경로 단위로 결과를 재사용한다(320x240 depth 1장 ~300KB, 8프레임이면 3MB 미만).
+        self._depth_cache: dict[str, tuple] = {}
 
     def _run_unidepth(self, image_path: Path):
+        cached = self._depth_cache.get(str(image_path))
+        if cached is not None:
+            return cached
         if self.model is None:
             self.model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitb14").to("cuda").eval()
         bgr_full = cv2.imread(str(image_path))
@@ -221,14 +275,16 @@ class NavigateToTargetService:
         # 프레임마다 스스로 추정하는 값이며 INFER_SIZE 픽셀 좌표계 기준이다.
         intr = out["intrinsics"][0].cpu().numpy()
         fx, cx = float(intr[0, 0]), float(intr[0, 2])
-        return out["depth"][0, 0].cpu().numpy(), (w0, h0), (fx, cx)
+        result = (out["depth"][0, 0].cpu().numpy(), (w0, h0), (fx, cx))
+        self._depth_cache[str(image_path)] = result
+        return result
 
     def _measure_depth_cm(self, frame_name: str, box_border_cropped):
         """class_finder가 검출한 box(border-cropped 좌표)를 원본 좌표로
         되돌려 UniDepth로 depth를 측정하고 cm로 환산한다. door/pedestal/일반
         클래스 모두 이 한 함수를 공유한다."""
-        depth, wh, _intr = self._run_unidepth(DATASET_ROT8_DIR / frame_name)
-        cl, ct = BORDER_CROP_BOX[0], BORDER_CROP_BOX[1]
+        depth, wh, _intr = self._run_unidepth(_resolve_frame_path(frame_name))
+        cl, ct, _crop_w = _border_crop_offset(wh)
         box_orig = (box_border_cropped[0] + cl, box_border_cropped[1] + ct,
                     box_border_cropped[2] + cl, box_border_cropped[3] + ct)
         sx, sy = INFER_SIZE[0] / wh[0], INFER_SIZE[1] / wh[1]
@@ -254,12 +310,12 @@ class NavigateToTargetService:
         얻을 수 있다. 박스가 화면 폭의 상당 부분을 채우는 경우(예: 초근접
         촬영된 단상)는 중심점 자체가 신뢰할 수 없어 보정하지 않고 None을
         반환한다."""
-        _depth, wh, (fx, cx) = self._run_unidepth(DATASET_ROT8_DIR / frame_name)
+        _depth, wh, (fx, cx) = self._run_unidepth(_resolve_frame_path(frame_name))
         x1, y1, x2, y2 = box_border_cropped
-        box_w_frac = (x2 - x1) / (BORDER_CROP_BOX[2] - BORDER_CROP_BOX[0])
+        cl, _ct, crop_w = _border_crop_offset(wh)
+        box_w_frac = (x2 - x1) / crop_w
         if box_w_frac > 0.6:
             return None
-        cl = BORDER_CROP_BOX[0]
         sx = INFER_SIZE[0] / wh[0]
         center_x_infer = ((x1 + cl) + (x2 + cl)) / 2.0 * sx
         return math.degrees(math.atan2(center_x_infer - cx, fx))
@@ -557,6 +613,65 @@ class NavigateToTargetService:
         _send_to_device(summary, tag=f"{target_class}:summary")  # 주석 처리된 실제 전송, 지금은 저장만
         print(f"[navigate] Saved {out_dir / 'target_summary.json'}")
 
+    def _bearing_refinement(self, target_class: str, detections_by_class: dict):
+        """랜드마크 **자신의 관측만으로** "시작 방향 기준 몇 도 돌아야 그것을 보나"를
+        구한다. 반환: (회전각(부호 있음) 또는 None, 근거 dict 또는 None).
+
+        2026-09-11 사용자 지적으로 발견된 근본 원인 수정: door/pedestal처럼 도면상
+        위치가 GT로 고정된 랜드마크는 원래 map_bearing_to_target_deg(로봇 추정위치
+        -> 고정위치)와 current_heading_map_deg(단상 관측으로 교차검증한 오프셋)를
+        빼서 회전각을 구했는데, 이 둘 다 결국 rotation_deg(0/45/.../315 8단계뿐)에만
+        의존하게 되어 있어 회전 지시각이 항상 45의 배수로만 나오는 구조적 결함이
+        있었다(수식 전개로 확인: turn = rotation_deg들의 선형결합 -> 45의 배수).
+        이 랜드마크 자신이 검출된 프레임(들)의 박스가 화면 중앙에서 얼마나 벗어났는지를
+        _bearing_offset_deg로 각도 보정해 연속값을 얻는다 -- 도면상 위치가 이미
+        알려져 있으므로 map 좌표를 거칠 필요가 없다(오히려 map 좌표 경로는 로봇
+        위치 자체가 이 랜드마크 위치에 종속적으로 유도된 값이라 부정확).
+
+        2026-09-14 별도 메서드로 분리: **로봇의 지도상 위치를 몰라도** 이 계산은
+        성립한다(타겟 자신의 관측만 쓴다). 단상이 안 보여 자기 위치 추정이 실패한
+        경우에도 회전각만은 내놓을 수 있게 하려고 호출부에서 떼어 냈다."""
+        dets_own = detections_by_class.get(target_class, {})
+        found_own = [(rot, det) for rot, det in sorted(dets_own.items()) if det.get("found")]
+        refined_rotations = []
+        per_frame = []
+        for rot, det in found_own:
+            best = _best_instance(det)
+            offset_deg = self._bearing_offset_deg(det["frame"], best["box_xyxy"])
+            entry = {"frame": det["frame"], "rotation_deg": rot, "pixel_offset_angle_deg":
+                     round(offset_deg, 2) if offset_deg is not None else None}
+            if offset_deg is not None:
+                refined = (rot + offset_deg) % 360.0
+                refined_rotations.append(refined)
+                entry["refined_rotation_deg"] = round(refined, 2)
+            else:
+                entry["skipped_reason"] = "박스가 프레임 폭의 60% 이상을 채워 중심점을 신뢰할 수 없음"
+            per_frame.append(entry)
+        if not refined_rotations:
+            return None, None
+
+        # 원형 평균(circular mean) -- 값들이 0/360 경계를 넘나들 수 있으므로
+        # 단순 산술평균 대신 sin/cos 평균으로 wrap-around를 피한다.
+        sin_sum = sum(math.sin(math.radians(r)) for r in refined_rotations)
+        cos_sum = sum(math.cos(math.radians(r)) for r in refined_rotations)
+        refined_target_rotation_deg = math.degrees(math.atan2(sin_sum, cos_sum)) % 360.0
+        turn_amount_signed = (refined_target_rotation_deg + 180.0) % 360.0 - 180.0
+        refinement = {
+            "method": "각 관측 프레임에서 검출 박스의 화면 중심 대비 픽셀 오프셋을 "
+                      "UniDepth가 그 프레임에서 추정한 카메라 내부파라미터(fx, cx)로 "
+                      "각도 환산해 rotation_deg(45도 단위)에 더한 연속값을 구하고, "
+                      "복수 관측이면 원형평균(circular mean)한다.",
+            "formula": "refined_rotation_i = (rotation_deg_i + degrees(atan2(box_center_x_infer - cx, fx))) mod 360; "
+                       "refined_target_rotation_deg = degrees(atan2(mean(sin(refined_rotation_i)), mean(cos(refined_rotation_i))))",
+            "per_frame": per_frame,
+            "refined_target_rotation_deg": round(refined_target_rotation_deg, 2),
+            "spread_deg": round(max(refined_rotations) - min(refined_rotations), 2) if len(refined_rotations) > 1 else None,
+            "note": "회전 지시각이 항상 45의 배수로만 나오던 문제(로봇/단상/문 위치가 "
+                    "map 좌표상 서로 종속적으로 유도되어 rotation_deg 8단계에만 의존하던 "
+                    "구조적 결함)를 이 랜드마크 자신의 관측만으로 직접 구한 연속값으로 대체해 해결.",
+        }
+        return turn_amount_signed, refinement
+
     # ── 3단계: go-to-class -- 위치가 나오면 회전각+최소경로 산출 ──────────
     def on_go_to_class_command(self, target_class: str, detections_by_class: dict, loc: dict) -> None:
         # 2026-09-11 사용자 지시: 경로(path) 산출물은 try1/navigation/에 독립
@@ -607,43 +722,9 @@ class NavigateToTargetService:
         # 유도된 값이라 부정확).
         bearing_refinement = None
         if target_class in LANDMARK_MAP_POSITIONS_CM:
-            dets_own = detections_by_class.get(target_class, {})
-            found_own = [(rot, det) for rot, det in sorted(dets_own.items()) if det.get("found")]
-            refined_rotations = []
-            per_frame = []
-            for rot, det in found_own:
-                best = _best_instance(det)
-                offset_deg = self._bearing_offset_deg(det["frame"], best["box_xyxy"])
-                entry = {"frame": det["frame"], "rotation_deg": rot, "pixel_offset_angle_deg":
-                         round(offset_deg, 2) if offset_deg is not None else None}
-                if offset_deg is not None:
-                    refined = (rot + offset_deg) % 360.0
-                    refined_rotations.append(refined)
-                    entry["refined_rotation_deg"] = round(refined, 2)
-                else:
-                    entry["skipped_reason"] = "박스가 프레임 폭의 60% 이상을 채워 중심점을 신뢰할 수 없음"
-                per_frame.append(entry)
-            if refined_rotations:
-                # 원형 평균(circular mean) -- 값들이 0/360 경계를 넘나들 수 있으므로
-                # 단순 산술평균 대신 sin/cos 평균으로 wrap-around를 피한다.
-                sin_sum = sum(math.sin(math.radians(r)) for r in refined_rotations)
-                cos_sum = sum(math.cos(math.radians(r)) for r in refined_rotations)
-                refined_target_rotation_deg = math.degrees(math.atan2(sin_sum, cos_sum)) % 360.0
-                turn_amount_signed = (refined_target_rotation_deg + 180.0) % 360.0 - 180.0
-                bearing_refinement = {
-                    "method": "각 관측 프레임에서 검출 박스의 화면 중심 대비 픽셀 오프셋을 "
-                              "UniDepth가 그 프레임에서 추정한 카메라 내부파라미터(fx, cx)로 "
-                              "각도 환산해 rotation_deg(45도 단위)에 더한 연속값을 구하고, "
-                              "복수 관측이면 원형평균(circular mean)한다.",
-                    "formula": "refined_rotation_i = (rotation_deg_i + degrees(atan2(box_center_x_infer - cx, fx))) mod 360; "
-                               "refined_target_rotation_deg = degrees(atan2(mean(sin(refined_rotation_i)), mean(cos(refined_rotation_i))))",
-                    "per_frame": per_frame,
-                    "refined_target_rotation_deg": round(refined_target_rotation_deg, 2),
-                    "spread_deg": round(max(refined_rotations) - min(refined_rotations), 2) if len(refined_rotations) > 1 else None,
-                    "note": "회전 지시각이 항상 45의 배수로만 나오던 문제(로봇/단상/문 위치가 "
-                            "map 좌표상 서로 종속적으로 유도되어 rotation_deg 8단계에만 의존하던 "
-                            "구조적 결함)를 이 랜드마크 자신의 관측만으로 직접 구한 연속값으로 대체해 해결.",
-                }
+            refined_turn, bearing_refinement = self._bearing_refinement(target_class, detections_by_class)
+            if refined_turn is not None:
+                turn_amount_signed = refined_turn
 
         turn_direction = "왼쪽(반시계)" if turn_amount_signed < 0 else "오른쪽(시계)"
         turn_amount_deg = abs(turn_amount_signed)
@@ -716,6 +797,27 @@ class NavigateToTargetService:
                                f"({ux:.3f}, {uy:.3f}) = ({goal_cm[0]:.1f}, {goal_cm[1]:.1f})",
             },
         }
+        # 2026-09-14 로봇 규약(detection-protocol_0914.md §4) 반영: 로봇 명령은
+        # `turn { deg }` + `move_forward { distance_m }` 두 개다. 저쪽 부호 규약이
+        # **오른쪽이 +**라 우리 turn_amount_signed와 그대로 같고(왼쪽이 음수),
+        # standoff_cm은 이미 forward_distance_cm에 빼져 있으므로 로봇이 또 빼면 안 된다.
+        # 전진 거리는 0.05~10m만 받으므로 범위를 넘으면 숨기지 않고 표시해 둔다.
+        forward_distance_m = forward_distance_cm / 100.0
+        distance_in_range = ROBOT_FORWARD_M_MIN <= forward_distance_m <= ROBOT_FORWARD_M_MAX
+        robot_command = {
+            "turn": {"deg": round(turn_amount_signed, 1)},
+            "move_forward": {"distance_m": round(forward_distance_m, 3)},
+            "distance_m_in_range": distance_in_range,
+            "accepted_range_m": [ROBOT_FORWARD_M_MIN, ROBOT_FORWARD_M_MAX],
+            "note": "turn.deg는 오른쪽이 +(왼쪽이 음수). "
+                    "move_forward.distance_m에는 standoff가 이미 반영돼 있다 -- 또 빼지 말 것.",
+        }
+        if not distance_in_range:
+            robot_command["warning"] = (
+                f"전진 거리 {forward_distance_m:.3f}m가 로봇이 받는 범위"
+                f"({ROBOT_FORWARD_M_MIN}~{ROBOT_FORWARD_M_MAX}m)를 벗어난다 -- 그대로 보내면 안 된다")
+            print(f"[navigate] 경고: {robot_command['warning']}")
+
         nav_evidence = {
             "target_class": target_class,
             "ok": True,
@@ -725,9 +827,12 @@ class NavigateToTargetService:
             "target_position_cm": [round(v, 1) for v in target_position_cm],
             "map_bearing_to_target_deg": round(map_bearing_to_target_deg, 1),
             "turn_instruction": f"{turn_direction}으로 {turn_amount_deg:.1f}도 회전",
+            "turn_deg": round(turn_amount_signed, 1),
             "distance_to_target_cm": round(distance_to_target_cm, 1),
             "standoff_cm": standoff_cm,
             "forward_distance_cm": round(forward_distance_cm, 1),
+            "forward_distance_m": round(forward_distance_m, 3),
+            "robot_command": robot_command,
             "goal_cm": [round(v, 1) for v in goal_cm],
             "path_calculation": path_calculation,
             "bearing_refinement": bearing_refinement,

@@ -12,7 +12,9 @@ CLIP + OVD(GroundingDINO/YOLO-World) + FastSAM 4개 provider의 증거를 점진
 
 ```
 demo/test/
-  mock_stream_receiver.py       -- 진입점. 명령+프레임 스트림 모의 수신 후 오케스트레이션
+  mock_stream_receiver.py       -- 진입점(오프라인). 데이터셋 8장으로 스트림을 흉내 냄
+  mqtt_stream_receiver.py       -- 진입점(실연동). 로봇 MQTT over WebSocket 프레임 수신
+  detect_api_server.py          -- 관제 웹이 폴링해 가는 HTTP 창구(try1/ 읽기 전용)
   class_finder_service.py       -- 프레임별 클래스 탐지(증거 융합 파이프라인)
   navigate_to_target_service.py -- 자기 위치 추정 + 목표까지 회전각/거리 계산
   class_features.json           -- 클래스별 CLIP 특징/게이트 설정(door/pedestal/person)
@@ -90,6 +92,52 @@ door/pedestal/person 3개만 등록돼 있습니다).
 실행 결과는 `demo/test/try1/` 아래에 프레임별 원본/오버레이 이미지, 클래스별
 증거(evidence.json), 자기위치추정(`localization/`), 최종 이동 지시
 (`navigation/`)가 저장됩니다.
+
+## 로봇·관제 웹 연동 (시연 경로)
+
+```
+로봇 라즈베리파이(pi7)                     이 PC                          관제 웹(브라우저)
+  MQTT broker :9001  ──프레임+회전각──▶  mqtt_stream_receiver.py
+                                              │ try1/ 산출
+                                              ▼
+                                        detect_api_server.py  ◀──GET 폴링──  화면
+```
+
+둘 다 **테일스케일 테일넷 위**에서 통신합니다. 이 PC가 로봇과 같은 테일넷에
+있어야 `pi7.tailcb6bfb.ts.net` 이름이 풀립니다.
+
+```bash
+# 0) 로봇과 같은 테일넷에 로그인 (브라우저에서 계정 인증)
+sudo tailscale logout          # 다른 테일넷에 붙어 있다면
+sudo tailscale up              # 출력된 URL을 브라우저로 열어 로그인
+tailscale status | grep pi7    # 로봇이 보이는지 확인
+
+# 1) 브로커에 무엇이 흐르는지 확인(선택)
+cd demo/test && python3 mqtt_stream_receiver.py --sniff
+
+# 2) 프레임 수신 + 파이프라인 -- 로봇이 스캔을 돌리면 자동으로 경로까지 산출
+python3 mqtt_stream_receiver.py --target door
+
+# 3) 관제 웹용 HTTP 창구(별도 터미널). torch 없이도 뜹니다
+python3 detect_api_server.py --port 8000
+```
+
+추가 패키지: `pip install "paho-mqtt>=2.0"` (수신기 전용. 창구 서버는 표준
+라이브러리만 씁니다.)
+
+로봇 쪽 전송 규약은 [`detection-protocol_0914.md`](detection-protocol_0914.md)가
+기준입니다 — `zoneA/robot/go1-001/frame`(방향마다 1건, JSON+base64) 과
+`zoneA/robot/go1-001/scan`(판의 시작·끝)을 구독합니다. 카메라가 얼어 같은 그림이
+섞인 판은 **통째로 버리고** 다시 스캔하도록 안내합니다(문 방향이 통째로 틀어지기
+때문). 산출된 이동 지시는 `try1/navigation/evidence.json`의 `robot_command`에
+로봇 명령 어휘(`turn { deg }`, `move_forward { distance_m }`) 그대로 들어 있습니다.
+
+관제 웹에 알려 줄 주소는 이 PC의 MagicDNS 이름입니다 —
+`http://$(hostname).<테일넷>.ts.net:8000`. 창구 목록과 응답 모양은
+[`탐지_연동스키마_260912.md`](탐지_연동스키마_260912.md) §1을 그대로 따릅니다
+(`/health`, `/detect/localization`, `/detect/results`, `/detect/evidence`,
+`/detect/path`, `/detect/features`, `/detect/frame`, `/detect/path_overlay`,
+`/detect/map`). 아직 산출되지 않은 것은 이유를 본문에 담은 404로 응답합니다.
 
 ## 라이선스 참고
 
