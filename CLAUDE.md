@@ -57,6 +57,8 @@ mqtt 쪽만의 전제 셋 — 규약의 authoritative 출처는 로봇 쪽에서
 - 확정 기준은 점수 임계값이 아니라 **서로 다른 provider 2개 이상의 동의**(`CONFIRM_MIN_DISTINCT_GROUPS`). 단 door/pedestal처럼 위치 추정에 쓰이는 랜드마크는 **`dictionary`(CLIP) 게이트의 동의가 필수**다(`required_source`) — OVD 둘이 같은 오탐을 공유해 위치 추정이 깨진 실측 사례 때문에 추가된 규칙이라 완화하면 그 회귀가 되살아난다.
 - `consolidate()`는 증거 도착 순서 때문에 갈라진 클러스터를 관측 종료 시 최종 기하로 다시 병합한다.
 - 클래스별 게이트(색/모양/참조이미지/채도/종횡비)는 `class_features.json`에 데이터로만 존재하고 `_dictionary_gate_and_score`가 해석한다. **새 클래스 추가나 오탐 튜닝은 코드가 아니라 이 JSON에서 한다** — 각 항목의 `rationale`에 실측 튜닝 이력이 남아 있다.
+- 2026-09-14 door 완화(조명·각도 대응, `research/door_gate_relax/RESULT.md`): 참조이미지 게이트 제외, 색·모양은 "1등"이 아니라 `color_gate_tolerance` / `shape_gate.tolerance` 차이 이내면 통과, 채도 75·target_sim 0.25. **`grounding_dino_evidence`(door만: 라벨 정확히 door + 점수≥0.25)는 이 완화의 전제다** — 빼면 "door pedestal" 섞인 라벨·저점수 박스가 문 증거로 들어와 rot8 오탐이 되살아난다. 전역 GDINO 임계값을 올리면 단상(0.17~0.24)이 사라지므로 클래스별로만 건다. 원본은 `research/door_gate_relax/backup_260914/`.
+- 2026-09-15 door 강화(단상·사람 다리 오탐 대응, `research/door_gate_harden/RESULT.md`): 두 규칙을 더했다. ① `confirm_pair_iou_min`(0.42) — CONFIRMED가 되려면 사전(CLIP) 박스와 OVD 박스 중 가장 잘 맞는 한 쌍의 IoU가 기준 이상이어야 한다(`_dictionary_ovd_pair_iou` → `_resolve_lifecycle`, 값은 `evidence_trail`의 `dictionary_ovd_iou`). 오탐은 전부 작은 CLIP 조각(창문·짙은 옷)이 GDINO의 큰 단상·사람 박스 안에 containment로만 묶여 "2개 동의"가 된 경우였다. **containment 연계 자체는 끄지 말 것**(같은 물체 부위 증거를 못 묶어 오탐이 오히려 남는다). ② `hue_gate`(crop 색상 H 중앙값 85~112) — 짝 IoU로 못 막는 "CLIP·GDINO가 같은 다리를 함께 잡은" 경우용. 둘 다 door에만 걸려 있고 pedestal은 그대로다. 원본은 `research/door_gate_harden/backup_260915/`.
 
 ### 3. `navigate_to_target_service.py` — 위치 추정 + 경로
 3단계로 나뉜다: `localize()`(항상 먼저) → `resolve_target_position()` → `on_go_to_class_command()`. depth는 UniDepthV2, cm 환산은 사용자가 로봇으로 직접 재서 만든 3차 보정식(`calibrate_depth_to_cm`)이다.

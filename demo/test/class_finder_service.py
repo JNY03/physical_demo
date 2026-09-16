@@ -309,6 +309,13 @@ def _median_saturation(crop_bgr) -> float:
     return float(np.median(hsv[..., 1]))
 
 
+def _median_hue(crop_bgr) -> float:
+    """crop 픽셀의 HSV 색상(H, OpenCV 0~179) 중앙값 -- 2026-09-15 door 강화: 짙은 바지 다리(H 105~125)가
+    CLIP 색 게이트(light blue와 차이 0.012 이내)를 통과하던 것을 픽셀 색상으로 한 번 더 거른다."""
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    return float(np.median(hsv[..., 0]))
+
+
 def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops):
     """RPN 후보들을 하나의 클래스 설정(cfg)과 비교해 필수 게이트(색/모양/
     참조이미지/채도)를 통과한 후보 목록을 반환한다. class_features.json에
@@ -322,8 +329,13 @@ def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops)
     target_sim = sim_matrix.max(axis=1)
     n = len(candidates)
 
+    # 2026-09-14 사용자 지시: "조명, 촬영 각도 등이 달라지는 상황을 고려해 색, 채도, 종횡비 등의 게이트는
+    # 유지한 채 통과 기준만을 완화" -- 색/모양 게이트의 '1등이어야 통과'를 '1등과 tolerance 이내면 통과'로
+    # 바꾼다(tolerance=0이면 예전 규칙과 같음). 순위(상위 k등)가 아니라 차이로 푸는 이유: 8색 유사도가
+    # 0.01 안에 몰려 있어 어두운 조명에서 실제 문의 light blue가 6등까지 떨어지지만 1등과의 차이는
+    # -0.0074에 그쳤다(research/door_gate_relax/RESULT.md).
     color_check_passed = np.ones(n, dtype=bool)
-    all_color_prompts, all_color_sim = None, None
+    all_color_prompts, all_color_sim, color_gap = None, None, None
     if cfg["color_feature_k"]:
         own_color_feature_text = cfg["llm_features"][cfg["color_feature_k"][0]]
         own_color_word = own_color_feature_text.rsplit(" color", 1)[0]
@@ -335,15 +347,17 @@ def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops)
             all_color_prompts = [f"a {class_name}'s {own_color_word} color"] + [
                 f"a {class_name}'s {c} color" for c in COLOR_COMPETITOR_WORDS]
         all_color_sim = image_embeds @ cfg["engine"].embed_texts(all_color_prompts).T
-        color_check_passed = all_color_sim.argmax(axis=1) == 0
+        color_gap = all_color_sim[:, 0] - np.delete(all_color_sim, 0, axis=1).max(axis=1)
+        color_check_passed = color_gap >= -cfg["color_tol"]
 
     shape_check_passed = np.ones(n, dtype=bool)
-    shape_prompts, shape_sim = None, None
+    shape_prompts, shape_sim, shape_gap = None, None, None
     if cfg["shape_cfg"] and cfg["shape_embeds"] is not None:
         shape_prompts = cfg["shape_cfg"]["positive_prompts"] + cfg["shape_cfg"]["negative_prompts"]
         n_positive = len(cfg["shape_cfg"]["positive_prompts"])
         shape_sim = image_embeds @ cfg["shape_embeds"].T
-        shape_check_passed = shape_sim.argmax(axis=1) < n_positive
+        shape_gap = shape_sim[:, :n_positive].max(axis=1) - shape_sim[:, n_positive:].max(axis=1)
+        shape_check_passed = shape_gap >= -cfg["shape_tol"]
 
     ref_image_check_passed = np.ones(n, dtype=bool)
     ref_image_sim = None
@@ -360,6 +374,13 @@ def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops)
             saturation_check_passed &= saturation_values >= sat_cfg["min_saturation"]
         if "max_saturation" in sat_cfg:
             saturation_check_passed &= saturation_values <= sat_cfg["max_saturation"]
+
+    hue_values = None
+    hue_check_passed = np.ones(n, dtype=bool)
+    if cfg["hue_cfg"] is not None:
+        hue_values = np.array([_median_hue(c) for c in crops])
+        hue_check_passed = ((hue_values >= cfg["hue_cfg"]["min_median_hue"])
+                            & (hue_values <= cfg["hue_cfg"]["max_median_hue"]))
 
     def _passes_aspect(i):
         if cfg["min_aspect"] is None:
@@ -378,12 +399,18 @@ def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops)
         }
         if all_color_sim is not None:
             winner = all_color_prompts[int(all_color_sim[i].argmax())]
+            # winning_color는 1등 색 그대로다 -- tolerance로 통과하면 1등이 다른 색일 수 있으므로 판정 근거는
+            # target_color_gap(목표색 - 나머지 최고)과 tolerance를 함께 본다.
             detail["gates"]["color"] = {"passed": bool(color_check_passed[i]), "winning_color": winner,
+                                         "target_color_gap": round(float(color_gap[i]), 4),
+                                         "tolerance": cfg["color_tol"],
                                          "candidates": {p: round(float(all_color_sim[i, k]), 4)
                                                         for k, p in enumerate(all_color_prompts)}}
         if shape_sim is not None:
             winner = shape_prompts[int(shape_sim[i].argmax())]
             detail["gates"]["shape"] = {"passed": bool(shape_check_passed[i]), "winning_shape": winner,
+                                         "positive_minus_negative": round(float(shape_gap[i]), 4),
+                                         "tolerance": cfg["shape_tol"],
                                          "candidates": {p: round(float(shape_sim[i, k]), 4)
                                                         for k, p in enumerate(shape_prompts)}}
         if ref_image_sim is not None:
@@ -395,6 +422,11 @@ def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops)
                                               "median_saturation": round(float(saturation_values[i]), 1),
                                               **{k: v for k, v in cfg["saturation_cfg"].items()
                                                  if k in ("min_saturation", "max_saturation")}}
+        if hue_values is not None:
+            detail["gates"]["hue"] = {"passed": bool(hue_check_passed[i]),
+                                       "median_hue": round(float(hue_values[i]), 1),
+                                       "min_median_hue": cfg["hue_cfg"]["min_median_hue"],
+                                       "max_median_hue": cfg["hue_cfg"]["max_median_hue"]}
         if cfg["min_aspect"] is not None:
             x1, y1, x2, y2 = candidates[i]
             bw, bh = x2 - x1, y2 - y1
@@ -407,7 +439,7 @@ def _dictionary_gate_and_score(class_name, cfg, image_embeds, candidates, crops)
     for i in range(n):
         if (target_sim[i] >= cfg["target_sim_threshold"] and _passes_aspect(i)
                 and color_check_passed[i] and shape_check_passed[i] and ref_image_check_passed[i]
-                and saturation_check_passed[i]):
+                and saturation_check_passed[i] and hue_check_passed[i]):
             passed.append({"box": candidates[i], "score": float(target_sim[i]),
                             "label": cfg["anchored_features"][int(best_feature_idx[i])],
                             "detail": _gate_detail(i)})
@@ -507,6 +539,11 @@ class DictionaryProvider:
                 "ref_image_embed": ref_image_embed, "text_embeds": text_embeds,
                 "target_sim_threshold": cls.get("target_sim_threshold", TARGET_SIM_THRESHOLD),
                 "saturation_cfg": cls.get("saturation_gate"),
+                "color_tol": float(cls.get("color_gate_tolerance", 0.0)),
+                "shape_tol": float((shape_cfg or {}).get("tolerance", 0.0)),
+                "gdino_evidence": cls.get("grounding_dino_evidence"),
+                "hue_cfg": cls.get("hue_gate"),
+                "pair_iou_min": cls.get("confirm_pair_iou_min"),
             }
             sent_features[class_name] = anchored_features
         return sent_features
@@ -689,7 +726,22 @@ def _resolve_semantic(box_evidence: list[EvidenceEvent]):
     return cls, support[cls]
 
 
-def _resolve_lifecycle(supporting_groups: list[str], current_class: str, required_source: str | None = None) -> str:
+PAIR_OVD_SOURCES = ("grounding_dino", "yolo_world")
+
+
+def _dictionary_ovd_pair_iou(box_evidence: list[EvidenceEvent]) -> float:
+    """사전(CLIP) 박스와 OVD 박스 중 가장 잘 맞는 한 쌍의 IoU. 둘 중 하나라도 없으면 0.
+
+    2026-09-15 실측(datasets/260915): door 오탐은 전부 작은 CLIP 조각이 GDINO의 큰 단상·사람 박스 안에
+    containment로만 묶인 경우였다(짝 IoU 0.03~0.22 vs 실제 문 0.76~0.91) -- 같은 클러스터에 있어도
+    서로 다른 범위를 가리키면 '동의'로 치지 않으려고 잰다."""
+    dict_boxes = [e.box_xyxy for e in box_evidence if e.source == "dictionary"]
+    ovd_boxes = [e.box_xyxy for e in box_evidence if e.source in PAIR_OVD_SOURCES]
+    return max((_iou_xyxy(a, b) for a in dict_boxes for b in ovd_boxes), default=0.0)
+
+
+def _resolve_lifecycle(supporting_groups: list[str], current_class: str, required_source: str | None = None,
+                       pair_iou: float | None = None, pair_iou_min: float | None = None) -> str:
     """Eq 9(단순화): 이 데모는 한 관측(프레임) 안의 progressive 해석만 다루므로
     PROVISIONAL/CONFIRMED만 구현한다(STALE/EXPIRED는 여러 관측에 걸친 추적
     개념이라 범위 밖).
@@ -701,10 +753,16 @@ def _resolve_lifecycle(supporting_groups: list[str], current_class: str, require
     평균 방위각 발생). OVD 두 개는 서로 다른 모델이지만 방법론이 같아서
     같은 착각을 공유할 수 있다는 것을 실측으로 확인했다 -- door/pedestal처럼
     로봇 위치 추정에 직접 쓰이는 랜드마크 클래스는 이 개체 전용으로 튜닝된
-    사전(CLIP) 게이트의 동의가 반드시 있어야 확정하도록 강화한다."""
+    사전(CLIP) 게이트의 동의가 반드시 있어야 확정하도록 강화한다.
+
+    2026-09-15 추가(class_features.json의 confirm_pair_iou_min, 현재 door만): 사전 박스와 OVD 박스가
+    같은 범위를 가리켜야(짝 IoU >= 기준) 확정한다 -- 창문 조각 CLIP 증거가 GDINO의 단상 박스 안에
+    포함 관계로 묶여 단상이 문으로 확정되던 오탐 때문이다."""
     if current_class == "unknown":
         return "PROVISIONAL"
     if required_source is not None and required_source not in supporting_groups:
+        return "PROVISIONAL"
+    if pair_iou_min is not None and (pair_iou is None or pair_iou < pair_iou_min):
         return "PROVISIONAL"
     if len(set(supporting_groups)) >= CONFIRM_MIN_DISTINCT_GROUPS:
         return "CONFIRMED"
@@ -715,9 +773,10 @@ class ProgressiveResolver:
     """Eq 10-13: 완료 시각 순으로 증거를 하나씩 반영하며 재해석하고, '보이는
     상태'가 바뀔 때만 레코드 갱신을 노출한다."""
 
-    def __init__(self, observation: str, required_source: str | None = None):
+    def __init__(self, observation: str, required_source: str | None = None, pair_iou_min: float | None = None):
         self.observation = observation
         self.required_source = required_source
+        self.pair_iou_min = pair_iou_min
         self.evidence: list[EvidenceEvent] = []
         self.record_updates: list[dict] = []
         self._last_visible = None
@@ -730,7 +789,9 @@ class ProgressiveResolver:
                           for e in self.evidence if e.evidence_type == "mask"]
         geometry, geometry_source = _resolve_geometry(box_evidence, mask_evidence)
         semantic_class, supporting_groups = _resolve_semantic(box_evidence)
-        lifecycle = _resolve_lifecycle(supporting_groups, semantic_class, self.required_source)
+        pair_iou = _dictionary_ovd_pair_iou(box_evidence) if self.pair_iou_min is not None else None
+        lifecycle = _resolve_lifecycle(supporting_groups, semantic_class, self.required_source,
+                                       pair_iou, self.pair_iou_min)
         state = ObjectState(geometry=geometry, geometry_source=geometry_source, semantic_class=semantic_class,
                              supporting_groups=supporting_groups, lifecycle=lifecycle, observation_time=self.observation)
         visible = state.visible()
@@ -745,6 +806,8 @@ class ProgressiveResolver:
                 "box_xyxy": [round(v, 1) for v in geometry] if geometry else None,
                 "geometry_source": geometry_source,
             }
+            if pair_iou is not None:
+                record["dictionary_ovd_iou"] = {"value": round(pair_iou, 3), "min_required": self.pair_iou_min}
             if event.detail is not None:
                 # "clip은 어떤 특징 증거를 비교하고 gate 적용했는지와 그 결과
                 # 정보가 있어야지" -- 사전(CLIP) 소스일 때만 있는 상세 근거.
@@ -763,11 +826,12 @@ class MultiObjectProgressiveResolver:
 
     def __init__(self, observation: str, association_iou_thr: float = ASSOCIATION_IOU_THR,
                  association_containment_thr: float = ASSOCIATION_CONTAINMENT_THR,
-                 required_source: str | None = None):
+                 required_source: str | None = None, pair_iou_min: float | None = None):
         self.observation = observation
         self.association_iou_thr = association_iou_thr
         self.association_containment_thr = association_containment_thr
         self.required_source = required_source
+        self.pair_iou_min = pair_iou_min
         self.resolvers: list[ProgressiveResolver] = []
         self.cluster_geometry: list[list | None] = []
 
@@ -786,7 +850,7 @@ class MultiObjectProgressiveResolver:
         if idx is None:
             if event.evidence_type == "mask":
                 return None
-            resolver = ProgressiveResolver(self.observation, self.required_source)
+            resolver = ProgressiveResolver(self.observation, self.required_source, self.pair_iou_min)
             self.resolvers.append(resolver)
             self.cluster_geometry.append(None)
             idx = len(self.resolvers) - 1
@@ -816,7 +880,7 @@ class MultiObjectProgressiveResolver:
                     if iou >= self.association_iou_thr or containment >= self.association_containment_thr:
                         merged_events = sorted(self.resolvers[i].evidence + self.resolvers[j].evidence,
                                                 key=lambda e: e.completion_time_ms)
-                        merged_resolver = ProgressiveResolver(self.observation, self.required_source)
+                        merged_resolver = ProgressiveResolver(self.observation, self.required_source, self.pair_iou_min)
                         state = None
                         for e in merged_events:
                             state = merged_resolver.feed(e)
@@ -947,8 +1011,18 @@ class ClassFinderService:
                 eid += 1
                 events.append(EvidenceEvent(f"e{eid}", frame_path.name, "dictionary", t_dict, "box",
                                              d["score"], d["box_xyxy"], class_name, d.get("detail")))
+            # 2026-09-14: 클래스별 grounding_dino_evidence(class_features.json)가 있으면 그 규칙으로만 받는다.
+            # door는 "라벨이 정확히 door + 점수>=0.25" -- 부분일치("door pedestal"도 door)와 0.15 점수로 받던
+            # GDINO 오탐(흰 단상/화이트보드/창문)을 막아야 색·채도 게이트의 통과 기준을 풀어도 rot8 오탐이
+            # 생기지 않았다. 호출 임계값(0.15/0.15)은 그대로 둬서 단상(GDINO 0.17~0.24) 판정은 바뀌지 않는다.
+            gd_rule = self.dictionary.class_configs[class_name].get("gdino_evidence") or {}
             for d in gd_dets:
-                if class_name not in d["label"]:
+                if gd_rule.get("exact_label"):
+                    if d["label"].strip() != class_name:
+                        continue
+                elif class_name not in d["label"]:
+                    continue
+                if d["score"] < gd_rule.get("min_score", 0.0):
                     continue
                 eid += 1
                 events.append(EvidenceEvent(f"e{eid}", frame_path.name, "grounding_dino", t_gdino, "box",
@@ -972,7 +1046,11 @@ class ClassFinderService:
             # 사전(CLIP) 게이트의 동의를 반드시 요구한다(실측 발견: OVD 둘이
             # 같은 벽 스피커를 pedestal로 착각해 위치 추정이 깨진 사례 참고).
             required_source = "dictionary" if class_name in LOCALIZATION_CLASSES else None
-            multi = MultiObjectProgressiveResolver(frame_path.name, required_source=required_source)
+            # 2026-09-15: 클래스별 confirm_pair_iou_min(현재 door만) -- 사전 박스와 OVD 박스가 같은 범위를
+            # 가리켜야 확정(단상/다리 오탐 대응, class_features.json 근거 참고).
+            multi = MultiObjectProgressiveResolver(
+                frame_path.name, required_source=required_source,
+                pair_iou_min=self.dictionary.class_configs[class_name].get("pair_iou_min"))
             for e in events:
                 multi.feed(e)
             multi.consolidate()

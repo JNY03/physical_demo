@@ -405,6 +405,26 @@ class ScanSession:
         return None
 
 
+def _materialize_frame(parsed: ParsedFrame, topic: str) -> IncomingFrame:
+    """대기열에서 꺼낸 프레임을 **메인 스레드에서** incoming/ 에 쓴다.
+
+    scan_start 의 판 정리(_clear_previous_run)가 먼저 끝난 뒤에 쓰이므로 정리가 새 프레임을
+    지울 수 없다(2026-09-14 실측 버그 -- on_message 주석 참고)."""
+    INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+    path = INCOMING_DIR / parsed.name
+    if path.exists():
+        # 같은 이름이 다시 왔다. 덮어쓰면 앞 프레임의 결과 폴더(try1/<stem>/)까지
+        # 통째로 섞이므로 이름을 갈라 둔다.
+        stem = Path(parsed.name).stem
+        n = 2
+        while (INCOMING_DIR / f"{stem}_{n:02d}.jpg").exists():
+            n += 1
+        path = INCOMING_DIR / f"{stem}_{n:02d}.jpg"
+    path.write_bytes(parsed.image)
+    return IncomingFrame(frame_index=parsed.index, frame_path=path,
+                         rotation_deg=parsed.rotation_deg, topic=topic, parsed=parsed)
+
+
 # ────────────────────────── MQTT 연결 ──────────────────────────
 
 def _make_client(broker_url: str, client_id: str):
@@ -551,14 +571,13 @@ def main() -> None:
         if parsed is None:
             return  # 프레임도 판 이벤트도 아닌 메시지는 흘려보낸다
         arrival["count"] += 1
-        path = INCOMING_DIR / parsed.name
-        if path.exists():
-            # 같은 이름이 다시 왔다. 덮어쓰면 앞 프레임의 결과 폴더(try1/<stem>/)까지
-            # 통째로 섞이므로 이름을 갈라 둔다.
-            path = INCOMING_DIR / f"{Path(parsed.name).stem}_{arrival['count']:02d}.jpg"
-        path.write_bytes(parsed.image)
-        inbox.put(IncomingFrame(frame_index=parsed.index, frame_path=path,
-                                rotation_deg=parsed.rotation_deg, topic=msg.topic, parsed=parsed))
+        # **여기서 파일을 쓰지 않는다** (2026-09-14 실측 -- 수신기가 첫 프레임에서 죽었다).
+        # 로봇은 scan_start 를 보내고 30ms 뒤 0도 프레임을 보낸다. 이 스레드가 곧바로
+        # incoming/ 에 쓰면, 메인 스레드가 뒤늦게 scan_start 를 처리하며 _clear_previous_run()
+        # 으로 incoming/ 을 비울 때 **방금 쓴 0도 프레임까지 지운다** -> on_frame 의 imread 가
+        # None -> FileNotFoundError 로 프로세스가 끝났다. 파일은 대기열 순서대로 메인 스레드가
+        # 판 정리 **뒤에** 쓴다(_materialize_frame).
+        inbox.put(parsed)
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -577,20 +596,29 @@ def main() -> None:
             except queue.Empty:
                 continue
 
-            if isinstance(item, ScanEvent):
-                if item.event == "scan_start":
-                    session.start(item.mission_id, item.expected_frames)
-                else:
-                    session.finish(outcome=item.outcome, frames_sent=item.frames_sent,
-                                   by="scan_end 수신")
-                    nav = session.nav_evidence()
-                    if args.publish_topic and nav is not None:
-                        client.publish(args.publish_topic,
-                                       json.dumps(nav, ensure_ascii=False), qos=1)
-                        print(f"[mqtt_stream] 경로 결과를 '{args.publish_topic}'으로 발행했다")
-                continue
+            # **한 건 때문에 수신기 전체가 죽지 않게 한다** (2026-09-14). 예외는 사유와 함께
+            # 적고 다음 건으로 넘어간다 -- 수신기가 조용히 사라지면 로봇은 계속 보내는데
+            # 화면은 영영 비어 있다(실제로 그랬다).
+            try:
+                if isinstance(item, ScanEvent):
+                    if item.event == "scan_start":
+                        session.start(item.mission_id, item.expected_frames)
+                    else:
+                        session.finish(outcome=item.outcome, frames_sent=item.frames_sent,
+                                       by="scan_end 수신")
+                        nav = session.nav_evidence()
+                        if args.publish_topic and nav is not None:
+                            client.publish(args.publish_topic,
+                                           json.dumps(nav, ensure_ascii=False), qos=1)
+                            print(f"[mqtt_stream] 경로 결과를 '{args.publish_topic}'으로 발행했다")
+                    continue
 
-            session.add_frame(item)
+                session.add_frame(_materialize_frame(item, args.frame_topic))
+            except Exception as exc:  # noqa: BLE001 -- 한 건의 실패가 수신기를 끝내면 안 된다
+                import traceback
+                print(f"[mqtt_stream] ✗ 한 건 처리 중 오류 -- 수신기는 계속 돈다: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+                traceback.print_exc()
     except KeyboardInterrupt:
         print("\n[mqtt_stream] 종료")
     finally:

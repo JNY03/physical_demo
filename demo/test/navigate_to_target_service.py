@@ -112,7 +112,7 @@ LANDMARK_MAP_POSITIONS_CM = {
 # 목적지 정지 거리: 타겟 클래스별로 다르게 둔다(사용자 지시 "목적지는 타겟
 # 클래스가 문이라면 문 80cm 앞이 목적지로"). 다른 클래스는 아직 정해진 값이
 # 없어 기존 30cm를 기본값으로 유지.
-STANDOFF_CM_BY_CLASS = {"door": 80.0}
+STANDOFF_CM_BY_CLASS = {"door": 100.0}
 STANDOFF_CM_DEFAULT = 30.0
 
 # 로봇 `move_forward { distance_m }` 이 받는 범위(detection-protocol_0914.md §4).
@@ -121,6 +121,24 @@ ROBOT_FORWARD_M_MAX = 10.0
 
 CALIBRATION_VALID_REL_DEPTH_MAX = 4.0
 
+# ── 문 겉보기 크기 -> 거리 (2026-09-14 리허설 반영, 대체 경로 B·C) ──────────────
+# 리허설에서 로봇 실물 프레임 8장 중 단상이 한 장에도 안 잡혀 A(단상 기반 위치 추정)가
+# 실패했고 경로가 안 나왔다. 문 depth는 보정식 유효범위 밖(rel_depth≈10 -> 0.0cm)이라
+# 거리로 못 쓴다. 그래서 이관메모의 C안 -- **문의 겉보기 크기로 거리**를 쓴다.
+#   distance_cm ≈ K / box_px   (핀홀: 크기가 거리에 반비례)
+# K는 A가 성공한 판(door_example 시료 = 데이터셋 8장, 로봇->문 715.4cm)에서 역산했다.
+#   폭:  270도 20.17px · 315도 19.90px -> 715.4 × 평균 20.035 = 14333
+#   높이: 270도 54.06px -> 715.4 × 54.06 = 38674  (315도는 박스가 문 일부만 잡아 38.6px라 뺐다)
+# 폭은 비스듬히 보면 줄고 높이는 박스가 일부만 잡히면 준다 -- 둘 다 구해 중앙값을 쓴다.
+# **프레임 가장자리에 닿아 잘린 치수는 쓰지 않는다**(리허설 315도가 왼쪽 끝에 잘렸다).
+# 상수는 464x400 프레임(테두리 자르기 237x241)에서 잰 값이라 다른 해상도에는 쓰지 않는다.
+DOOR_SIZE_K_WIDTH = 14333.0
+DOOR_SIZE_K_HEIGHT = 38674.0
+DOOR_SIZE_EDGE_PX = 1.5
+DOOR_DISTANCE_PLAUSIBLE_CM = (150.0, 1500.0)
+# B(문만으로 위치 추정)가 낸 로봇 위치를 믿을 범위 -- 방(ROOM_CM) 밖으로 이만큼까지.
+ROOM_MARGIN_CM = 60.0
+
 
 def _send_to_device(payload: dict, tag: str, target_mac: str | None = None) -> None:
     """class_finder_service.py와 동일한 자리 -- 지금은 저장만, 전송은 주석 처리."""
@@ -128,6 +146,49 @@ def _send_to_device(payload: dict, tag: str, target_mac: str | None = None) -> N
     # import some_transport_provider
     # some_transport_provider.send(target_mac=target_mac, tag=tag, payload=payload)
     pass
+
+
+# 2026-09-14 사용자 지시("역추적인걸 시연 때 굳이 언급할 필요는 없으니 일단은 언급하지 말고"): C 역추적 그림도
+# 지도 모드와 같은 모양으로 그린다. True 로 두면 주황 · 속 빈 출발점 · 「가정 위치」 글씨로 구별해 그린다.
+# 역추적이라는 사실은 evidence.json 의 path_overlay_kind / backtrace 에는 그대로 남는다.
+BACKTRACE_OVERLAY_MARKED = False
+
+
+def _draw_path_overlay(map_original, robot_position_cm, goal_cm, current_heading_map_deg, arc_target_bearing_deg,
+                       turn_amount_deg, forward_distance_cm, backtraced: bool = False):
+    """도면 위에 「출발 자리 · 출발 방위(회색) · 회전 호 · 직진 화살표 · 도착점」을 그린다.
+
+    지도 모드(A 단상 · B 문만 위치)와 C의 역추적 그림이 같은 도우미를 쓴다 -- 그림 문법이 같아야
+    둘을 나란히 볼 때 헷갈리지 않는다. 역추적(backtraced)이면 색을 주황으로 바꾸고 출발 자리를
+    속 빈 원으로 그린 뒤 「가정 위치」라고 적는다 -- 측정한 자리가 아니라는 사실이 그림에 남는다.
+    (OpenCV 기본 글꼴은 한글을 못 그려 영문으로 적는다.)"""
+    backtraced = backtraced and BACKTRACE_OVERLAY_MARKED
+    color = (0, 140, 255) if backtraced else (0, 0, 255)
+    overlay = map_original.copy()
+    p0 = cm_to_map_px(*robot_position_cm)
+    p1 = cm_to_map_px(*goal_cm)
+    cv2.arrowedLine(overlay, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])), color, 3, tipLength=0.04)
+    if backtraced:
+        cv2.circle(overlay, (int(p0[0]), int(p0[1])), 12, color, 3)
+    else:
+        cv2.circle(overlay, (int(p0[0]), int(p0[1])), 8, color, -1)
+    cv2.drawMarker(overlay, (int(p1[0]), int(p1[1])), color,
+                   markerType=cv2.MARKER_TILTED_CROSS, markerSize=18, thickness=3)
+    mid_px = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+    cv2.putText(overlay, f"{forward_distance_cm:.1f} cm", (int(mid_px[0]) - 90, int(mid_px[1]) - 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.4, color, 3)
+    ref_end = (p0[0] + 130.0 * math.cos(math.radians(current_heading_map_deg)),
+               p0[1] + 130.0 * math.sin(math.radians(current_heading_map_deg)))
+    cv2.arrowedLine(overlay, (int(p0[0]), int(p0[1])), (int(ref_end[0]), int(ref_end[1])),
+                    (120, 120, 120), 2, tipLength=0.1)
+    cv2.ellipse(overlay, (int(p0[0]), int(p0[1])), (70, 70), 0,
+                arc_target_bearing_deg, current_heading_map_deg, color, 2)
+    cv2.putText(overlay, f"{turn_amount_deg:.1f} deg", (int(p0[0]) - 30, int(p0[1]) + 130),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.3, color, 3)
+    if backtraced:
+        cv2.putText(overlay, "start = ASSUMED (back-traced from door)", (int(p0[0]) - 150, int(p0[1]) + 180),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
+    return overlay
 
 
 def px_to_cm(px_x, px_y):
@@ -402,13 +463,14 @@ class NavigateToTargetService:
         localized = len(pedestal_measurements) > 0
         result = {"ok": localized}
         if not localized:
-            result["reason"] = "pedestal이 어느 프레임에서도 검출되지 않아 로봇 위치를 추정할 수 없음"
-            print(f"[navigate] 위치 추정 실패: {result['reason']}")
-            with open(out_dir / "localization_evidence.json", "w", encoding="utf-8") as f:
-                json.dump({"ok": False, "reason": result["reason"], "rotation_sequence": rotation_sequence,
-                           "observations": observations_by_class}, f,
-                          ensure_ascii=False, indent=2)
-            return result
+            # 2026-09-14 리허설 반영: 단상이 안 잡히면 여기서 끝내지 않고 **문만으로** 위치를
+            # 추정한다(B). 그것도 안 되면 실패를 적되, 경로 단계가 문 관측만으로 이어 갈 수 있게
+            # 문 거리·방위 근거를 결과에 실어 둔다(C, on_go_to_class_command).
+            pedestal_reason = "pedestal이 어느 프레임에서도 검출되지 않아 로봇 위치를 추정할 수 없음"
+            print(f"[navigate] A(단상) 실패: {pedestal_reason} -- B(문만으로 위치 추정) 시도")
+            return self._localize_from_door(
+                detections_by_class, out_dir, map_original, door_map_cm, rotation_sequence,
+                observations_by_class, pedestal_reason)
 
         pedestal_distance_avg_cm = sum(m["distance_cm"] for m in pedestal_measurements) / len(pedestal_measurements)
         pedestal_bearing_deg = sum(m["rotation_deg"] for m in pedestal_measurements) / len(pedestal_measurements)
@@ -480,6 +542,9 @@ class NavigateToTargetService:
 
         localization_evidence = {
             "ok": True,
+            "method": "pedestal",
+            "method_words": "A -- 단상 관측(거리·방위)으로 위치와 방위를 추정",
+            "fallback_chain": [{"step": "A_pedestal", "ok": True, "detail": f"단상 관측 {len(pedestal_measurements)}프레임"}],
             "rotation_sequence": rotation_sequence,
             "observations": observations_by_class,
             "pedestal_distance_avg_cm": round(pedestal_distance_avg_cm, 1),
@@ -519,6 +584,8 @@ class NavigateToTargetService:
               f"현재 방위각 오프셋: {current_heading_map_deg:.1f}도")
 
         result.update({
+            "method": "pedestal",
+            "fallback_chain": localization_evidence["fallback_chain"],
             "robot_position_cm": robot_position_cm,
             "current_heading_map_deg": current_heading_map_deg,
             "pedestal_surface_point_cm": pedestal_surface_point_cm,
@@ -526,6 +593,177 @@ class NavigateToTargetService:
             "map_original": map_original,
         })
         return result
+
+    # ── 대체 경로 공용: 문 거리(겉보기 크기)와 문 방위 ──────────────────────
+    def _door_distance_from_size(self, detections_by_class: dict):
+        """문의 겉보기 크기로 로봇->문 거리를 어림한다. 반환: (거리cm 또는 None, 근거 dict).
+
+        depth(UniDepth)는 문이 멀어 보정식 유효범위를 벗어나므로(rel_depth≈10) 쓰지 않는다.
+        상수와 그 출처는 모듈 상단 DOOR_SIZE_K_* 주석. 잘린 치수는 버리고, 남은 추정치의
+        **중앙값**을 쓴다 -- 한 치수가 틀려도(비스듬한 폭·일부만 잡힌 높이) 끌려가지 않게."""
+        dets = detections_by_class.get("door", {})
+        per_frame, estimates = [], []
+        for rot, det in sorted(dets.items()):
+            if not det.get("found"):
+                continue
+            best = _best_instance(det)
+            x1, y1, x2, y2 = best["box_xyxy"]
+            entry = {"frame": det["frame"], "rotation_deg": rot, "box_xyxy": [round(v, 1) for v in best["box_xyxy"]],
+                     "box_w_px": round(x2 - x1, 1), "box_h_px": round(y2 - y1, 1)}
+            img = cv2.imread(str(_resolve_frame_path(det["frame"])))
+            if img is None:
+                entry["skipped_reason"] = "프레임 원본을 못 열었다"
+                per_frame.append(entry)
+                continue
+            h0, w0 = img.shape[:2]
+            if (w0, h0) != BORDER_CROP_SOURCE_SIZE:
+                entry["skipped_reason"] = f"보정 상수는 {BORDER_CROP_SOURCE_SIZE[0]}x{BORDER_CROP_SOURCE_SIZE[1]} 프레임에서 잰 값 -- 이 프레임은 {w0}x{h0}"
+                per_frame.append(entry)
+                continue
+            crop_w = BORDER_CROP_BOX[2] - BORDER_CROP_BOX[0]
+            crop_h = BORDER_CROP_BOX[3] - BORDER_CROP_BOX[1]
+            width_clipped = x1 <= DOOR_SIZE_EDGE_PX or x2 >= crop_w - DOOR_SIZE_EDGE_PX
+            height_clipped = y1 <= DOOR_SIZE_EDGE_PX or y2 >= crop_h - DOOR_SIZE_EDGE_PX
+            entry["width_clipped"], entry["height_clipped"] = width_clipped, height_clipped
+            if not width_clipped and (x2 - x1) > 2:
+                d = DOOR_SIZE_K_WIDTH / (x2 - x1)
+                entry["distance_from_width_cm"] = round(d, 1)
+                estimates.append(d)
+            if not height_clipped and (y2 - y1) > 2:
+                d = DOOR_SIZE_K_HEIGHT / (y2 - y1)
+                entry["distance_from_height_cm"] = round(d, 1)
+                estimates.append(d)
+            per_frame.append(entry)
+        evidence = {
+            "method": "문 박스 겉보기 크기 -- distance_cm = K / box_px (잘린 치수 제외, 중앙값)",
+            "formula": f"distance_cm = median(K_width / box_w_px, K_height / box_h_px)  [K_width={DOOR_SIZE_K_WIDTH:.0f}, K_height={DOOR_SIZE_K_HEIGHT:.0f}]",
+            "constants_source": "door_example 시료(A 성공, 로봇->문 715.4cm)의 문 박스로 역산",
+            "per_frame": per_frame,
+        }
+        if not estimates:
+            evidence["reason"] = "문이 검출된 프레임이 없거나, 모든 치수가 프레임 가장자리에 잘려 거리를 못 구함"
+            return None, evidence
+        estimates.sort()
+        mid = len(estimates) // 2
+        distance = estimates[mid] if len(estimates) % 2 else (estimates[mid - 1] + estimates[mid]) / 2.0
+        evidence["estimates_cm"] = [round(v, 1) for v in estimates]
+        evidence["distance_cm"] = round(distance, 1)
+        evidence["substituted"] = f"median({', '.join(f'{v:.1f}' for v in estimates)}) = {distance:.1f}"
+        low, high = DOOR_DISTANCE_PLAUSIBLE_CM
+        if not (low <= distance <= high):
+            evidence["reason"] = f"어림 거리 {distance:.1f}cm가 믿을 범위({low:.0f}~{high:.0f}cm) 밖"
+            return None, evidence
+        return distance, evidence
+
+    def _door_rotation(self, detections_by_class: dict):
+        """시작 방향 기준 문 방위(시계 +). 반환: (방위도 0~360 또는 None, 근거 dict 또는 None).
+
+        박스 오프셋 보정(_bearing_refinement)이 되면 그 연속값, 안 되면(박스가 너무 커 중심을
+        못 믿음) 문이 검출된 프레임들의 rotation_deg 원형평균으로 물러난다 -- 이때는 45도 단위라는
+        한계를 근거에 적는다."""
+        turn, refinement = self._bearing_refinement("door", detections_by_class)
+        if refinement is not None:
+            return refinement["refined_target_rotation_deg"], {"source": "bearing_refinement", **refinement}
+        found = [rot for rot, det in sorted(detections_by_class.get("door", {}).items()) if det.get("found")]
+        if not found:
+            return None, None
+        s = sum(math.sin(math.radians(r)) for r in found)
+        c = sum(math.cos(math.radians(r)) for r in found)
+        rot = math.degrees(math.atan2(s, c)) % 360.0
+        return rot, {"source": "rotation_deg_mean", "rotation_degs": found, "refined_target_rotation_deg": round(rot, 2),
+                     "note": "박스 오프셋 보정을 못 해 촬영 각도(45도 단위)의 원형평균을 썼다 -- 회전각이 거칠다"}
+
+    # ── B: 단상 없이 문만으로 위치 추정 (2026-09-14 리허설 반영, 사용자 지시 2-1) ──
+    def _localize_from_door(self, detections_by_class, out_dir, map_original, door_map_cm,
+                            rotation_sequence, observations_by_class, pedestal_reason) -> dict:
+        """**A와 같은 기하 가정**을 쓴다 -- 로봇은 단상->문 직선 위에 있다. A는 그 선 위에서
+        단상까지의 거리로 자리를 잡고, B는 **문까지의 거리**(겉보기 크기)로 잡는다. 방위는 문
+        자신의 관측각으로 역산한다(A가 피한 순환이 여기서는 남는다 -- 교차검증 상대인 단상이
+        없기 때문이며, 그 사실을 근거에 적는다).
+
+        추정한 자리가 방 밖이거나 단상 안이면 **위치 추정 자체가 틀린 것**으로 보고 실패를 낸다.
+        그때 경로 단계는 C(문 관측만으로 경로)로 넘어간다."""
+        chain = [{"step": "A_pedestal", "ok": False, "detail": pedestal_reason}]
+        distance, distance_ev = self._door_distance_from_size(detections_by_class)
+        door_rot, rotation_ev = self._door_rotation(detections_by_class)
+        base = {"rotation_sequence": rotation_sequence, "observations": observations_by_class,
+                "door_position_cm_fixed_from_gt": [round(v, 1) for v in door_map_cm],
+                "door_distance_estimate": distance_ev, "door_rotation_estimate": rotation_ev}
+
+        def fail(reason: str) -> dict:
+            chain.append({"step": "B_door_only", "ok": False, "detail": reason})
+            print(f"[navigate] B(문만) 실패: {reason} -- 경로 단계가 C(문 관측만으로 경로)를 시도한다")
+            evidence = {"ok": False, "method": None, "reason": f"{pedestal_reason} / 문만으로도 위치를 못 잡음: {reason}",
+                        "fallback_chain": chain, **base}
+            with open(out_dir / "localization_evidence.json", "w", encoding="utf-8") as f:
+                json.dump(evidence, f, ensure_ascii=False, indent=2)
+            return {"ok": False, "reason": evidence["reason"], "fallback_chain": chain, "door_map_cm": door_map_cm,
+                    "door_distance_cm": distance, "door_distance_estimate": distance_ev,
+                    "door_rotation_deg": door_rot, "door_rotation_estimate": rotation_ev, "map_original": map_original}
+
+        if door_rot is None:
+            return fail("문이 어느 프레임에서도 검출되지 않음")
+        if distance is None:
+            return fail(distance_ev.get("reason", "문 거리를 못 구함"))
+
+        dx, dy = door_map_cm[0] - PEDESTAL_CENTER_CM[0], door_map_cm[1] - PEDESTAL_CENTER_CM[1]
+        length = math.hypot(dx, dy)
+        ux, uy = dx / length, dy / length
+        robot_position_cm = (door_map_cm[0] - distance * ux, door_map_cm[1] - distance * uy)
+        inside_room = (-ROOM_MARGIN_CM <= robot_position_cm[0] <= ROOM_CM[0] + ROOM_MARGIN_CM
+                       and -ROOM_MARGIN_CM <= robot_position_cm[1] <= ROOM_CM[1] + ROOM_MARGIN_CM)
+        px1, py1, px2, py2 = PEDESTAL_BOX_CM
+        in_pedestal = px1 <= robot_position_cm[0] <= px2 and py1 <= robot_position_cm[1] <= py2
+        if not inside_room:
+            return fail(f"추정 위치 ({robot_position_cm[0]:.1f}, {robot_position_cm[1]:.1f})cm가 방(0~{ROOM_CM[0]:.0f}, 0~{ROOM_CM[1]:.0f}) 밖")
+        if in_pedestal:
+            return fail(f"추정 위치 ({robot_position_cm[0]:.1f}, {robot_position_cm[1]:.1f})cm가 단상 안")
+
+        map_bearing_to_door_deg = math.degrees(math.atan2(uy, ux)) % 360.0
+        current_heading_map_deg = (map_bearing_to_door_deg - door_rot) % 360.0
+        chain.append({"step": "B_door_only", "ok": True,
+                      "detail": f"문 거리 {distance:.1f}cm(겉보기 크기) · 문 방위 {door_rot:.1f}도({rotation_ev['source']})"})
+
+        overlay = map_original.copy()
+        pos_px = cm_to_map_px(*robot_position_cm)
+        door_px_map = cm_to_map_px(*door_map_cm)
+        cv2.line(overlay, (int(pos_px[0]), int(pos_px[1])), (int(door_px_map[0]), int(door_px_map[1])), (255, 0, 0), 2)
+        door_mid = ((pos_px[0] + door_px_map[0]) / 2, (pos_px[1] + door_px_map[1]) / 2)
+        cv2.putText(overlay, f"{distance:.1f} cm (door size)", (int(door_mid[0]) - 140, int(door_mid[1]) - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 0, 0), 3)
+        cv2.circle(overlay, (int(pos_px[0]), int(pos_px[1])), 8, (0, 0, 255), -1)
+        cv2.imwrite(str(out_dir / "map_overlay.jpg"), overlay)
+
+        evidence = {
+            "ok": True,
+            "method": "door_only",
+            "method_words": "B -- 단상이 안 보여 문의 겉보기 크기(거리)와 문 방위만으로 위치와 방위를 추정",
+            "fallback_chain": chain,
+            **base,
+            "robot_position_cm": [round(v, 1) for v in robot_position_cm],
+            "current_heading_map_deg": round(current_heading_map_deg, 1),
+            "map_bearing_to_door_deg": round(map_bearing_to_door_deg, 1),
+            "rotation_calculation": {
+                "step1_door_distance": {"formula": distance_ev["formula"], "substituted": distance_ev["substituted"]},
+                "step2_robot_position": {
+                    "formula": "robot_position_cm = door_position_cm - door_distance_cm * unit_vector(pedestal_center -> door)",
+                    "substituted": f"({door_map_cm[0]:.1f}, {door_map_cm[1]:.1f}) - {distance:.1f} * ({ux:.3f}, {uy:.3f}) "
+                                   f"= ({robot_position_cm[0]:.1f}, {robot_position_cm[1]:.1f})",
+                    "note": "A와 같은 기하 가정(로봇은 단상->문 직선 위) -- 단상까지 대신 문까지의 거리로 자리를 잡는다",
+                },
+                "step3_current_heading_map_deg": {
+                    "formula": "current_heading_map_deg = (map_bearing_to_door_deg - door_rotation_deg) mod 360",
+                    "substituted": f"({map_bearing_to_door_deg:.1f} - {door_rot:.1f}) mod 360 = {current_heading_map_deg:.1f}",
+                    "note": "교차검증할 단상이 없어 문 자신의 관측각으로 역산했다 -- 회전각과 서로 기대는 값이다",
+                },
+            },
+        }
+        with open(out_dir / "localization_evidence.json", "w", encoding="utf-8") as f:
+            json.dump(evidence, f, ensure_ascii=False, indent=2)
+        print(f"[navigate] B(문만) 위치(cm): {[round(v, 1) for v in robot_position_cm]}, 방위 오프셋 {current_heading_map_deg:.1f}도")
+        return {"ok": True, "method": "door_only", "fallback_chain": chain, "robot_position_cm": robot_position_cm,
+                "current_heading_map_deg": current_heading_map_deg, "door_map_cm": door_map_cm,
+                "map_original": map_original, "door_distance_cm": distance, "door_distance_estimate": distance_ev}
 
     # ── 2단계: 지정 클래스의 지도 위치 결정 ──────────────────────────────
     def resolve_target_position(self, target_class: str, detections_by_class: dict, loc: dict) -> dict:
@@ -680,10 +918,10 @@ class NavigateToTargetService:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if not loc.get("ok"):
-            print(f"[navigate] go_to_class({target_class}) 처리 불가: 자기 위치 추정 실패 -- {loc.get('reason')}")
-            with open(out_dir / "evidence.json", "w", encoding="utf-8") as f:
-                json.dump({"target_class": target_class, "ok": False,
-                           "reason": f"localization failed: {loc.get('reason')}"}, f, ensure_ascii=False, indent=2)
+            # 2026-09-14 리허설 반영(사용자 지시 2-2): 위치 추정 자체가 안 되면 **문 관측만으로**
+            # 경로(회전각 + 직진 거리)를 낸다. 도면 위 자리가 없으니 도면 경로 그림은 못 그린다.
+            print(f"[navigate] 위치 추정 실패 -- {loc.get('reason')} -- C(문 관측만으로 경로) 시도")
+            self._door_relative_path(target_class, detections_by_class, loc, out_dir)
             return
 
         target = self.resolve_target_position(target_class, detections_by_class, loc)
@@ -737,20 +975,6 @@ class NavigateToTargetService:
         map_original = loc.get("map_original")
         if map_original is None:
             map_original = cv2.imread(str(MAP_PATH))
-        path_overlay = map_original.copy()
-        p0 = cm_to_map_px(*robot_position_cm)
-        p1 = cm_to_map_px(*goal_cm)
-        cv2.arrowedLine(path_overlay, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])), (0, 0, 255), 3, tipLength=0.04)
-        cv2.circle(path_overlay, (int(p0[0]), int(p0[1])), 8, (0, 0, 255), -1)
-        cv2.drawMarker(path_overlay, (int(p1[0]), int(p1[1])), (0, 0, 255),
-                        markerType=cv2.MARKER_TILTED_CROSS, markerSize=18, thickness=3)
-        mid_px = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
-        cv2.putText(path_overlay, f"{forward_distance_cm:.1f} cm", (int(mid_px[0]) - 90, int(mid_px[1]) - 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 3)
-        ref_end = (p0[0] + 130.0 * math.cos(math.radians(current_heading_map_deg)),
-                   p0[1] + 130.0 * math.sin(math.radians(current_heading_map_deg)))
-        cv2.arrowedLine(path_overlay, (int(p0[0]), int(p0[1])), (int(ref_end[0]), int(ref_end[1])),
-                         (120, 120, 120), 2, tipLength=0.1)
         # bearing_refinement가 적용된 경우 turn_amount_deg가 더 이상
         # map_bearing_to_target_deg - current_heading_map_deg와 정확히 일치하지
         # 않으므로(랜드마크 자신의 관측으로 직접 재보정했기 때문), 호(arc)
@@ -758,10 +982,8 @@ class NavigateToTargetService:
         # 방위각을 current_heading_map_deg + turn_amount_signed로 다시 잡는다.
         arc_target_bearing_deg = (current_heading_map_deg + turn_amount_signed) % 360.0 \
             if bearing_refinement is not None else map_bearing_to_target_deg
-        cv2.ellipse(path_overlay, (int(p0[0]), int(p0[1])), (70, 70), 0,
-                    arc_target_bearing_deg, current_heading_map_deg, (0, 0, 255), 2)
-        cv2.putText(path_overlay, f"{turn_amount_deg:.1f} deg", (int(p0[0]) - 30, int(p0[1]) + 130),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
+        path_overlay = _draw_path_overlay(map_original, robot_position_cm, goal_cm, current_heading_map_deg,
+                                          arc_target_bearing_deg, turn_amount_deg, forward_distance_cm)
         cv2.imwrite(str(out_dir / "path_overlay.jpg"), path_overlay)
 
         path_calculation = {
@@ -821,6 +1043,14 @@ class NavigateToTargetService:
         nav_evidence = {
             "target_class": target_class,
             "ok": True,
+            # 2026-09-14: 어느 경로로 나온 경로인가 -- 관제 웹 액션 아이템이 그대로 적는다.
+            "path_mode": "map",
+            "path_mode_words": "도면 위 로봇 자리에서 목표까지 산출" + (
+                " (A -- 단상 기반 위치)" if loc.get("method") == "pedestal" else " (B -- 문만으로 추정한 위치)"),
+            "localization_method": loc.get("method"),
+            "fallback_chain": list(loc.get("fallback_chain") or []) + [{"step": "path_map", "ok": True, "detail": "도면 기반 경로 산출"}],
+            "path_overlay_available": True,
+            "path_overlay_kind": "map",
             "target_resolution": target,
             "robot_position_cm": [round(v, 1) for v in robot_position_cm],
             "current_heading_map_deg": round(current_heading_map_deg, 1),
@@ -845,3 +1075,175 @@ class NavigateToTargetService:
         print(f"[navigate] 지시: {turn_direction}으로 {turn_amount_deg:.1f}도 회전 -> "
               f"{forward_distance_cm:.1f}cm 직진 ({target_class} {standoff_cm:.0f}cm 앞 정지)")
         print(f"[navigate] Saved to {out_dir}: path_overlay.jpg, evidence.json")
+
+    # ── C: 위치 없이 문 관측만으로 경로 (2026-09-14 리허설 반영, 사용자 지시 2-2) ──
+    def _door_relative_path(self, target_class: str, detections_by_class: dict, loc: dict, out_dir: Path) -> None:
+        """로봇의 도면상 자리를 모를 때 **문 자신의 관측**만으로 「얼마나 돌고 얼마나 가나」를 낸다.
+
+          회전각   문 방위(박스 오프셋 보정 연속값, 안 되면 촬영 각도 원형평균) -- 시작 방향 기준
+          직진     문 거리(겉보기 크기) - standoff
+
+        문이 아닌 클래스는 겉보기 크기 상수가 없어 여기서 멈추고 정직하게 실패를 적는다.
+
+        2026-09-14 사용자 지시("C로 나와도 산출된 경로를 역추적해서 2D 맵에 그리는 게 나아 보여"):
+        로봇의 도면 자리는 모르지만 **문의 도면 자리는 안다.** 산출된 경로(문 방위 · 문 거리)를 문에서
+        거꾸로 따라가 출발 자리를 **가정**해 그림을 그린다. 방향 가정은 B와 같다(로봇은 단상->문 선 위).
+
+          가정 출발 자리   = 문 자리 - 문 거리 x 단위벡터(단상 중심 -> 문)
+          가정 출발 방위   = (그 선의 도면 방위 - 문 방위) mod 360
+          도착점           = 문 자리 - standoff x 같은 단위벡터
+
+        B가 「방 밖 · 단상 안」으로 버린 자리도 **그림에는 그대로 그린다** -- 위치 추정으로 쓰는 값이 아니라
+        명령(회전·직진)을 도면에 옮긴 것이기 때문이다. 로봇 명령은 그림과 무관하게 문 관측값 그대로다.
+        근거에 `path_overlay_kind: backtraced` 와 가정·식을 남기고, robot_position_cm 은 여전히 null 이다."""
+        chain = list(loc.get("fallback_chain") or [])
+
+        def fail(reason: str) -> None:
+            chain.append({"step": "C_door_relative", "ok": False, "detail": reason})
+            print(f"[navigate] C(문 관측만) 실패: {reason} -- 경로를 내지 않는다")
+            with open(out_dir / "evidence.json", "w", encoding="utf-8") as f:
+                json.dump({"target_class": target_class, "ok": False, "path_mode": None,
+                           "reason": f"경로 산출 실패 -- {reason} (위치 추정: {loc.get('reason')})",
+                           "fallback_chain": chain,
+                           "door_distance_estimate": loc.get("door_distance_estimate"),
+                           "door_rotation_estimate": loc.get("door_rotation_estimate")},
+                          f, ensure_ascii=False, indent=2)
+
+        if target_class != "door":
+            return fail(f"'{target_class}'는 겉보기 크기 상수가 없어 위치 없이 거리를 못 구함")
+        door_rot = loc.get("door_rotation_deg")
+        rotation_ev = loc.get("door_rotation_estimate")
+        if door_rot is None:
+            door_rot, rotation_ev = self._door_rotation(detections_by_class)
+        if door_rot is None:
+            return fail("문이 어느 프레임에서도 검출되지 않음 -- 갈 방향이 없다")
+        distance = loc.get("door_distance_cm")
+        distance_ev = loc.get("door_distance_estimate")
+        if distance is None:
+            distance, distance_ev = self._door_distance_from_size(detections_by_class)
+        if distance is None:
+            return fail((distance_ev or {}).get("reason", "문 거리를 못 구함") + " -- 방향은 알지만 얼마나 갈지 모른다")
+
+        turn_amount_signed = (door_rot + 180.0) % 360.0 - 180.0
+        turn_direction = "왼쪽(반시계)" if turn_amount_signed < 0 else "오른쪽(시계)"
+        turn_amount_deg = abs(turn_amount_signed)
+        standoff_cm = STANDOFF_CM_BY_CLASS.get(target_class, STANDOFF_CM_DEFAULT)
+        forward_distance_cm = distance - standoff_cm
+        forward_distance_m = forward_distance_cm / 100.0
+        distance_in_range = ROBOT_FORWARD_M_MIN <= forward_distance_m <= ROBOT_FORWARD_M_MAX
+        robot_command = {
+            "turn": {"deg": round(turn_amount_signed, 1)},
+            "move_forward": {"distance_m": round(forward_distance_m, 3)},
+            "distance_m_in_range": distance_in_range,
+            "accepted_range_m": [ROBOT_FORWARD_M_MIN, ROBOT_FORWARD_M_MAX],
+            "note": "turn.deg는 오른쪽이 +(왼쪽이 음수), 스캔 시작 방향 기준. "
+                    "move_forward.distance_m에는 standoff가 이미 반영돼 있다 -- 또 빼지 말 것.",
+        }
+        if not distance_in_range:
+            robot_command["warning"] = (f"전진 거리 {forward_distance_m:.3f}m가 로봇이 받는 범위"
+                                        f"({ROBOT_FORWARD_M_MIN}~{ROBOT_FORWARD_M_MAX}m)를 벗어난다 -- 그대로 보내면 안 된다")
+        chain.append({"step": "C_door_relative", "ok": True,
+                      "detail": f"문 방위 {door_rot:.1f}도 · 문 거리 {distance:.1f}cm -- 도면 위치 없이 산출"})
+        path_calculation = {
+            "step1_door_rotation": {
+                "formula": (rotation_ev or {}).get("formula", "door_rotation_deg = circular_mean(rotation_deg_i for door frames)"),
+                "substituted": f"door_rotation_deg = {door_rot:.1f} ({(rotation_ev or {}).get('source', '?')})",
+            },
+            "step2_turn_amount": {
+                "formula": "turn_amount_signed = ((door_rotation_deg + 180) mod 360) - 180",
+                "substituted": f"(({door_rot:.1f} + 180) mod 360) - 180 = {turn_amount_signed:.1f} ({turn_direction})",
+            },
+            "step3_door_distance": {
+                "formula": (distance_ev or {}).get("formula", "door_distance_cm = K / box_px"),
+                "substituted": (distance_ev or {}).get("substituted", f"{distance:.1f}"),
+            },
+            "step4_forward_distance": {
+                "formula": "forward_distance_cm = door_distance_cm - standoff_cm(target_class)",
+                "substituted": f"{distance:.1f} - {standoff_cm:.1f} = {forward_distance_cm:.1f}",
+            },
+        }
+        # ── 역추적 그림 -- 명령을 문에서 거꾸로 도면에 옮긴다(가정 출발 자리) ──
+        door_map_cm = loc.get("door_map_cm") or px_to_cm(*DOOR_PX)
+        backtrace = None
+        backtrace_error = None
+        try:
+            bx, by = door_map_cm[0] - PEDESTAL_CENTER_CM[0], door_map_cm[1] - PEDESTAL_CENTER_CM[1]
+            blen = math.hypot(bx, by)
+            ux, uy = bx / blen, by / blen
+            start_cm = (door_map_cm[0] - distance * ux, door_map_cm[1] - distance * uy)
+            goal_cm = (door_map_cm[0] - standoff_cm * ux, door_map_cm[1] - standoff_cm * uy)
+            line_bearing_deg = math.degrees(math.atan2(uy, ux)) % 360.0
+            start_heading_deg = (line_bearing_deg - door_rot) % 360.0
+            map_original = loc.get("map_original")
+            if map_original is None:
+                map_original = cv2.imread(str(MAP_PATH))
+            overlay = _draw_path_overlay(map_original, start_cm, goal_cm, start_heading_deg,
+                                         (start_heading_deg + turn_amount_signed) % 360.0,
+                                         turn_amount_deg, forward_distance_cm, backtraced=True)
+            cv2.imwrite(str(out_dir / "path_overlay.jpg"), overlay)
+            px1, py1, px2, py2 = PEDESTAL_BOX_CM
+            backtrace = {
+                "assumption": "로봇은 단상 중심 -> 문 직선 위에 있다(B와 같은 가정) -- 문 자리에서 문 거리만큼 거꾸로",
+                "start_position_cm": [round(v, 1) for v in start_cm],
+                "start_heading_map_deg": round(start_heading_deg, 1),
+                "goal_cm": [round(v, 1) for v in goal_cm],
+                "start_inside_pedestal": px1 <= start_cm[0] <= px2 and py1 <= start_cm[1] <= py2,
+                "calculation": {
+                    "step1_start_position": {
+                        "formula": "start_cm = door_position_cm - door_distance_cm * unit_vector(pedestal_center -> door)",
+                        "substituted": f"({door_map_cm[0]:.1f}, {door_map_cm[1]:.1f}) - {distance:.1f} * ({ux:.3f}, {uy:.3f}) "
+                                       f"= ({start_cm[0]:.1f}, {start_cm[1]:.1f})",
+                    },
+                    "step2_start_heading": {
+                        "formula": "start_heading_map_deg = (line_bearing_deg - door_rotation_deg) mod 360",
+                        "substituted": f"({line_bearing_deg:.1f} - {door_rot:.1f}) mod 360 = {start_heading_deg:.1f}",
+                    },
+                    "step3_goal": {
+                        "formula": "goal_cm = door_position_cm - standoff_cm * unit_vector(pedestal_center -> door)",
+                        "substituted": f"({door_map_cm[0]:.1f}, {door_map_cm[1]:.1f}) - {standoff_cm:.1f} * ({ux:.3f}, {uy:.3f}) "
+                                       f"= ({goal_cm[0]:.1f}, {goal_cm[1]:.1f})",
+                    },
+                },
+                "note": "도면 그림용 가정이다 -- 로봇 명령(회전·직진)은 이 값과 무관하게 문 관측값 그대로다",
+            }
+        except Exception as exc:  # 그림 실패가 경로(명령)를 막으면 안 된다
+            # 화면에 보이는 대체 경로 사슬에는 넣지 않는다(시연에서 역추적을 언급하지 않는다) -- 콘솔과 근거 필드에만.
+            backtrace = None
+            backtrace_error = f"역추적 그림 실패: {exc}"
+            print(f"[navigate] C 역추적 그림 실패(명령은 그대로): {exc}")
+
+        nav_evidence = {
+            "target_class": target_class,
+            "ok": True,
+            "path_mode": "door_relative",
+            "path_mode_words": "C -- 로봇 위치를 못 잡아 문 관측(방위·겉보기 크기)만으로 산출"
+                               + ("" if backtrace is not None else ". 도면 위 경로 그림 없음"),
+            "localization_method": None,
+            "localization_reason": loc.get("reason"),
+            "fallback_chain": chain,
+            "path_overlay_available": backtrace is not None,
+            "path_overlay_kind": "backtraced" if backtrace is not None else None,
+            "backtrace": backtrace,
+            "backtrace_error": backtrace_error,
+            "target_resolution": {"target_class": target_class, "position_cm": None, "source": "door_relative",
+                                  "detail": "도면 좌표 없이 로봇 기준 방위·거리로만 산출"},
+            "robot_position_cm": None,
+            "current_heading_map_deg": None,
+            "target_position_cm": [round(v, 1) for v in loc.get("door_map_cm") or px_to_cm(*DOOR_PX)],
+            "turn_instruction": f"{turn_direction}으로 {turn_amount_deg:.1f}도 회전",
+            "turn_deg": round(turn_amount_signed, 1),
+            "distance_to_target_cm": round(distance, 1),
+            "standoff_cm": standoff_cm,
+            "forward_distance_cm": round(forward_distance_cm, 1),
+            "forward_distance_m": round(forward_distance_m, 3),
+            "robot_command": robot_command,
+            "goal_cm": None,
+            "path_calculation": path_calculation,
+            "bearing_refinement": rotation_ev,
+            "door_distance_estimate": distance_ev,
+        }
+        with open(out_dir / "evidence.json", "w", encoding="utf-8") as f:
+            json.dump(nav_evidence, f, ensure_ascii=False, indent=2)
+        _send_to_device(nav_evidence, tag=f"{target_class}:navigate")
+        print(f"[navigate] C 지시: {turn_direction}으로 {turn_amount_deg:.1f}도 회전 -> {forward_distance_cm:.1f}cm 직진 "
+              f"(문 관측만 -- 도면 위치 없음" + (", 역추적 그림 저장" if backtrace is not None else "") + ")")

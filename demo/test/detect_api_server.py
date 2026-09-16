@@ -64,6 +64,7 @@ GATE_NAME_MAP = {
     "reference_image": "reference_image_gate",
     "saturation": "saturation_gate",
     "aspect_ratio": "aspect_ratio_gate",
+    "hue": "hue_gate",  # 2026-09-15 door 강화(crop 픽셀 색상 중앙값)
 }
 
 # 클래스명으로 경로를 조립하므로 경로 탈출(../)과 이상한 문자를 먼저 막는다.
@@ -200,6 +201,8 @@ def build_evidence(target: str, frame: str):
         "fusion_confidence_sum": best.get("final_score"),
         "supporting_sources": best.get("supporting_sources"),
         "lifecycle": best.get("lifecycle"),
+        # 2026-09-15: 확정 조건 '사전 박스 ↔ OVD 박스 짝 IoU'(door만). 확정 시점 기록의 값이다.
+        "dictionary_ovd_iou": ((best.get("evidence_trail") or [{}])[-1]).get("dictionary_ovd_iou"),
         "provider_timings_ms": evidence.get("provider_timings_ms"),
         "instance_count": len(instances),
     }
@@ -216,8 +219,10 @@ def build_path(target: str):
     if nav.get("target_class") != target:
         return None, f"현재 실행의 타겟 클래스는 '{nav.get('target_class')}'다"
     if not nav.get("ok"):
-        return None, nav.get("reason") or (nav.get("target_resolution") or {}).get("detail") \
-            or "경로 산출 실패"
+        # 2026-09-14: **실패는 「아직 없음」이 아니다.** 404 로 주면 관제 웹이 계속 기다리고,
+        # 대체 경로(A 단상 -> B 문만 위치 -> C 문 관측만)가 어디서 왜 끊겼는지도 버려진다.
+        # 산출물을 ok:false 그대로 200 으로 내준다 -- reason 과 fallback_chain 이 실려 있다.
+        nav.setdefault("reason", (nav.get("target_resolution") or {}).get("detail") or "경로 산출 실패")
     return nav, None
 
 
