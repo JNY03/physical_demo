@@ -1,0 +1,31 @@
+# 엣지 노드. 기기를 옮기면 `git clone` → `fetch_models.sh` → `up` 이면 끝난다.
+services:
+  edge:
+    build: .
+    image: drone-edge
+    # 스트리밍은 **로컬 포트에만** 연다. 다른 기기에서 보려면 tailscale 주소를
+    # 여기 적는다 — 0.0.0.0으로 여는 것보다 노출 범위가 설정에 드러난다.
+    ports:
+      - "127.0.0.1:8891:8891"
+    volumes:
+      # 코드는 이미지에, 무거운 것과 산출물은 호스트에. 이 경계가 이전을 가볍게 한다.
+      - ./models:/app/models
+      - ./third_party:/app/third_party
+      - ./store:/app/store
+      - ./config.json:/app/config.json:ro
+    environment:
+      # ultralytics/HF 캐시를 마운트 안으로 — 컨테이너를 다시 만들어도 다시 안 받는다.
+      - HF_HOME=/app/models/.hf
+      - YOLO_CONFIG_DIR=/app/models/.ultralytics
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # 말단은 tailscale 너머에 있다. 컨테이너에서 tailscale 이름을 풀려면 호스트
+    # DNS를 타야 하므로 host 네트워크가 가장 덜 아프다. 그때는 ports가 무시되고
+    # config의 server.host가 노출 범위를 정한다.
+    # network_mode: host
+    restart: unless-stopped

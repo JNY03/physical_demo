@@ -1,0 +1,421 @@
+{
+  "$comment": "엣지 노드 단일 설정면. **말단에서 당겨 온다**(terminals) — 말단은 이 주소를 모르고 먼저 연결하지도 않는다. 그래서 이 기기를 옮겨도 말단 설정은 그대로다. 단계는 셋: stage1(OVD 합의)은 당긴 직후 돌려 즉시 말단에 밀고, stage2(CLIP 근거)와 depth(MoGe2-Aerial 거리)는 비동기로 돌아 준비되는 대로 따로 민다. 말단은 먼저 나온 것부터 track_id로 시점을 맞춰 반영한다.",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8891,
+    "$comment": "오버레이 스트리밍과 운영 창구. **127.0.0.1에 연다** — 이 기기에서만 본다는 뜻이다. 다른 기기에서 보려면 0.0.0.0으로 바꾸는 대신 tailscale 주소를 적는 편이 낫다. 0.0.0.0은 노출 범위를 설정이 아니라 네트워크가 정하게 만든다.",
+    "workers": 2,
+    "async_queue": 3,
+    "$comment_queue": "비동기 큐 길이. **2로 짧게 잡는다** — 여기 쌓인 프레임은 곧 거리가 그만큼 낡는다는 뜻이다. 밀리면 그 프레임의 depth를 건너뛰고 최신 프레임으로 가는 편이 낫다(YOLOE 판정은 이미 말단에 갔다). 건너뛴 수는 health의 async_dropped에 뜬다.",
+    "$comment_workers": "비동기 워커 수. **2로 늘렸다** — depth(493ms)와 미검출(662ms)이 하나의 워커를 나눠 쓰면 서로 밀어내고 거리가 그만큼 더 낡는다. 둘이 쓰는 자원이 다르므로(depth는 GPU, 미검출의 CLIP은 CPU) 병렬이 실제로 겹친다."
+  },
+  "terminals": [
+    {
+      "$comment": "당겨 올 말단 목록. **host를 자기 환경에 맞게 바꾼다** — tailscale MagicDNS 이름이나 IP를 쓴다. 저장소에는 특정 기기 주소를 두지 않는다(다른 기기에서 그대로 쓰면 조용히 엉뚱한 곳으로 간다). name은 로그·헬스 표시용이고 cameras는 돌아가며 당길 인덱스다.\n**여기가 유일하게 기기 주소가 적히는 곳이다** — 엣지를 옮겨도 이 줄만 고치면 되고 말단은 손대지 않는다. 말단은 엣지 주소를 모르고 먼저 연결하지도 않는다.",
+      "name": "terminal-1",
+      "host": "CHANGE-ME",
+      "port": 8890,
+      "enabled": true,
+      "cameras": [
+        0
+      ],
+      "connect_timeout_s": 3.0,
+      "read_timeout_s": 20.0,
+      "idle_sleep_s": 0.2,
+      "drain_spool": true,
+      "$comment_backpressure": "당기는 속도가 곧 backpressure다. 이 루프는 stage1이 끝나야 다음을 당기므로 엣지가 느리면 자연히 덜 당긴다. 당기지 않은 사이의 프레임은 말단이 최신만 들고 있다가 버린다 — 실시간 감시에서 오래된 프레임은 가치가 없다. 예전 push 구조에서는 말단이 카메라 속도로 밀어 CLIP 큐가 6:1로 밀렸다.",
+      "$comment_spool": "drain_spool: 실시간 프레임이 없을 때만 /api/spool로 단절 구간을 훑는다. 현재 프레임이 항상 먼저다.",
+      "autostart": {
+        "$comment": "기동 직후의 게이트 상태. 셋은 서로 독립이다 — 가져오기만 켜고 추론을 끄면 '말단이 뭘 보고 있나'만 화면으로 확인할 수 있고, 보내기만 끄면 말단 레코드를 얼려 둔 채 엣지에서만 돌려 볼 수 있다. 실행 중 변경은 POST /api/command 또는 `python server.py ctl {fetch|infer-on|infer-off|push-on|push-off|pull-on|pull-off|status}`.",
+        "pull": true,
+        "inference": false,
+        "push": false,
+        "$comment_default": "추론과 보내기를 꺼진 채로 띄운다. 모델 적재에 시간이 걸리고 depth 체크포인트가 1.48GB라, 기동하자마자 말단 레코드에 판정이 들어가기 시작하면 무엇이 언제부터 반영됐는지 경계가 흐려진다. 준비를 확인하고 `ctl infer-on` → `ctl push-on` 순으로 연다."
+      }
+    }
+  ],
+  "ovd": {
+    "$comment": "stage1 — 동기. YOLOE prompt-free **한 종만** 쓴다(사용자 2026-09-21). 내장 어휘 4585종이라 텍스트 프롬프트가 필요 없고, 어휘를 사람이 정하지 않으므로 어휘 설계 실수가 미지 집합을 오염시키는 경로가 없다. YOLO-World 경로는 제거했다 — provider를 늘리는 것이 아니라 하나로 확정한 것이다(AI-B-09).",
+    "enabled": true,
+    "weights": "models/yoloe-11s-seg-pf.pt",
+    "conf": 0.1,
+    "iou": 0.5,
+    "imgsz": 640,
+    "sticky_label_bonus": 0.1,
+    "$comment_sticky": "검출을 트랙에 배정할 때 이미 같은 라벨을 들고 있는 트랙에 주는 IoU 가산점. RPN 박스가 정지 장면에서도 떨려 근소한 차이로 승자가 뒤집히면 라벨이 깜빡인다(실측: 고정 장면 라벨 10개 중 초당 1개 변경). 0이면 순수 IoU 최대값.",
+    "confident_conf": 0.35,
+    "$comment_confident": "YOLOE 결과도 전부 확정으로 보지 않는다(사용자 2026-09-21). conf가 confident_conf 이상이면 confident — 말단 시점 반영까지 보낸다. 그 아래는 tentative — 근거로만 남기고 말단 레코드에는 올리지 않으며, 저장소와 오버레이에는 그대로 보여 가시화가 판단할 수 있게 한다(AI-S-03: 신뢰도와 근거 충분도는 별개, AI-S-04: 확정 label로 승격 금지). conf는 detect 임계(0.10)보다 높게 잡는다 — 0.10은 '후보로 볼 만한가', confident_conf는 '말단 상태를 바꿔도 되는가'로 목적이 다르다."
+  },
+  "ovd2": {
+    "$comment": "두 번째 OVD — **현장 어휘(GT 텍스트)를 프롬프트로 넣는 눈**. 확정은 prompt-free(ovd)와 이쪽의 **합의**로 정한다(semantics.merge_by_consensus). 단일 모델의 conf는 그 모델의 확신일 뿐 근거 충분도가 아니고(AI-S-03), 실측에서 YOLOE는 0.94/0.87처럼 높은 conf로 틀렸으므로 임계로는 거를 수 없었다. 서로 다른 어휘·학습·구조를 가진 두 모델이 같은 자리에서 같은 것을 말하면 그것은 질이 다른 근거다. 어휘가 비면 이 눈은 쉬고 단일 conf 임계로 축소된다(AI-C-05).",
+    "enabled": true,
+    "weights": "models/yolov8s-worldv2.pt",
+    "conf": 0.05,
+    "iou": 0.5,
+    "imgsz": 640,
+    "agree_iou": 0.5,
+    "agree_min_conf": 0.0,
+    "$comment_speed": "실측(RTX 3060, 같은 프레임): YOLOE prompt-free 15ms / YOLO-World 텍스트 16ms / Grounding DINO tiny 453ms(autocast fp16 299ms). GDINO는 라벨 품질과 무관하게 동기 예산에 못 들어온다 — 말단 왕복이 이미 ~0.5s다.",
+    "synonyms": {
+      "$comment": "토큰 겹침으로 못 잡는 짝을 여기서 명시한다. 예: \"seating\": [\"couch\", \"sofa\"]"
+    },
+    "vocabularies": {
+      "$comment": "도메인별 OVD 텍스트 어휘. 비우거나 없으면 prompt-free(내장 4585종). prompt-free는 미지 집합을 깨끗하게 만들지만 이름 자체를 믿을 수 없다 — 2026-09-21 실내 실측에서 모니터를 computer chair, 벽면을 press room으로 불렀다. 어휘를 바꾸면 임계와 품질은 재측정 대상이다(AI-B-01).",
+      "generic": [
+        "office chair",
+        "backpack",
+        "laptop",
+        "computer monitor",
+        "desk",
+        "bottle",
+        "cardboard box",
+        "window",
+        "window blind",
+        "door",
+        "whiteboard",
+        "cabinet",
+        "plastic bag",
+        "ceiling light",
+        "monitor stand",
+        "cup",
+        "paper",
+        "drone",
+        "person",
+        "keyboard"
+      ],
+      "indoor_robot": [
+        "office chair",
+        "backpack",
+        "laptop",
+        "computer monitor",
+        "desk",
+        "bottle",
+        "cardboard box",
+        "window",
+        "window blind",
+        "door",
+        "whiteboard",
+        "cabinet",
+        "plastic bag",
+        "ceiling light",
+        "monitor stand",
+        "cup",
+        "paper",
+        "drone",
+        "person",
+        "keyboard"
+      ],
+      "river_trash": [
+        "plastic bottle",
+        "plastic bag",
+        "styrofoam box",
+        "plastic container",
+        "driftwood",
+        "tree branch",
+        "water surface",
+        "riverbank",
+        "floating boom",
+        "metal pole"
+      ],
+      "river_boom": [
+        "plastic bottle",
+        "plastic bag",
+        "styrofoam box",
+        "plastic container",
+        "driftwood",
+        "tree branch",
+        "water surface",
+        "riverbank",
+        "floating boom",
+        "gas cylinder"
+      ],
+      "urban": [
+        "person",
+        "car",
+        "truck",
+        "bus",
+        "motorcycle",
+        "bicycle",
+        "road",
+        "building",
+        "tree",
+        "traffic sign"
+      ]
+    }
+  },
+  "unknown": {
+    "$comment": "미검출 분석 — RPN이 냈는데 OVD가 설명 못 한 후보. **비동기**이고 화면 하단 패널용이라 말단 상태를 바꾸지 않는다. IoU만 보면 두 경우가 미지로 샌다: 조각(차 문짝만 딴 박스는 car 안에 있지만 합집합이 커서 IoU가 낮다), 병합(차 3대를 감싼 박스는 어느 car와도 IoU가 낮다). 그래서 축을 셋으로 나눈다 — match(IoU)/fragment(포함)/merged(덮음). 0으로 두면 각 규칙이 꺼진다.",
+    "match_iou": 0.3,
+    "crop_context": 1.5,
+    "max_per_frame": 40,
+    "min_short_side_px": 8,
+    "fragment_containment": 0.7,
+    "merged_coverage": 0.55,
+    "merged_min_dets": 2,
+    "merge_unknown_iou": 0.55,
+    "$comment_postprocess": "IoU만 보면 두 경우가 미지로 샌다(2026-09-21 오버레이 실측): **조각** — 차 문짝만 딴 박스는 car 박스 안에 있지만 합집합이 커서 IoU가 낮다. **병합** — 차 3대를 감싼 박스는 어느 car와도 IoU가 낮다. 그래서 축을 셋으로 나눈다(postprocess.py): match(IoU) / fragment(후보 면적의 fragment_containment 이상이 한 OVD 박스 안) / merged(OVD 박스 merged_min_dets개 이상을 merged_coverage 이상 덮음). 남은 미지끼리 merge_unknown_iou 이상 겹치면 합집합으로 합친다 — 안 합치면 같은 대상이 crop 여러 장이 되고 오버레이가 덮인다. 0으로 두면 각 규칙이 꺼진다.",
+    "max_absorber_area_frac": 0.8,
+    "$comment_absorber": "흡수 자격 상한. 프레임의 이 비율을 넘는 검출은 조각을 흡수하지 못한다. 2026-09-21 실측: 수면 박스가 화면 88%를 덮으며 후보 298개를 삼켰고, 다음 프레임에서 conf가 0.35를 0.019 차이로 못 넘자 흡수가 무너지며 미지가 3배로 튀었다(frame 002→003). 0.80으로 둔 이유: 부유목 더미(16~45%)는 검출 대상이면서 크므로 흡수 자격을 유지해야 하고, 장면을 덮는 수면(88%)만 걸러내면 된다. 0.30으로 조였더니 흡수가 0이 되며 미식별이 4→64로 튀었다.",
+    "min_fragment_ratio": 0.05,
+    "$comment_fragment_ratio": "조각의 상대 크기 하한. 후보 면적이 그 OVD 박스 면적의 이 비율 미만이면 \"조각\"으로 보지 않고 후보로 남긴다. 실측 근거: 미식별 후보 면적 중앙값이 프레임의 0.347%인데 확신 박스 중앙값은 16.4% — 작은 쓰레기는 큰 박스의 2.1% 크기다. containment만 보면 부유목 더미 위 페트병이 더미의 조각으로 삼켜진다. 0.05면 더미 조각(10~30%)은 흡수되고 쓰레기(2%)는 살아남는다.",
+    "enabled": true,
+    "track_iou": 0.35,
+    "min_seen": 3,
+    "expire_misses": 6,
+    "max_slots": 60,
+    "$comment_track": "**미검출 후보에 프레임 간 정체성을 준다**(missed.MissedTracker). RPN 박스는 매 프레임 조금씩 달라서, 그대로 그리면 같은 물체가 다른 칸으로 옮겨 다니고 화면이 계속 바뀌어 읽을 수가 없다(사용자 2026-09-21). 검출된 객체는 OVD가 ObjectTracks로 정체성을 받지만 미검출 후보는 정의상 그 경로가 없다.\nmin_seen 이상 본 것만 그린다 — 잡음 필터이면서 동시에 화면 안정 장치다. 한 프레임만 반짝한 후보는 애초에 칸을 차지하지 않는다. 칸은 슬롯 id 순으로 두어 순위가 바뀌어도 자리가 안 뒤섞인다.\n**한계**: IoU 매칭이라 시야가 빠르게 움직이면 끊긴다. 말단은 KLT 플로우로 그걸 풀지만 엣지는 프레임을 띄엄띄엄 받아 같은 수를 못 쓴다. 끊기면 새 슬롯이 생겨 패널이 비는 쪽으로 틀린다 — 엉뚱한 것을 오래 본 것처럼 보이는 것보다 낫다.",
+    "every_n_frames": 2,
+    "$comment_every": "미검출 분석을 몇 프레임마다 돌릴지. 실측 662~687ms(RPN 54ms + CLIP 1100ms의 일부)로 depth(493ms)와 같은 워커를 나눠 쓰면 서로 밀어낸다. 후보는 슬롯으로 누적되므로 매 프레임 볼 필요가 없다 — min_seen에 도달하는 데 몇 프레임이 더 걸릴 뿐이고, 그동안 depth가 자리를 얻는다.",
+    "$comment_max": "CLIP에 넣을 crop 수 상한. 40 → 24로 줄였다. CLIP이 crop 수에 선형이라 여기가 미검출 분석 시간의 대부분이고, 슬롯이 누적하므로 한 프레임에 다 볼 이유가 없다. objectness 높은 것부터 들어간다.",
+    "geometry": {
+      "$comment": "**기하만으로 배경을 가른다.** 객체는 주변에서 튀어나온다 — 벽·바닥·상판은 주변과 깊이가 이어져 있고 그 위에 놓인 물체는 앞으로 돌출한다. 박스 안쪽 깊이(하위 25%, 가까운 쪽)와 둘레 고리 깊이(중앙값)를 빼면 그 돌출량이 나온다.\n실측 분포(미지 후보 24개): 돌출 p10 -0.343 / p25 -0.121 / p50 0.025 / p75 0.424 / p90 0.683 m. **음수는 주변보다 뒤에 있다는 뜻 = 면이다.** 0 근처에서 깨끗이 갈린다.\n**depth가 없으면 아무것도 버리지 않는다** — 판단 근거가 없는데 버리면 필터가 아니라 손실이다(AI-S-03). reason이 'no_depth'로 남는다.",
+      "min_protrusion_m": 0.03,
+      "$comment_prot": "이 값 미만이면 면으로 본다. 실측에서 0.03은 24개 중 13개(54%)를 걸렀고, 그 13개의 돌출 중앙값이 음수였다. 0.01~0.02는 12개로 거의 같고 0.08 이상은 67%까지 올라가 실제 물체를 먹기 시작한다.",
+      "max_size_m": 3.0,
+      "min_size_m": 0.02,
+      "$comment_size": "실제 크기(m) 상·하한. 수 미터짜리 '물체'는 면이거나 병합 실패이고, 2cm 미만은 이 거리에서 판단할 수 없다. 실측 크기 분포는 p50 0.287m / p90 1.560m.",
+      "max_aspect": 8.0,
+      "$comment_aspect": "극단적으로 가늘고 긴 것은 대개 모서리·경계선이다. 실측 p90이 3.67이다."
+    }
+  },
+  "clip": {
+    "$comment": "**쓰지 않는다**(2026-09-21). 미검출 후보의 배경 판정을 맡고 있었는데 1등-2등 gap이 0.002~0.009라 사실상 구분을 못 했다 — 닫힌 사전 argmax에 '해당 없음'이 없어 정답이 사전에 없으면 가장 덜 틀린 것을 고른다. crop 수에 선형이라 프레임당 ~1100ms를 쓰면서 그랬다. 기하 규칙(unknown.geometry)으로 대체했다 — 물리적으로 말이 되는 근거를 쓰고 이미 낸 depth 맵으로 끝난다. 코드는 남겨 두었으니 켜면 stage2가 그대로 돈다.",
+    "enabled": false,
+    "vision_onnx": "models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx",
+    "text_onnx": "models/clip-vit-base-patch32/onnx/text_model_quantized.onnx",
+    "tokenizer_dir": "models/clip-vit-base-patch32",
+    "input_size": 224,
+    "dictionary_top_k": 3,
+    "top_k": 5,
+    "max_crops_per_frame": 300,
+    "$comment_background": "사전의 배경 음성 클래스. 1등이 여기 속하고 2등과의 차이가 background_margin 이상이면 **배경으로 보고 버린다**(crop도 저장하지 않는다). RPN precision@50이 0.19~0.25라 이 경로가 없으면 저장소가 오탐으로 찬다.",
+    "background_margin": 0.0,
+    "confident_margin": 0.01,
+    "$comment_margins": "2026-09-21 4차 재보정(river_boom 사전 18개, crop 405). **background_margin 0.0** — 배경 1등 gap의 p95가 0.0018이라 0.002로도 73개 중 1개만 걸렀다. 배경 클래스들은 서로 비슷해 gap이 원래 작다. 즉 '1등이 배경이면 배경'이 맞고 gap 조건은 무의미하다. **분리도 0.933**(비배경 gap이 배경 gap보다 큰 비율)이라 이 사전은 실제로 갈라진다 — 도시 사전은 0.683이었다. confident_margin 0.010은 비배경 gap의 중앙값(0.0092) 근처이며 **판정이 아니라 strength(strong/weak)만 가른다**(CLIP은 확신이 아니므로).",
+    "prompts": [
+      "a floating piece of trash on water",
+      "a plastic bottle",
+      "a plastic bag",
+      "a styrofoam block",
+      "a piece of driftwood",
+      "a discarded tire",
+      "a car",
+      "a person",
+      "a building facade",
+      "a tree",
+      "a road surface",
+      "water surface",
+      "vegetation",
+      "background clutter"
+    ],
+    "batch_size": 64,
+    "$comment_batch": "batch_size는 메모리 상한 용도다. 2026-09-21 실측에서 배치를 쪼개는 것은 지연에 도움이 되지 않았다(900→950ms) — 이전 판이 이미 한 번에 넣고 있었다. 지연 대책은 providers다: CUDAExecutionProvider가 있으면 쓰고 없으면 CPU로 내려간다(AI-C-05, AI-B-08).",
+    "providers": [
+      "CPUExecutionProvider"
+    ],
+    "$comment_providers": "2026-09-21 실측으로 CPU 고정. crop 60장 기준: quantized ViT-B/32 CPU 797~833ms / 같은 모델 CUDA 986ms / MobileCLIP-S0 int8 CPU 3766ms. CUDA가 느린 이유는 quantized 연산이 CUDA EP에 없어 그래프에 memcpy 노드 174개가 끼면서 CPU↔GPU를 오가기 때문이다. MobileCLIP은 7배 작은데 4.5배 느리다 — 크기가 지연이 아니다. 주의: 이 venv는 CUDA EP가 목록에 뜨지만 libcublasLt.so.13이 없어 실제로는 로드에 실패하고 조용히 CPU로 내려간다. torch의 nvidia/*/lib를 LD_LIBRARY_PATH에 넣어야 실제로 올라간다.",
+    "dedup_by_track": true,
+    "dedup_recheck_s": 3.0,
+    "$comment_dedup": "같은 track_id를 매 프레임 다시 분류하지 않는다. 추적이 정체성을 유지하므로 한 번 본 객체는 dedup_recheck_s 안에는 이전 판정을 재사용한다. crop을 줄이는 것이 아니라 **중복을 줄이는** 것이라 RPN이 후보를 넓게 내는 목적과 충돌하지 않는다. CLIP이 프레임당 800ms~1s라 비동기 큐가 6:1로 밀리던 것에 대한 대책이다.",
+    "backend": "onnx",
+    "torch_model": "openai/clip-vit-base-patch32",
+    "device": "cuda",
+    "fp16": true,
+    "$comment_backend": "backend: 'torch'(기본, CUDA fp16) | 'onnx'(quantized, CPU). 2026-09-21 벤치(bench_clip.py, crop 60장): int8 ONNX CPU 823ms / int8 ONNX CUDA 969ms / fp32 ONNX CUDA 81ms / **torch fp16 CUDA 34.6ms**. 기준선 대비 24배다. quantized 그래프는 CUDA EP에 연산이 없어 memcpy로 CPU↔GPU를 오가므로 GPU로 갈 수 없다 — 양자화는 CPU 전용 최적화다. 작은 모델이 답도 아니다: MobileCLIP2-S0는 파라미터 7.7배 적은데 GPU에서 2.8배 느리다(96.3ms). GPU가 없는 호스트에서는 device가 cpu로 내려간다(AI-C-05).",
+    "use_target_sim_threshold": true,
+    "default_target_sim": 0.22,
+    "active_domain": "generic",
+    "domains": {
+      "urban": {
+        "dictionary": "class_features.urban.json",
+        "hint": "city streets, traffic, buildings, parking, pedestrians seen from above"
+      },
+      "river_trash": {
+        "dictionary": "class_features.river_trash.json",
+        "hint": "a river or waterway seen from a drone, water surface and floating debris"
+      },
+      "river_boom": {
+        "dictionary": "class_features.river_boom.json",
+        "hint": "a fixed camera looking down at a river channel with a floating boom barrier, driftwood and plastic waste"
+      },
+      "indoor_robot": {
+        "dictionary": "class_features.indoor_robot.json",
+        "hint": "an indoor room seen through a ground robot fisheye camera, with floor, desks, people and a black circular vignette"
+      },
+      "generic": {
+        "dictionary": "class_features.generic.json",
+        "hint": "no specific domain — generic indoor/outdoor scene"
+      }
+    },
+    "$comment_domains": "도메인마다 사전과 배경 클래스가 다르다. active_domain으로 갈아 끼우며, **POST /api/command {\"command\":\"detect_domain\"}**으로 VLM이 현재 장면을 보고 자동 전환할 수 있다. 2026-09-21 근거: 하천 사전을 도시 영상에 쓰자 미지 crop의 71.7%가 tire/plastic_bag으로 몰렸다 — 닫힌 사전 argmax에는 '해당 없음'이 없어 정답 클래스가 없으면 가장 덜 틀린 것을 고른다. 배경 클래스는 **사전 파일이 항목마다 `background: true`로 선언**한다 — config에 목록을 따로 두었다가 사전만 고쳐서 어긋난 적이 있다(2026-09-21).",
+    "send_to_terminal": true,
+    "$comment_role": "**CLIP은 확신이 아니라 추론이다**(사용자 2026-09-21). 말단 레코드에 올리지 않고 store에 남겨 가시화가 소비한다 — 연초록 OVD(잠정)와 같은 성격의 근거다. 근거: 사전은 닫힌 집합이고 argmax에 '해당 없음'이 없어, 점수가 갈려도 그것이 맞다는 근거가 되지 못한다. 실제 오추론 — 차량 일부나 여러 차량이 합쳐진 박스를 damaged_vehicle로 찍었다. 판정은 background/unidentified 둘이고, confident_margin·target_sim은 판정을 바꾸지 않고 strength(strong/weak)로만 남아 관리자가 정렬·필터할 축이 된다.",
+    "$comment_generalization": "2026-09-21: 도메인 4종으로 일반화를 확인한다. urban(드론·도시) / river_boom(고정 CCTV·하천 차단막) / indoor_robot(지상 로봇·어안·실내) / river_trash(드론·하천). 시점·센서·장면이 전부 다르지만 **코드는 같고 사전만 갈아 끼운다** — 그것이 이 구조의 목적이다(AI-C-15: 도메인 차이는 핵심 코드 분기가 아니라 구성으로 표현한다).",
+    "$comment_volume": "후보를 많이 받는 구성(top_n 500)에 맞춰 상한을 올렸다. 줄이는 일은 CLIP 배경 판정이 맡는다(사용자 원칙). torch fp16 0.58ms/crop이라 300개도 ~175ms이고 비동기다.",
+    "visualize_weak": false,
+    "$comment_visualize": "미식별 중 strength=weak를 오버레이에 그릴지. 2026-09-21: 프레임당 미식별이 53~62개라 화면이 박스로 덮여 관리자가 볼 수 없다. weak를 숨기면 strong만 남는다 — **저장은 그대로 한다**(가시화에서 토글로 켜면 되고, 데이터를 버리는 것이 아니다).",
+    "$comment_generic": "도메인이 정해지지 않았을 때 쓴다. 객체 쪽을 **이름이 아니라 재질·형태 속성**으로 둔 이유: OVD 어휘가 4585종이라 흔한 명사는 대부분 덮고, 그것이 못 잡은 것에 또 다른 명사 사전을 들이대면 닫힌 집합 argmax가 가장 덜 틀린 이름을 고르는 같은 실패를 반복한다(하천 사전을 도시에 쓰자 71.7%가 tire/plastic_bag으로 몰린 사례). 'rigid man-made object'는 틀려도 덜 해롭고 관리자가 crop을 볼지 정하는 데 실제로 쓸모가 있다.",
+    "$comment_send": "2026-09-21: 시점 반영 검증을 위해 켠다. CLIP은 여전히 확신이 아니라 근거이고, 말단 레코드에는 근거로만 쌓인다 — 켠 이유는 화면에서 \"옛 근거가 움직인 객체에 붙어 있다\"를 보여주기 위해서다. 검증이 끝나면 false로 되돌릴 수 있다.",
+    "$comment_load": "꺼져 있으면 CLIP 모델도, 특징 사전(class_features.*.json)도 적재하지 않는다 — 사전은 CLIP 앵커 전용이라 CLIP 없이는 쓸 데가 없다."
+  },
+  "depth": {
+    "$comment": "MoGe2-Aerial — 미터 단위 metric depth. **지상 데이터로 학습한 depth는 항공에서 무너진다**: AerialMetric(ECCV 2026) 실측에서 DepthPro δ₁ 0.0%, ZoeDepth 0.0%, MoGe-2 zero-shot 5.1%, UniDepthV2 34.1%였고 LoRA 미세조정한 MoGe2-Aerial만 89.3%였다(AbsRel 10.3). 라이선스도 갈린다 — UniDepthV2는 CC BY-NC, Metric3Dv2는 BSD-2 비상업, MoGe 계열만 MIT다.",
+    "enabled": true,
+    "mode": "async",
+    "$comment_mode": "**async로 확정했다**(2026-09-21 실측). 손익분기는 depth 209ms인데 RTX 3060에서 MoGe2-Aerial은 그보다 훨씬 느리다:\n  res_level 9: p50 667ms / p90 858ms\n  res_level 5: p50 493ms / p90 566ms   ← 채택\n  res_level 1: p50 284ms / p90 373ms   (그래도 209ms 초과)\n동기로 두면 말단이 8 fps를 내는데 엣지가 1.5~2 fps로 떨어져 라벨까지 같이 늦는다. async면 라벨은 YOLOE 속도(31ms)로 계속 나가고 거리만 뒤따른다.\n**입력 크기(longest_side)는 거의 영향이 없다** — 700→336으로 줄여도 729→713ms다. MoGe가 resolution_level로 내부 해상도를 따로 정하기 때문이고, 그래서 줄일 손잡이는 이쪽이다. 거리 값은 레벨 9와 1이 같다(중앙 1.00m vs 0.99m) — 이 장면에서는 레벨을 낮춰도 잃는 것이 없었다. 다른 장면에서도 그런지는 재봐야 한다(AI-B-01).",
+    "checkpoint": "models/Moge2-Aerial.pt",
+    "aerialmetric_repo": "third_party/AerialMetric",
+    "lora_config": "third_party/AerialMetric/MoGe/configs/train/v2.json",
+    "lora_rank": 96,
+    "device": "cuda",
+    "fp16": true,
+    "longest_side": 700,
+    "resolution_level": 5,
+    "$comment_res": "내부 처리 해상도. 9→5로 낮춰 p50 667→493ms를 얻었고 거리는 안 변했다. 더 낮추면(1) 284ms까지 가지만 그래도 동기 예산 밖이라, 비동기인 이상 굳이 품질을 더 깎을 이유가 없어 5에서 멈췄다.",
+    "box_percentile": 25.0,
+    "$comment_percentile": "박스 안 depth의 대표값을 중앙값이 아니라 하위 25%로 잡는다. 박스에는 대상 뒤 배경이 함께 들어오고 작은 객체일수록 배경 비율이 크다 — 중앙값은 먼 배경으로 끌려간다. 위험 판단에서는 가까운 쪽으로 틀리는 편이 안전하다.",
+    "min_m": 0.3,
+    "max_m": 400.0,
+    "fallback_hfov_deg": null,
+    "$comment_fov": "말단이 meta.camera.hfov_deg를 실어 보내면 그것을 쓴다. 위 벤치마크 수치는 **GT intrinsics 없이** 잰 값이므로, 아는 값을 안 넘기면 그만큼 잃는다. fallback은 말단이 안 보낼 때만 쓰이고, null이면 모델이 추정한다.",
+    "prior_wins_below_px": 24,
+    "class_height_m": {
+      "$comment": "클래스 크기 사전 — 거리 ≈ focal_px × 표준높이 / 박스높이_px. YOLOE가 이미 라벨을 내므로 **추가 모델 없이** 나오는 두 번째 경로다. 박스 높이가 prior_wins_below_px보다 작으면 이쪽을 주값으로 쓴다: 100m의 사람은 10px이고 그 영역에서 depth 네트워크는 할 말이 없지만 '높이 10px + 1.7m'는 그대로 성립한다. **크기 분산이 큰 클래스는 넣지 않는다**(가방·상자·부유물) — 틀린 거리를 자신 있게 내는 것보다 안 내는 편이 낫다. 두 경로가 다르면 합치지 않고 alternative로 같이 보낸다.",
+      "person": 1.7,
+      "car": 1.5,
+      "truck": 3.2,
+      "bus": 3.2,
+      "motorcycle": 1.4,
+      "bicycle": 1.1,
+      "traffic sign": 2.5
+    },
+    "$comment_pi": "**Pi에서는 못 돈다.** Pi 5 실측 GEMM 75.1 GFLOPS(4초 만에 86도로 스로틀링), MoGe2-Aerial ViT-L은 700x392 입력에서 1.04 TFLOPs라 프레임당 약 35초다. ViT-B로 낮춰도 10초, ViT-S는 3.2초이고 애초에 항공 LoRA는 ViT-L에만 있다. 그래서 depth는 엣지 전용이고, 말단은 받은 거리를 track_id로 반영하되 트랙 박스 크기 변화로 현재 시점에 맞춘다(drone_rpi/records.py Range.at_box). 참고로 말단의 mobilenet RPN은 0.01 TFLOPs 수준이고 실측 210~250ms다 — 두 자리 수가 다르다.",
+    "every_n_frames": 2,
+    "$comment_every": "async에서 depth를 몇 프레임마다 돌릴지. 1로 두면 493ms짜리가 큐를 계속 채워 거리가 오히려 더 낡는다. 2면 말단 8 fps 대비 4 fps이고, 그래도 depth가 못 따라가면 async_queue가 건너뛰고 그 수는 health의 async_dropped에 뜬다.",
+    "provider": "moge2_aerial",
+    "$comment_provider": "**'zipdepth'는 임시다.** MoGe2-Aerial 체크포인트(1.48GB)를 받는 동안 파이프라인을 끝까지 돌려 보려고 쓴다 — torch 없이 CPU 384px 30ms로 돈다. 다만 출력이 상대 역depth라 **미터를 내지 않는다**: 저장소의 보정 프로파일은 464x400 실내 어안 로봇에 crop을 적용한 구성의 것이고 유효 범위가 cm다(AI-B-01: 구성별 프로파일 비재사용). 그동안 거리는 클래스 크기 사전이 낸다. 받기가 끝나면 'moge2_aerial'로 바꾼다.",
+    "zipdepth_model": "models/zipdepth_base_384x384.onnx"
+  },
+  "llm": {
+    "$comment": "특징 사전 즉석 생성. **CLIP 사전을 위한 것이라 CLIP과 함께 꺼 둔다.** 가시화에서 '이 클래스를 찾아라' 명령이 올 때만 돌았고 프레임 처리 경로에는 없었다.",
+    "enabled": false,
+    "backend": "ollama",
+    "host": "http://127.0.0.1:11434",
+    "model": "qwen2.5:3b-instruct",
+    "timeout_s": 120.0
+  },
+  "vlm": {
+    "$comment": "stage3 — 환경 서술. **현재 쓰지 않는다.** 객체 확정이 아니라 장면 서술이라 프레임 응답 경로 밖에 있었고, ollama 의존이라 기기를 옮길 때 짐이 된다. 필요하면 켠다.",
+    "enabled": false,
+    "backend": "ollama",
+    "host": "http://127.0.0.1:11434",
+    "model": "qwen2.5vl:3b",
+    "timeout_s": 120.0,
+    "active_domain": "generic",
+    "scene_prompts": {
+      "generic": "Describe this aerial scene in one sentence: what kind of place is it, and what is happening?",
+      "river_trash": "This is an aerial view from a drone surveying a river. In one or two sentences describe the current scene: water condition, visible debris accumulation, and anything unusual.",
+      "urban": "This is an aerial view from a drone over an urban area. In one or two sentences describe the current scene: traffic density, pedestrians, and anything unusual or hazardous."
+    },
+    "$comment_domain": "vlm.active_domain은 clip.active_domain을 따라간다(apply_domain이 같이 옮긴다). 키 이름이 clip.domains의 키와 같아야 프롬프트가 잡힌다."
+  },
+  "object_tracks": {
+    "$comment": "지속 객체 레코드. docs/obsidian/ideas/progressive-object-record.pdf §3 구현 — 근거를 관측 내에서 클러스터링하고, 의미는 source group 지지로 해소하며(확립된 클래스는 '엄격히 더 많은' 지지가 있을 때만 교체), 노출 상태 V는 lifecycle·클래스·기하뿐이라 confidence만 바뀌면 갱신하지 않는다. 표시 대상의 정체성을 RPN 후보에서 빌리면 후보 구성이 매 프레임 바뀌어 근거가 흩어진다 — RPN은 말단의 시점 반영 앵커 전용이다.",
+    "assoc_iou": 0.3,
+    "track_iou": 0.2,
+    "init_conf": 0.15,
+    "stale_misses": 3,
+    "expire_misses": 5,
+    "geometry_quantum_px": 8.0,
+    "$comment_quantum": "노출 기하 불감대(px). 논문은 월드 좌표를 0.02m로 양자화하지만 고정 격자는 경계에 걸친 값에서 1~2px 지터에도 매 프레임 뒤집힌다(실측: 갱신 3회). 여기서는 현재 노출값 기준 불감대로 두어 경계 문제를 없앤다. 전역 좌표 변환은 백엔드 몫이므로(AI-C-02) 단위는 픽셀이다.",
+    "geometry_alpha": 0.5,
+    "$comment_alpha": "해소된 기하를 레코드에 반영하는 평활 계수. 기하는 가용 박스의 confidence 가중 평균이라 한 모델이 한 관측에서 빠지면 값이 확 옮겨가고, 그러면 관측 간 매칭(track_iou)이 끊겨 새 객체가 생기며 누적 지지가 리셋된다(실측: 확정 객체 수 중앙 0).",
+    "$comment_init": "새 객체 초기화 최소 confidence. 논문은 0.30이지만 그 값은 그쪽 검출기 분포 기준이다 — 이 구성(YOLOE prompt-free + YOLO-World 텍스트) 실측에서 검출 196건의 p50이 0.156, p75가 0.316이라 0.30은 74%를 잘라내 클러스터 11개 중 8개가 객체가 되지 못했다. 다른 구성의 임계를 그대로 옮기지 않는다(AI-B-01).",
+    "confirm_groups": 2,
+    "$comment_confirm": "확정에 필요한 소스 그룹 수. **2 = 두 모델 합의.** OVD를 하나만 켜면 어떤 객체도 확정되지 않아 장애물이 0개가 된다(2026-09-21에 겪었다) — 그때는 1로 내리거나 config에서 지워 켜진 OVD 수를 따르게 한다.",
+    "expose_alpha": 0.4,
+    "expose_snap_px": 24.0,
+    "$comment_smooth": "노출 박스 평활화. 실측 떨림이 중앙 0~5px, 최대 10.8px인데 그대로 그리면 정지 장면에서도 박스가 떤다. 변화가 expose_snap_px를 넘으면 계수가 1이 되어 **실제 이동은 지연 없이** 따라간다 — 움직일 때 박스가 뒤처지면 이 파이프라인의 목적이 무너진다. alpha=1이면 평활 없음."
+  },
+  "store": {
+    "$comment": "수신물(frames/meta)과 산출물(records/overlay/unknown_crops/scene)을 같은 frame_id로 나란히 둔다(AI-O-03). **배경으로 판정된 crop은 저장하지 않는다** — 오탐 창고가 되는 것을 막는 유일한 경로다. 저장되는 미지 crop에는 CLIP 추론 결과와 근거(ranking 전체)가 함께 남아 가시화가 '왜 이렇게 봤는지'를 보여줄 수 있다(AI-L-03).",
+    "root": "store",
+    "save_incoming_frame": true,
+    "save_incoming_meta": true,
+    "save_record": true,
+    "save_overlay": true,
+    "save_unknown_crops": true,
+    "save_background_crops": false,
+    "$comment_background_draw": "배경 crop은 저장하지 않지만 오버레이에는 회색으로 **그린다** — 도로·건물을 실제로 지우고 있는지 눈으로 확인할 수 있어야 한다(사용자 2026-09-21). 그리는 것과 저장하는 것은 다른 결정이다.",
+    "unknown_crops_policy": {
+      "$comment": "학습 후보 저장 게이트. 2026-09-21에 46만 장(2.9GB)이 쌓인 원인은 중복 방지가 없어 배경 아닌 후보를 매 프레임 전부 다시 쓴 것이다. track_id로 묶으려 했으나 미지 crop의 track_id는 RPN 후보의 것이라 매 프레임 갈려 소용이 없었고(실측 90초에 2166장), 고정 격자로 묶으니 경계에 걸친 박스가 두 슬롯을 오가 초당 7장이 계속 저장됐다. 지금은 이미 본 자리와의 IoU로 찾는다 — 기준을 고정 격자가 아니라 '이미 있는 것'으로 잡으면 경계가 생기지 않는다. 합성 검증: 물체 30개 × 200프레임에서 6000장 → 60장.",
+      "max_per_slot": 2,
+      "min_interval_s": 20.0,
+      "max_per_frame": 2,
+      "slot_ttl_s": 120.0,
+      "match_iou": 0.3,
+      "$comment_iou": "슬롯 매칭 IoU. 0.5에서는 RPN 후보 박스가 프레임마다 달라 같은 물체가 새 슬롯으로 새어(실측 슬롯 369→387, 초당 4.3장) 0.30으로 낮췄다. 낮출수록 서로 다른 물체를 하나로 볼 위험이 커지므로, 마지막 방어선은 어디까지나 max_files 상한이다."
+    },
+    "max_files": {
+      "$comment": "디렉터리별 파일 수 상한. 오래된 것부터 지운다 — 게이트가 뚫려도 디스크가 터지지 않게 하는 마지막 방어선이다. 삭제는 재현 가능성과 맞바꾸는 값이므로(AI-O-03) records는 넉넉히, 눈으로만 보는 overlay는 짧게 둔다.",
+      "unknown_crops": 5000,
+      "frames": 3000,
+      "overlay": 3000,
+      "records": 20000,
+      "meta": 20000,
+      "scene": 2000
+    },
+    "prune_interval_s": 30.0,
+    "$comment_crops_cap": "미지 crop 파일 상한(jpg+json 쌍이므로 실제 후보는 절반). 게이트가 아무리 새도 디스크는 이 값에서 멈춘다 — 약 400MB. 검수 없이 쌓인 오래된 후보보다 최근 것이 학습 가치가 높다고 보고 오래된 것부터 지운다.",
+    "max_mb": {
+      "$comment": "디렉터리별 **바이트** 상한(MB). 2026-09-21에 추가했다 — 개수 상한은 지켜지는데 저장소가 5.9GB였다. record 한 장이 448KB였고 그 55%가 unknown 300개의 CLIP ranking 전체였다. 개수는 비용이 아니다. 개수와 AND로 걸어 먼저 걸리는 쪽이 이긴다.",
+      "unknown_crops": 400,
+      "frames": 300,
+      "overlay": 300,
+      "records": 800,
+      "meta": 300,
+      "scene": 50
+    },
+    "$comment_caps": "max_files와 max_mb를 둘 다 건다. 개수만 걸면 record 20000개가 4.6GB가 되고, 바이트만 걸면 작은 파일이 수십만 개 쌓여 파일시스템이 느려진다. 둘 다 겪어서 둘 다 건다. 삭제는 재현 가능성과 맞바꾸는 값이므로(AI-O-03) records는 넉넉히, 눈으로만 보는 overlay는 짧게 둔다."
+  },
+  "stream": {
+    "$comment": "실시간 오버레이 MJPEG. **말단이 시점 반영한 트랙**을 현재 프레임에 그린다 — 박스는 지금 좌표, 라벨은 몇 프레임 전 근거, 괄호 안이 그 나이다. 프레임당 한 번만 발행한다.",
+    "max_fps": 12,
+    "faint_alpha": 0.28,
+    "$comment_faint": "확정(초록)이 아닌 것 — 근거 없는 RPN 후보, 잠정 OVD, CLIP 배경 — 을 그리는 층의 불투명도. 지우지 않고 뒤로 물린다: 지우면 RPN이 무엇을 덮고 있는지 볼 수 없고, 같은 세기로 그리면 확정값을 가린다.",
+    "jpeg_quality": 70,
+    "scale": 1.0,
+    "draw_min_conf": 0.35,
+    "draw_max_obstacles": 8,
+    "$comment_draw": "**그리기 상한.** 실측에서 장애물 22개가 한 번에 떠 라벨이 서로를 덮었다(2026-09-21 사무실 장면). 전송과 저장은 그대로 두고 그리기만 줄인다 — 데이터를 버리는 것이 아니라 볼 수 있게 하는 것이고, 가려진 수는 머리글에 '+N hidden'으로 드러난다. 거리가 붙은 것과 conf 높은 것이 먼저 자리를 가져간다.",
+    "missed_width": 1280,
+    "missed_rows": 3,
+    "missed_cols": 4
+  },
+  "edge_rpn": {
+    "$comment": "미검출 분석 전용 class-agnostic 제안기. **시점 정렬에는 쓰지 않는다** — 그건 말단의 KLT 플로우(6ms)가 한다. 여기서의 목적은 '무엇이 안 잡혔나'를 알기 위해 '무엇이든 있다'를 먼저 아는 것뿐이다. 말단에서 걷어낸 그 모델을 엣지로 옮겼다.",
+    "model": "models/mobilenet_rpn_p1_896x512.onnx",
+    "kind": "p1_rpn",
+    "threads": 4,
+    "nms_iou": 0.7,
+    "top_n": 200,
+    "min_objectness": 0.0,
+    "max_box_area_frac": 0.25,
+    "yolo_pre_conf": 0.01,
+    "nms_buckets": [
+      {
+        "max_area_frac": 0.005,
+        "iou": 0.75
+      },
+      {
+        "max_area_frac": 0.05,
+        "iou": 0.6
+      },
+      {
+        "max_area_frac": 1.0,
+        "iou": 0.35
+      }
+    ],
+    "$comment_nms": "크기 구간별 NMS. 단일 임계로는 두 요구가 충돌한다 — 0.4로 조이면 겹친 작은 객체가 함께 지워지고(하천 recall 0.410→0.324), 0.7로 풀면 거대 중복이 남는다. **구간이 다르면 서로 억제하지 않는다** — 부유목 더미가 그 위 페트병을 지우지 않는다."
+  }
+}

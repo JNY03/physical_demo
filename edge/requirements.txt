@@ -1,0 +1,19 @@
+# 엣지 노드. 말단(drone_rpi/requirements.txt)에는 이 중 어느 것도 없다 — AI-B-10.
+#
+# torch는 여기 고정하지 않는다. CUDA 버전에 묶여 있어서 requirements로 박으면
+# 기기를 옮길 때 그것부터 깨진다. Dockerfile이 --index-url로 따로 깐다.
+#
+# MoGe2-Aerial 관련(peft/moge/utils3d)은 fetch_models.sh가 AerialMetric 저장소를
+# 받아서 설치한다 — 그쪽 MoGe 포크를 써야 LoRA 키가 맞는다.
+
+numpy>=1.24,<3
+opencv-python-headless>=4.8
+onnxruntime>=1.17
+ultralytics>=8.3          # YOLOE prompt-free / YOLO-World
+transformers>=4.40        # CLIP
+requests>=2.28
+
+# depth (MoGe2-Aerial)
+peft>=0.10
+safetensors>=0.4
+huggingface_hub>=0.20

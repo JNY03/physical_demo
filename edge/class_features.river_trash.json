@@ -1,0 +1,102 @@
+{
+  "_meta": {
+    "purpose": "엣지 CLIP 텍스트 앵커용 특징 사전. demo/test/class_features.json과 같은 형식이며, 하천 부유쓰레기 드론 감시 도메인의 씨앗 항목이다.",
+    "language_note": "특징 문구는 항상 영어다 — 한국어 특징 문장은 CLIP(clip-vit-base-patch32)이 거의 구분하지 못한다는 2026-09-10 dog 실험 실측 결론.",
+    "status": "사람이 쓴 씨앗. LLM 생성 항목은 실행 중 메모리에만 올라가며 _verified=false로 구분된다(AI-L-02).",
+    "background_declaration": "각 항목의 `background: true`가 배경 클래스 선언이다. **config에 목록을 따로 두지 않는다** — 2026-09-21에 사전에 배경 5개를 추가하고 config 목록을 갱신하지 않아 vehicle_part/vehicle_group(crop의 64%)이 객체로 취급됐다. 같은 사실을 두 곳에 적으면 반드시 어긋난다."
+  },
+  "plastic_bottle": {
+    "features": [
+      "a transparent plastic bottle",
+      "a cylindrical container with a cap",
+      "a crumpled clear plastic container",
+      "a bottle floating on water"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.22,
+    "rationale": "수면에서 방향이 자유로워 종횡비 게이트를 걸지 않는다. 투명·원통이 핵심 단서다.",
+    "background": false
+  },
+  "plastic_bag": {
+    "features": [
+      "a crumpled plastic bag",
+      "a thin translucent sheet of plastic",
+      "a wrinkled film floating on water",
+      "an irregular soft white object"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.22,
+    "rationale": "형태가 매 프레임 달라 모양 게이트를 끈다. 주름·반투명이 남는 단서다.",
+    "background": false
+  },
+  "styrofoam": {
+    "features": [
+      "a white styrofoam block",
+      "a porous white foam piece",
+      "a rectangular white floating block"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.24,
+    "rationale": "흰색이 강한 단서지만 물거품·반사와 겹쳐 threshold를 조금 올렸다.",
+    "background": false
+  },
+  "driftwood": {
+    "features": [
+      "a piece of driftwood",
+      "a bare tree branch on water",
+      "an elongated brown wooden object",
+      "a log floating on water"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.22,
+    "rationale": "가늘고 긴 형태가 흔하지만 시야각에 따라 변해 종횡비를 강제하지 않는다.",
+    "background": false
+  },
+  "tire": {
+    "features": [
+      "a black rubber tire",
+      "a dark circular ring",
+      "a discarded car tire"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.24,
+    "rationale": "검은 원형이 뚜렷하지만 그림자·어두운 수면과 혼동되므로 threshold를 올렸다.",
+    "background": false
+  },
+  "water_surface": {
+    "features": [
+      "a plain water surface",
+      "rippling water with no object",
+      "empty river water",
+      "sunlight reflecting on water"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.0,
+    "rationale": "배경 흡수용 음성 클래스다. RPN 오탐 다수가 여기로 흡수되어야 미지 후보 수가 줄어든다.",
+    "background": true
+  },
+  "vegetation": {
+    "features": [
+      "dense green vegetation",
+      "tree foliage",
+      "grass on a riverbank",
+      "bushes"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.0,
+    "rationale": "배경 흡수용 음성 클래스.",
+    "background": true
+  },
+  "built_structure": {
+    "features": [
+      "a building facade with windows",
+      "a concrete wall",
+      "a paved road surface",
+      "a man-made structure"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "target_sim_threshold": 0.0,
+    "rationale": "배경 흡수용 음성 클래스. VisDrone 실측에서 RPN 상위 후보를 건물 전면이 독식했다.",
+    "background": true
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "_meta": {
+    "purpose": "도메인이 정해지지 않았을 때 쓰는 일반 사전. 실내·실외 공통 배경을 흡수하고, OVD 어휘로 이름이 안 붙는 것에 **속성 수준의 근거**를 붙인다.",
+    "language_note": "특징 문구는 항상 영어다(2026-09-10 실측: CLIP이 한국어 특징 문장을 거의 구분하지 못한다).",
+    "background_declaration": "각 항목의 `background: true`가 배경 선언이다. config에 목록을 따로 두지 않는다.",
+
+    "design_note": "도메인 사전(river_boom/urban)은 '무엇을 찾는가'가 정해져 있어 객체 클래스를 이름으로 둘 수 있다. 일반 사전에는 그런 목표가 없으므로 **이름을 주장하지 않는다** — OVD(4585종)가 이미 이름을 담당하고, 이 사전이 맡는 것은 (1) 흔한 배경을 걷어내는 일과 (2) OVD가 이름을 못 붙인 것에 '어떤 성질의 물체인가'를 붙이는 일이다.",
+
+    "why_attributes_not_names": "OVD 어휘가 4585종이라 흔한 명사는 대부분 덮는다. 그것이 못 잡은 것에 또 다른 명사 사전을 들이대면 같은 실패(닫힌 집합 argmax가 가장 덜 틀린 이름을 고르는 것)를 반복한다 — 실제로 하천 사전을 도시 영상에 쓰자 71.7%가 tire/plastic_bag으로 몰렸다. 그래서 객체 쪽은 **재질·형태 속성**으로 둔다. 'rigid man-made object'는 틀려도 덜 해롭고, 관리자가 crop을 볼 때 실제로 도움이 되는 정보다.",
+
+    "status": "사람이 쓴 씨앗. LLM 생성 항목은 메모리에만 올라가며 _verified=false다(AI-L-02)."
+  },
+
+  "indoor_surface": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a plain painted indoor wall", "an indoor ceiling panel",
+                 "a tiled or polished floor", "a blank interior surface"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "배경(실내). 벽·천장·바닥."
+  },
+  "indoor_fixture": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a fluorescent ceiling light", "an indoor door and frame",
+                 "a window frame indoors", "a wall-mounted panel or switch"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "배경(실내 상시 설치물)."
+  },
+  "outdoor_ground": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["an asphalt road surface", "a paved walkway", "bare soil or dirt",
+                 "gravel ground", "a concrete surface outdoors"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "배경(실외 지면)."
+  },
+  "outdoor_nature": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["green vegetation and foliage", "grass", "tree branches",
+                 "a plain water surface", "plain sky"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "배경(실외 자연)."
+  },
+  "built_structure": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a building facade with windows", "a concrete wall outdoors",
+                 "a roof seen from outside", "a fence or railing"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "배경(건축물)."
+  },
+  "lighting_artifact": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a bright overexposed glare", "a dark shadow region",
+                 "a specular reflection", "an unlit dark area"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 조명 대비는 객체가 아닌데 objectness가 매우 잘 붙는다."
+  },
+  "image_artifact": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a blurred out-of-focus region", "motion blur smear",
+                 "a flat featureless texture", "digital noise"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 흐림·번짐은 실시간 스트림에서 흔하다."
+  },
+  "object_fragment": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a close-up of part of a larger object", "an edge or corner of an object",
+                 "a partial view of something cut off", "a fragment of a surface"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(2차 그물). 후처리 fragment 규칙이 놓친 조각을 받는다. 도메인 사전의 vehicle_part/furniture_part와 같은 역할이다."
+  },
+  "person_fragment": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["part of a person's body", "a hand or arm", "legs and feet",
+                 "clothing fabric close-up"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(2차 그물). OVD가 person으로 잡은 것의 조각."
+  },
+
+  "rigid_manmade_object": {
+    "background": false, "target_sim_threshold": 0.25,
+    "features": ["a rigid man-made object with straight edges",
+                 "a boxy manufactured item", "a hard plastic or metal object",
+                 "a device with a flat panel"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "속성 근거. 이름은 주장하지 않는다 — '사람이 만든 단단한 물체'라는 것만으로도 관리자가 crop을 볼지 말지 정할 수 있다."
+  },
+  "soft_or_fabric_object": {
+    "background": false, "target_sim_threshold": 0.25,
+    "features": ["a soft fabric object", "a crumpled cloth or bag",
+                 "a flexible sheet material", "a deformable soft item"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "속성 근거."
+  },
+  "transparent_or_reflective": {
+    "background": false, "target_sim_threshold": 0.26,
+    "features": ["a transparent object", "a glass or clear plastic item",
+                 "a shiny reflective surface on an object"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "속성 근거. 반사는 lighting_artifact와 헷갈리므로 threshold를 올렸다."
+  },
+  "elongated_thin_object": {
+    "background": false, "target_sim_threshold": 0.25,
+    "features": ["a long thin object", "a cable or wire", "a rod or pole",
+                 "a stick-like item"],
+    "min_aspect_ratio_h_over_w": null, "rationale": "속성 근거. 케이블·봉은 주행 위험이기도 하다."
+  },
+  "container_like_object": {
+    "background": false, "target_sim_threshold": 0.25,
+    "features": ["a container or box", "a bag or package",
+                 "a bucket or bin", "a closed vessel"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "속성 근거. 방치물·미확인 용기는 실내외 공통 관심 대상이다."
+  }
+}

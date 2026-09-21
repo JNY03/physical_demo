@@ -1,0 +1,95 @@
+{
+  "_meta": {
+    "purpose": "실내 로봇 어안 카메라 도메인. datasets/20260910-134818_rot8 (제자리 8방향 회전 스캔) 기준.",
+    "viewpoint": "지상 로봇에 달린 어안 렌즈. 화면 가장자리가 **검은 원형 비네팅**으로 덮이고 중앙만 유효하다.",
+    "language_note": "특징 문구는 항상 영어다.",
+    "background_declaration": "각 항목의 `background: true`가 배경 선언이다.",
+    "design_note": "어안 비네팅이 이 도메인의 최대 배경 요인이다 — 검은 테두리와 경계가 화면의 절반 가까이를 차지하고 대비가 극단적이라 RPN이 후보를 대량으로 낸다. 실내 가구·사람은 OVD(YOLOE 4585종)가 대부분 잡으므로 객체 항목은 OVD가 놓칠 만한 것만 둔다.",
+    "status": "사람이 쓴 씨앗."
+  },
+
+  "fisheye_vignette": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a black circular vignette border", "a dark unlit image corner",
+                 "a curved black frame edge", "a completely black region"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경 1순위. 어안 테두리는 대비가 극단적이라 RPN 후보가 대량으로 몰린다."
+  },
+  "floor": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a plain tiled floor", "a glossy indoor floor surface",
+                 "floor tile seams", "a reflection on a polished floor"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 실내 화면의 아래 절반."
+  },
+  "wall_or_ceiling": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a plain painted wall", "an indoor ceiling panel",
+                 "a ceiling air vent", "a blank interior surface"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경."
+  },
+  "ceiling_light": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a fluorescent ceiling light", "a bright linear lamp",
+                 "an illuminated light fixture"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 밝아서 objectness가 잘 붙는다."
+  },
+  "window_or_glare": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a bright window with daylight", "an overexposed window frame",
+                 "sunlight glare through glass", "a row of window panes"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 창문 역광은 실내에서 가장 강한 대비원이다."
+  },
+  "whiteboard_or_screen": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["a white whiteboard on a wall", "a blank projection screen",
+                 "a large flat white panel"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(상시 설치물)."
+  },
+  "door_or_frame": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["an indoor door", "a door frame", "a blue painted door panel"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(상시 설치물)."
+  },
+  "furniture_part": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["part of a desk or table", "a table leg and caster wheel",
+                 "the edge of a piece of furniture", "a chair back"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(2차 그물). OVD가 desk/chair로 잡은 것의 조각이 미식별로 새는 것을 받는다 — 도시 도메인의 vehicle_part와 같은 역할이다."
+  },
+  "person_part": {
+    "background": true, "target_sim_threshold": 0.0,
+    "features": ["part of a person's body", "a person's legs", "an arm or hand",
+                 "clothing fabric close-up"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(2차 그물). person 조각을 받는다."
+  },
+
+  "unattended_object": {
+    "background": false, "target_sim_threshold": 0.25,
+    "features": ["a bag or box left on the floor", "an unattended package",
+                 "an object lying alone on the ground"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "관심 대상. 바닥에 놓인 미확인 물체 — 로봇 주행 장애물이자 감시 대상."
+  },
+  "floor_hazard": {
+    "background": false, "target_sim_threshold": 0.26,
+    "features": ["a wet patch on an indoor floor", "a spill on the ground",
+                 "debris scattered on a floor", "a cable lying across the floor"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "관심 대상. 주행 위험 요소."
+  },
+  "portable_equipment": {
+    "background": false, "target_sim_threshold": 0.25,
+    "features": ["a tripod or stand", "a portable cart", "a mobile equipment case",
+                 "a movable appliance"],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "관심 대상. 상시 설치물이 아니라 변화 탐지 대상이다."
+  }
+}

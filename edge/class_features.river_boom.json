@@ -1,0 +1,224 @@
+{
+  "_meta": {
+    "purpose": "하천 고정 CCTV + 부유 차단막(boom) 도메인. datasets/river_waste/steep 기준.",
+    "viewpoint": "고정 카메라가 수로를 비스듬히 내려다본다. 드론 시점이 아니다 — 객체가 크게 찍히고 원근이 강하다.",
+    "language_note": "특징 문구는 항상 영어다(2026-09-10 실측: CLIP이 한국어 특징 문장을 거의 구분하지 못한다).",
+    "background_declaration": "각 항목의 `background: true`가 배경 선언이다. config에 목록을 따로 두지 않는다 — 두 곳에 적으면 어긋난다(2026-09-21 실제 사고).",
+    "design_note": "이 장면에서 boom(적/흑 부유 차단막)·교량 난간·철제 기둥은 **상시 설치물**이라 배경이다. 탐지 대상은 그 앞에 쌓이는 부유물이다. 화면 모서리의 카메라 ID/타임스탬프 오버레이도 RPN이 후보로 내므로 배경 항목을 따로 뒀다.",
+    "status": "사람이 쓴 씨앗. LLM 생성 항목은 메모리에만 올라가며 _verified=false다(AI-L-02).",
+    "detection_scope": "**목적: 쓰레기 검출**(사용자 2026-09-21). 검출 대상은 인공 폐기물 + 부유목·잔가지. 그 외 상시 설치물(boom·부표·난간·기둥)과 자연 배경(수면·물거품·제방·원경)과 카메라 오버레이는 전부 배경이다. 배경도 아니고 알려진 쓰레기도 아닌 것은 `unidentified`로 crop 저장 + CLIP 추론 + 가시화로 올라간다 — 갑자기 나타난 위험물이나 모르는 쓰레기가 이 경로로 잡힌다.",
+    "driftwood_toggle": "`driftwood_pile`/`branch_debris`는 지금 검출 대상(background: false)이다. 수거량 산정이 아니라 '인공 폐기물만' 보고 싶으면 그 두 항목의 background를 true로 바꾸면 된다 — 한 줄이고 코드는 손대지 않는다. 배경으로 돌리면 더미가 조용히 빠지는 대신 그 위 쓰레기만 남는다.",
+    "class_legend_note": "KICT 범례 8종(Water/Plastic container/Plastic bottle/Buoy/Human/White Styrofoam box/Floating wood debris/Gas cylinder) — class_id 매핑은 **추정이며 확정이 아니다**(docs/obsidian/papers/kict-river-floating-waste-dataset.md). 범례에 Water·Buoy가 함께 있으므로 '라벨한 것'이지 '쓰레기'가 아니다. 이 사전의 대상 선정은 범례가 아니라 목적에서 나왔다."
+  },
+  "water_surface": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "a plain river water surface",
+      "rippling green water",
+      "flowing water with small waves",
+      "water reflection"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 화면 면적의 대부분."
+  },
+  "whitewater": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "white foaming water",
+      "turbulent rapids",
+      "splashing water",
+      "white froth on a stream"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 물거품은 밝고 대비가 커 objectness가 매우 잘 붙는다. 스티로폼과 혼동되므로 따로 둔다."
+  },
+  "riverbank_vegetation": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "grass on a riverbank",
+      "dry brown grass",
+      "weeds along a channel",
+      "green shrubs beside water"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경."
+  },
+  "riverbank_soil": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "bare soil riverbank",
+      "a dirt slope beside water",
+      "gravel along a stream",
+      "a concrete channel wall"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경."
+  },
+  "boom_barrier": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "a red and black floating barrier",
+      "an orange floating boom on water",
+      "a line of red floats",
+      "a containment boom"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(상시 설치물). 이 장면에서 가장 눈에 띄는 인공물이라 반드시 흡수해야 한다 — 안 그러면 매 프레임 미식별로 샌다."
+  },
+  "bridge_or_railing": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "a bridge railing",
+      "a metal handrail",
+      "a footbridge structure",
+      "a fence beside a channel"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(상시 설치물)."
+  },
+  "metal_pole": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "a metal pole in water",
+      "a steel pipe",
+      "a support post",
+      "a cable or wire"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(상시 설치물). 기둥·케이블은 가늘고 길어 박스가 크게 잡힌다."
+  },
+  "distant_background": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "distant hills and sky",
+      "a parked car far away",
+      "a road behind a field",
+      "trees on a distant hillside"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. 화면 상단의 원경 — 이 카메라의 관심 영역이 아니다."
+  },
+  "camera_overlay_text": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "white text overlay on video",
+      "a camera timestamp caption",
+      "a camera identifier label",
+      "digital characters on screen"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경. CAM01/타임스탬프 오버레이는 대비가 커 RPN이 반드시 후보로 낸다."
+  },
+  "plastic_bottle": {
+    "background": false,
+    "target_sim_threshold": 0.25,
+    "features": [
+      "a transparent plastic bottle",
+      "a white plastic bottle floating",
+      "a cylindrical container with a cap"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "주 탐지 대상."
+  },
+  "styrofoam": {
+    "background": false,
+    "target_sim_threshold": 0.26,
+    "features": [
+      "a white styrofoam block",
+      "a porous white foam piece",
+      "a rectangular white floating block"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "주 탐지 대상. 물거품(whitewater)과 혼동되기 쉬워 threshold를 올렸다."
+  },
+  "driftwood_pile": {
+    "background": false,
+    "target_sim_threshold": 0.25,
+    "features": [
+      "a pile of driftwood branches",
+      "tangled tree branches on water",
+      "accumulated woody debris",
+      "a mass of sticks floating together"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "검출 대상(수거 대상 부유물). 화면에서 가장 큰 덩어리라 **그 안의 작은 쓰레기를 흡수하면 안 된다** — postprocess의 max_absorber_area_frac이 막는다."
+  },
+  "branch_debris": {
+    "background": false,
+    "target_sim_threshold": 0.28,
+    "features": [
+      "a single bare tree branch on water",
+      "a floating twig",
+      "a thin stick in the water",
+      "a piece of bark"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "검출 대상(낱개 잔가지). 0.25에서는 미식별 1등의 41%(168/405)를 차지해 화면을 덮었다 — 잔가지가 실제로 많기도 하지만 더미 질감 전반에 반응한다. driftwood_pile(더미)과 역할이 겹치므로 낱개로 확실한 것만 잡도록 올렸다."
+  },
+  "plastic_film": {
+    "background": false,
+    "target_sim_threshold": 0.25,
+    "features": [
+      "a crumpled plastic bag",
+      "a thin translucent plastic sheet",
+      "a wrinkled film caught on branches"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "검출 대상(인공 폐기물)."
+  },
+  "plastic_container": {
+    "background": false,
+    "target_sim_threshold": 0.25,
+    "features": [
+      "a plastic bucket or container",
+      "a jerrycan or canister",
+      "a discarded household container",
+      "a plastic basin"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "검출 대상. 샘플에 흰 양동이·용기가 보인다."
+  },
+  "metal_can": {
+    "background": false,
+    "target_sim_threshold": 0.26,
+    "features": [
+      "a crushed metal can",
+      "an aluminium beverage can",
+      "a rusty tin can"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "검출 대상. 작고 금속 반사가 있어 물거품과 혼동되므로 threshold를 올렸다."
+  },
+  "gas_cylinder": {
+    "background": false,
+    "target_sim_threshold": 0.3,
+    "features": [
+      "a gas cylinder",
+      "a pressurised metal tank",
+      "an LPG bottle",
+      "a cylindrical steel canister"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "**위험물**. 2026-09-21 실측에서 0.24로 두자 미식별 405개 중 94개가 gas_cylinder 1등이 됐다 — 프레임당 8개는 있을 수 없다. '놓치면 안 되니 낮추자'가 '아무거나 걸린다'가 되어 **관리자가 무시하게 만들고 오히려 진짜를 놓친다**. top1 점수 p90이 0.293이라 0.30이면 상위 10%만 통과한다."
+  },
+  "buoy": {
+    "background": true,
+    "target_sim_threshold": 0.0,
+    "features": [
+      "a moored buoy",
+      "a floating marker ball",
+      "a fixed float on water"
+    ],
+    "min_aspect_ratio_h_over_w": null,
+    "rationale": "배경(상시 설치물). KICT 노트: class 3은 거의 같은 위치에 반복 등장 → 부표/고정물로 추정되며 부유물 GT에서 제외하는 쪽이 안전하다."
+  }
+}

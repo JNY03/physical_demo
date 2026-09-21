@@ -1,0 +1,26 @@
+# 가중치 — fetch_models.sh가 내려받는다(~1.6GB). 저장소에 넣으면 이전만 무거워진다.
+*.onnx
+*.onnx.data
+*.pt
+*.pth
+*.safetensors
+edge/models/
+edge/third_party/
+edge/pylibs/
+
+# 실행 환경·산출물
+venv/
+venv*/
+__pycache__/
+*.pyc
+edge/store/
+drone_rpi/spool/
+drone_rpi/images/
+out/
+*.jsonl
+*.log
+records_snapshot.json
+
+# 로컬 설정 — config.json을 고쳐 쓰되 기기별 사본은 올리지 않는다
+config.local.json
+.env
