@@ -1,7 +1,7 @@
 {
   "$comment": "엣지 노드 단일 설정면. **말단에서 당겨 온다**(terminals) — 말단은 이 주소를 모르고 먼저 연결하지도 않는다. 그래서 이 기기를 옮겨도 말단 설정은 그대로다. 단계는 셋: stage1(OVD 합의)은 당긴 직후 돌려 즉시 말단에 밀고, stage2(CLIP 근거)와 depth(MoGe2-Aerial 거리)는 비동기로 돌아 준비되는 대로 따로 민다. 말단은 먼저 나온 것부터 track_id로 시점을 맞춰 반영한다.",
   "server": {
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 8891,
     "$comment": "오버레이 스트리밍과 운영 창구. **127.0.0.1에 연다** — 이 기기에서만 본다는 뜻이다. 다른 기기에서 보려면 0.0.0.0으로 바꾸는 대신 tailscale 주소를 적는 편이 낫다. 0.0.0.0은 노출 범위를 설정이 아니라 네트워크가 정하게 만든다.",
     "workers": 2,
@@ -13,7 +13,7 @@
     {
       "$comment": "당겨 올 말단 목록. **host를 자기 환경에 맞게 바꾼다** — tailscale MagicDNS 이름이나 IP를 쓴다. 저장소에는 특정 기기 주소를 두지 않는다(다른 기기에서 그대로 쓰면 조용히 엉뚱한 곳으로 간다). name은 로그·헬스 표시용이고 cameras는 돌아가며 당길 인덱스다.\n**여기가 유일하게 기기 주소가 적히는 곳이다** — 엣지를 옮겨도 이 줄만 고치면 되고 말단은 손대지 않는다. 말단은 엣지 주소를 모르고 먼저 연결하지도 않는다.",
       "name": "terminal-1",
-      "host": "CHANGE-ME",
+      "host": "100.85.243.54",
       "port": 8890,
       "enabled": true,
       "cameras": [
@@ -26,7 +26,7 @@
       "$comment_backpressure": "당기는 속도가 곧 backpressure다. 이 루프는 stage1이 끝나야 다음을 당기므로 엣지가 느리면 자연히 덜 당긴다. 당기지 않은 사이의 프레임은 말단이 최신만 들고 있다가 버린다 — 실시간 감시에서 오래된 프레임은 가치가 없다. 예전 push 구조에서는 말단이 카메라 속도로 밀어 CLIP 큐가 6:1로 밀렸다.",
       "$comment_spool": "drain_spool: 실시간 프레임이 없을 때만 /api/spool로 단절 구간을 훑는다. 현재 프레임이 항상 먼저다.",
       "autostart": {
-        "$comment": "기동 직후의 게이트 상태. 셋은 서로 독립이다 — 가져오기만 켜고 추론을 끄면 '말단이 뭘 보고 있나'만 화면으로 확인할 수 있고, 보내기만 끄면 말단 레코드를 얼려 둔 채 엣지에서만 돌려 볼 수 있다. 실행 중 변경은 POST /api/command 또는 `python server.py ctl {fetch|infer-on|infer-off|push-on|push-off|pull-on|pull-off|status}`.",
+        "$comment": "기동 직후의 게이트 상태. 셋은 서로 독립이다 — 가져오기만 켜고 추론을 끄면 '말단이 뭘 보고 있나'만 화면으로 확인할 수 있고, 보내기만 끄면 말단 레코드를 얼려 둔 채 엣지에서만 돌려 볼 수 있다. 실행 중 변경은 POST /api/command 또는 `python3 server.py ctl {fetch|infer-on|infer-off|push-on|push-off|pull-on|pull-off|status}`.",
         "pull": true,
         "inference": false,
         "push": false,
@@ -395,7 +395,7 @@
   "edge_rpn": {
     "$comment": "미검출 분석 전용 class-agnostic 제안기. **시점 정렬에는 쓰지 않는다** — 그건 말단의 KLT 플로우(6ms)가 한다. 여기서의 목적은 '무엇이 안 잡혔나'를 알기 위해 '무엇이든 있다'를 먼저 아는 것뿐이다. 말단에서 걷어낸 그 모델을 엣지로 옮겼다.",
     "model": "models/mobilenet_rpn_p1_896x512.onnx",
-    "kind": "p1_rpn",
+    "kind": "yolov8",
     "threads": 4,
     "nms_iou": 0.7,
     "top_n": 200,

@@ -105,7 +105,7 @@ s2  seen 8x  obj 1.00
 버튼 두 개(`이미지 가져오기/정지`, `추론 시작/종료`)이거나 CLI:
 
 ```bash
-python server.py ctl {fetch|infer-on|infer-off|push-on|push-off|pull-on|pull-off|status}
+python3 server.py ctl {fetch|infer-on|infer-off|push-on|push-off|pull-on|pull-off|status}
 ```
 
 기동 직후 추론·보내기는 꺼져 있다 — 모델 적재 중에 말단 레코드가 바뀌면

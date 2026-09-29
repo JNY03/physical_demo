@@ -9,7 +9,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODELS="$HERE/models"
 THIRD="$HERE/third_party"
+PYLIBS="$HERE/pylibs"
 mkdir -p "$MODELS" "$THIRD"
+mkdir -p "$PYLIBS"
 
 need() { command -v "$1" >/dev/null || { echo "필요: $1" >&2; exit 1; }; }
 
@@ -45,14 +47,46 @@ print(f"   받음 → {dst}  ({os.path.getsize(dst)/1e9:.2f} GB)")
 PY
 fi
 
-echo "== 3/4  MoGe 패키지 설치 (AerialMetric 포크)"
-# -e로 깔아 두면 저장소를 갱신해도 다시 안 깔아도 된다.
-pip install -q -e "$THIRD/AerialMetric/MoGe" 2>&1 | tail -2 || \
-  echo "   ⚠ 설치 실패 — third_party/AerialMetric/MoGe를 직접 확인한다"
-pip install -q "utils3d @ git+https://github.com/EasternJournalist/utils3d.git" \
-  2>&1 | tail -2 || echo "   ⚠ utils3d 설치 실패"
+echo "== 3/4  MoGe 패키지 확인 (AerialMetric 포크)"
+# MoGe는 저장소 소스를 PYTHONPATH로 직접 사용한다. 컨테이너 임시 레이어에
+# pip editable 설치를 하지 않아 재생성 후에도 같은 코드가 유지된다.
+test -f "$THIRD/AerialMetric/MoGe/moge/model/__init__.py" \
+  && echo "   MoGe 소스 OK" \
+  || { echo "   MoGe 소스 없음" >&2; exit 1; }
+if [ -d "$THIRD/utils3d/.git" ]; then
+  git -C "$THIRD/utils3d" pull --ff-only -q || echo "   (utils3d pull 실패 — 기존 것 사용)"
+else
+  git clone --depth 1 -q https://github.com/EasternJournalist/utils3d.git "$THIRD/utils3d"
+fi
+test -f "$THIRD/utils3d/utils3d/__init__.py" \
+  && echo "   utils3d 소스 OK" \
+  || { echo "   utils3d 소스 없음" >&2; exit 1; }
 
-echo "== 4/4  OVD 가중치 (config에서 켜진 것만)"
+echo "== 4/5  RPN ONNX 후보 모델"
+RPN="$MODELS/mobilenet_rpn_p1_896x512.onnx"
+if [ -f "$RPN" ]; then
+  echo "   이미 있음 — 건너뜀 ($(du -h "$RPN" | cut -f1))"
+else
+  python3 - <<'PY'
+from pathlib import Path
+import shutil
+from ultralytics import YOLO
+
+out = Path("models/mobilenet_rpn_p1_896x512.onnx")
+tmp = Path("models/yolov8n.pt")
+YOLO("yolov8n.pt").export(format="onnx", imgsz=(512, 896), simplify=False,
+                           opset=17, project="models", name="rpn_export")
+exported = Path("yolov8n.onnx")
+if not exported.exists():
+    raise FileNotFoundError(exported)
+shutil.copyfile(exported, out)
+exported.unlink()
+tmp.unlink(missing_ok=True)
+print(f"   생성됨 → {out}")
+PY
+fi
+
+echo "== 5/5  OVD 가중치 (config에서 켜진 것만)"
 # **켜진 단계의 가중치만 받는다.** 대역이 좁은 현장에서 안 쓸 25MB를 받는 것은
 # 그 자체로 비용이고, models/에 남아 "이게 왜 있지"가 된다.
 MODELS="$MODELS" python3 - <<'PY'

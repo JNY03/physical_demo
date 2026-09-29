@@ -11,12 +11,14 @@ services:
       # 코드는 이미지에, 무거운 것과 산출물은 호스트에. 이 경계가 이전을 가볍게 한다.
       - ./models:/app/models
       - ./third_party:/app/third_party
+      - ./pylibs:/app/pylibs
       - ./store:/app/store
       - ./config.json:/app/config.json:ro
     environment:
       # ultralytics/HF 캐시를 마운트 안으로 — 컨테이너를 다시 만들어도 다시 안 받는다.
       - HF_HOME=/app/models/.hf
       - YOLO_CONFIG_DIR=/app/models/.ultralytics
+      - PYTHONPATH=/app/pylibs:/app/third_party/utils3d:/app/third_party/AerialMetric/MoGe:/app
     deploy:
       resources:
         reservations:

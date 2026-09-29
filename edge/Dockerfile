@@ -7,7 +7,9 @@
 #
 #   docker compose up --build
 #   docker compose run --rm edge ./fetch_models.sh     # 가중치 먼저
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# CUDA 드라이버 호환성: Windows RTX 3070 Laptop GPU의 드라이버 버전은 CUDA 12.3
+# 기준을 요구하므로 12.4 이미지를 쓰면 컨테이너 실행이 막힌다.
+FROM nvidia/cuda:12.3.2-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -27,8 +29,8 @@ WORKDIR /app
 
 # torch를 먼저, 따로 깐다. requirements.txt에 박지 않는 이유는 CUDA 버전에
 # 묶여 있어서다 — 기기를 옮기면 이 한 줄만 바꾼다.
-RUN pip install --upgrade pip \
-    && pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt

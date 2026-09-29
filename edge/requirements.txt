@@ -7,9 +7,12 @@
 # 받아서 설치한다 — 그쪽 MoGe 포크를 써야 LoRA 키가 맞는다.
 
 numpy>=1.24,<3
+scipy>=1.10
 opencv-python-headless>=4.8
 onnxruntime>=1.17
+onnx>=1.16,<2
 ultralytics>=8.3          # YOLOE prompt-free / YOLO-World
+git+https://github.com/ultralytics/CLIP.git
 transformers>=4.40        # CLIP
 requests>=2.28
 

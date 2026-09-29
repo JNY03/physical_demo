@@ -1305,9 +1305,12 @@ class Puller:
         self.long_poll_s = float(node.get("long_poll_s", 2.0))
         self.pulled = self.not_modified = self.failed = self.spooled_in = 0
         self.inferred = self.pushed = self.push_suppressed = 0
+        self.inference_dropped = 0
         self.last_error: str | None = None
         self.last_frame: dict | None = None      # 마지막으로 가져온 것의 요약
         self._stop = threading.Event()
+        self._inference_q: queue.Queue = queue.Queue(maxsize=1)
+        self._inference_thread: threading.Thread | None = None
         self._i = 0
 
     # -- 제어 --------------------------------------------------------------
@@ -1343,7 +1346,8 @@ class Puller:
                              "failed": self.failed,
                              "from_spool": self.spooled_in,
                              "inferred": self.inferred, "pushed": self.pushed,
-                             "push_suppressed": self.push_suppressed},
+                             "push_suppressed": self.push_suppressed,
+                             "inference_dropped": self.inference_dropped},
                 "last_frame": self.last_frame, "last_error": self.last_error}
 
     # -- 전송 --------------------------------------------------------------
@@ -1396,9 +1400,17 @@ class Puller:
     # -- 루프 --------------------------------------------------------------
     def stop(self):
         self._stop.set()
+        if self._inference_thread is not None:
+            try:
+                self._inference_q.put_nowait(None)
+            except queue.Full:
+                pass
 
     def run(self) -> None:
         cfg = self.cfg
+        self._inference_thread = threading.Thread(
+            target=self._inference_loop, name=f"infer-{self.name}", daemon=True)
+        self._inference_thread.start()
         while not self._stop.is_set():
             one_shot = self._fetch_once.is_set()
             if not (self.pull_on.is_set() or one_shot):
@@ -1484,69 +1496,67 @@ class Puller:
                 self._fetch_once.clear()
                 self._fetch_done.set()
 
-            # ── 추론 게이트 ──────────────────────────────────────────────────
-            # 꺼져 있으면 여기서 끝난다. 가져온 프레임은 화면에는 그린다 —
-            # "지금 말단이 뭘 보고 있나"는 추론과 무관하게 볼 수 있어야 한다.
-            if not self.infer_on.is_set():
-                # 반영 화면은 그리지 않는다 — 근거가 없으니 원본과 같은 그림이다.
-                if from_spool and meta.get("spool_id"):
-                    self._ack_spool(meta["spool_id"])
-                continue
+            # 원본 발행은 추론과 분리한다. 추론이 늦어도 Pi3의 최신 프레임은
+            # 계속 화면에 흐르고, 엣지는 가장 최근 프레임 하나만 따라간다.
+            if self.infer_on.is_set():
+                item = (meta, bgr, from_spool)
+                try:
+                    self._inference_q.put_nowait(item)
+                except queue.Full:
+                    try:
+                        self._inference_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._inference_q.put_nowait(item)
+                    except queue.Full:
+                        pass
+                    self.inference_dropped += 1
+            elif from_spool and meta.get("spool_id"):
+                self._ack_spool(meta["spool_id"])
 
+    def _inference_loop(self) -> None:
+        """최신 Pi3 프레임만 추론하고, 늦은 결과는 말단 좌표로 반영한다."""
+        while not self._stop.is_set():
+            try:
+                item = self._inference_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            meta, bgr, from_spool = item
+            cfg = self.cfg
             try:
                 record = stage1(cfg, meta, bgr)
                 self.inferred += 1
+                dcfg = cfg.get("depth", {})
+                sync_depth = (dcfg.get("mode", "sync") == "sync"
+                              and STATE.get("depth") is not None
+                              and STATE["depth"].available())
+                if sync_depth:
+                    stage_depth(cfg, record, meta, bgr)
+                obs = record.get("obstacles") or []
+                if obs:
+                    self.push_verdict({"stage": 1, "frame_id": record["frame_id"],
+                                       "frame_seq": record.get("frame_seq"),
+                                       "camera_id": meta.get("camera_id", 0),
+                                       "observed_at": record.get("observed_at"),
+                                       "obstacles": obs})
+                publish_live(cfg, meta, bgr, record, record.get("unknown", []))
+                if from_spool and meta.get("spool_id"):
+                    self._ack_spool(meta["spool_id"])
+                want_async = (cfg.get("unknown", {}).get("enabled", True)
+                              or STATE.get("clip") is not None
+                              or not sync_depth)
+                if want_async:
+                    try:
+                        STATE["async_q"].put_nowait((record, bgr, meta, self))
+                    except queue.Full:
+                        STATE["async_dropped"] = STATE.get("async_dropped", 0) + 1
             except Exception as exc:
                 import traceback
                 print(f"  [{self.name}] stage1 실패: {exc!r}", flush=True)
                 traceback.print_exc()
-                continue
-
-            # ── 거리는 **동기다** ────────────────────────────────────────
-            # 예산을 보면 그래야 한다: 말단이 8 fps를 내는데 엣지는 YOLOE 31ms
-            # + depth ~104ms = 135ms로 7.4 fps다. 거의 맞물린다.
-            #
-            # 동기가 나은 이유는 **신선도**다. 비동기면 거리가 큐 대기 + depth
-            # 시간만큼 더 늙어 도착하고 왕복도 두 번이 된다. 같은 판정에 라벨과
-            # 거리를 함께 실으면 왕복 한 번에 끝나고 거리는 라벨만큼만 낡는다.
-            # 비동기 배치는 CLIP(800ms~1s)이 같은 워커에 있던 시절의 것이다.
-            dcfg = cfg.get("depth", {})
-            sync_depth = (dcfg.get("mode", "sync") == "sync"
-                          and STATE.get("depth") is not None
-                          and STATE["depth"].available())
-            if sync_depth:
-                # range를 obstacles 항목에 직접 얹는다 — 병합할 것이 없다.
-                stage_depth(cfg, record, meta, bgr)
-
-            # 판정을 **즉시** 돌려준다. push_verdict가 보내기 게이트를 확인한다.
-            obs = record.get("obstacles") or []
-            if obs:
-                self.push_verdict({"stage": 1, "frame_id": record["frame_id"],
-                                   "frame_seq": record.get("frame_seq"),
-                                   "camera_id": meta.get("camera_id", 0),
-                                   "observed_at": record.get("observed_at"),
-                                   "obstacles": obs})
-
-            # 화면은 **말단이 정렬한 상태**를 그린다(meta["obstacles"]). 엣지가 방금
-            # 본 것을 그리면 검증하려는 왕복 자체가 화면에서 사라진다.
-            publish_live(cfg, meta, bgr, record, record.get("unknown", []))
-
-            if from_spool and meta.get("spool_id"):
-                self._ack_spool(meta["spool_id"])
-
-            # 비동기로 넘길 일이 남았을 때만 큐에 넣는다. CLIP이 꺼져 있고
-            # depth가 동기면 워커가 할 일이 없다 — 빈 항목을 돌리면 로그만 는다.
-            want_async = (cfg.get("unknown", {}).get("enabled", True)
-                          or STATE.get("clip") is not None
-                          or not sync_depth)
-            if not want_async:
-                continue
-            try:
-                STATE["async_q"].put_nowait((record, bgr, meta, self))
-            except queue.Full:
-                # 비동기가 밀리면 이 프레임의 stage2/depth는 건너뛴다. stage1은
-                # 이미 갔고 다음 프레임이 곧 온다 — 큐를 불리는 쪽이 더 나쁘다.
-                STATE["async_dropped"] = STATE.get("async_dropped", 0) + 1
 
 
 def find_puller(name: str | None):
@@ -2219,9 +2229,9 @@ def ctl(args) -> int:
     `/api/command`를 그대로 치는 얇은 껍데기이기 때문이다 — 두 벌이 되면 한쪽만
     고치게 된다.
 
-        python server.py ctl fetch
-        python server.py ctl infer-on
-        python server.py ctl push-off --terminal <말단이름>
+        python3 server.py ctl fetch
+        python3 server.py ctl infer-on
+        python3 server.py ctl push-off --terminal <말단이름>
     """
     cfg = load_config(args.config)
     scfg = cfg.get("server", {})
@@ -2237,7 +2247,7 @@ def ctl(args) -> int:
         r = requests.post(url, json=payload, timeout=(3.0, 30.0))
     except Exception as exc:
         print(f"엣지에 연결할 수 없다 ({url}): {exc!r}")
-        print("서버가 떠 있는지 확인한다:  python server.py")
+        print("서버가 떠 있는지 확인한다:  python3 server.py")
         return 1
     print(json.dumps(r.json(), ensure_ascii=False, indent=2))
     return 0 if r.ok else 1
@@ -2302,7 +2312,7 @@ def main() -> None:
     print(f"  파이프라인: 말단 KLT 플로우 정렬 → YOLOE + depth"
           f"({'동기, 한 판정에 함께' if dmode == 'sync' else '비동기'}) → 말단 반영")
     print(f"  가동 단계: {', '.join(on) or '없음 — fetch_models.sh를 먼저 돌린다'}")
-    print("  제어: python server.py ctl "
+    print("  제어: python3 server.py ctl "
           "{fetch|infer-on|infer-off|push-on|push-off|pull-on|pull-off|status}"
           f" --port {port}")
     httpd = ThreadingHTTPServer((host, port), Handler)
