@@ -290,8 +290,8 @@
       "traffic sign": 2.5
     },
     "$comment_pi": "**Pi에서는 못 돈다.** Pi 5 실측 GEMM 75.1 GFLOPS(4초 만에 86도로 스로틀링), MoGe2-Aerial ViT-L은 700x392 입력에서 1.04 TFLOPs라 프레임당 약 35초다. ViT-B로 낮춰도 10초, ViT-S는 3.2초이고 애초에 항공 LoRA는 ViT-L에만 있다. 그래서 depth는 엣지 전용이고, 말단은 받은 거리를 track_id로 반영하되 트랙 박스 크기 변화로 현재 시점에 맞춘다(drone_rpi/records.py Range.at_box). 참고로 말단의 mobilenet RPN은 0.01 TFLOPs 수준이고 실측 210~250ms다 — 두 자리 수가 다르다.",
-    "every_n_frames": 2,
-    "$comment_every": "async에서 depth를 몇 프레임마다 돌릴지. 1로 두면 493ms짜리가 큐를 계속 채워 거리가 오히려 더 낡는다. 2면 말단 8 fps 대비 4 fps이고, 그래도 depth가 못 따라가면 async_queue가 건너뛰고 그 수는 health의 async_dropped에 뜬다.",
+    "every_n_frames": 6,
+    "$comment_every": "async에서 depth를 몇 프레임마다 돌릴지. **2에서 6으로 늘렸다** — depth는 async라 stage1을 직접 막지는 않지만 **같은 GPU를 쓴다**. 2면 226ms짜리가 말단 8 fps 대비 GPU를 91% 점유하고, stage1은 그 뒤에서 기다리다 느려진다. 2026-09-29 RTX 3070 Laptop 실측: 단독으로는 ovd 19ms / ovd2 10ms인데 depth를 동시에 돌리면 288ms / 228ms로 **15배**가 된다. every_n별 stage1 중앙값은 2에서 236.7ms, 4에서 39.8ms, 6에서 37.4ms이고 GPU 점유는 91% → 44% → 29%, 처리량은 5.1 → 6.3 → 7.1 stage1/s다. 6이면 stage1이 말단 fps를 온전히 따라간다.\n거리가 750ms마다 갱신돼도 낡지 않는 이유: **말단이 프레임마다 거리를 다시 씌운다** — KLT 상사변환의 배율로 Range를 재조정하므로(drone_rpi/records.py current()) 갱신 사이를 말단이 메운다. class_height_m 사전도 연산 0의 두 번째 경로로 함께 돈다. obstacle_ttl_s(6s)에 비해 750ms는 넉넉하다.\n그래도 depth가 못 따라가면 async_queue가 건너뛰고 그 수는 health의 async_dropped에 뜬다. longest_side는 손대지 않았다 — 700에서 256까지 줄여도 226→235ms로 오히려 느려졌다(병목이 해상도가 아니다).",
     "provider": "moge2_aerial",
     "$comment_provider": "**'zipdepth'는 임시다.** MoGe2-Aerial 체크포인트(1.48GB)를 받는 동안 파이프라인을 끝까지 돌려 보려고 쓴다 — torch 없이 CPU 384px 30ms로 돈다. 다만 출력이 상대 역depth라 **미터를 내지 않는다**: 저장소의 보정 프로파일은 464x400 실내 어안 로봇에 crop을 적용한 구성의 것이고 유효 범위가 cm다(AI-B-01: 구성별 프로파일 비재사용). 그동안 거리는 클래스 크기 사전이 낸다. 받기가 끝나면 'moge2_aerial'로 바꾼다.",
     "zipdepth_model": "models/zipdepth_base_384x384.onnx"
