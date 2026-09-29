@@ -1,0 +1,7 @@
+# core.autocrlf=true인 Windows 체크아웃에서 run.sh가 CRLF로 나가면 WSL bash가
+# 첫 줄부터 `$'\r': command not found`로 죽는다. 셸 스크립트는 LF로 못박는다.
+*.sh text eol=lf
+
+# 반대로 배치 파일은 CRLF여야 cmd가 제대로 읽는다.
+*.cmd text eol=crlf
+*.bat text eol=crlf

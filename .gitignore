@@ -24,3 +24,6 @@ records_snapshot.json
 # 로컬 설정 — config.json을 고쳐 쓰되 기기별 사본은 올리지 않는다
 config.local.json
 .env
+
+# WSL 설치·진단 출력 — 일회성이라 저장소에 남길 것이 아니다
+wsl-*.txt
