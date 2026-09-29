@@ -86,73 +86,45 @@ irm -Method Post -Uri $api -ContentType application/json -Body '{"command":"star
 # start_pull / stop_pull / start_push / stop_push / stop_inference / fetch_image
 ```
 
-## 다른 기기에서 구독하기 (Tailscale)
+## 다른 기기에서 구독하기
 
-**엣지·말단·구독자가 서로 다른 네트워크여도 된다.** 주소가 Tailscale IP 하나뿐이라
-물리 네트워크가 바뀌어도 설정을 고치지 않고, 연결 방향이 전부 한쪽이라(엣지→말단,
-구독자→엣지) 말단에도 구독자에도 포트포워딩이 필요 없다.
+엣지에서 `.\run.cmd`(또는 `./run.sh`)로 띄우면 그걸로 끝이다. 같은 tailnet의 다른
+기기에서 아래 주소로 바로 붙는다 — 서로 다른 네트워크여도 된다.
 
-NAT 홀펀칭으로 직접 경로가 뚫리면 인터넷 RTT만 더해지고, 안 뚫려도 DERP 중계로
-붙는다 — 끊기지 않는다. 다른 망의 노드로 실측했을 때 직접 경로는 4~10ms, 중계로
-빠진 노드는 432ms였다(DERP 지역 지연 tok 37ms · hkg 87ms · sea 144ms).
-
-### 엣지를 tailnet에 내보내기
-
-엣지는 `0.0.0.0:8891`로 열리므로 리눅스에서 직접 돌린다면 그 기기의 Tailscale IP로
-바로 붙으면 된다.
-
-**WSL에서 돌린다면 WSL의 tailnet IP를 그대로 주면 안 된다** — 이미지가 나가지
-않는다. WSL의 `eth0`과 `tailscale0` MTU가 둘 다 1280이라 WireGuard로 감싼 뒤
-eth0을 넘겨 큰 패킷이 통째로 버려진다(JSON은 통과하고 MJPEG만 0바이트로 온다).
-Windows 쪽 Tailscale 노드로 중계한다:
-
-```powershell
-python .\edge\windows_pi_proxy.py --listen-host <Windows의 Tailscale IP> --listen-port 8891 --target-host 127.0.0.1 --target-port 8891
-tailscale serve --bg --http=8891 http://127.0.0.1:8891     # 재부팅 후에도 유지
+```
+http://100.114.96.78:8891/          # 현재 엣지 노드
+http://desktop-tcj72rt-1:8891/      # MagicDNS 이름도 같다
 ```
 
-WSL MTU를 고쳐 직접 여는 쪽도 된다 — WSL 안에서 `sudo ip link set dev tailscale0 mtu 1180`.
+브라우저로 열면 화면이 그대로 나온다. 스트림 하나만 가져가려면 경로를 붙인다.
 
-### 구독할 수 있는 것
+```bash
+curl http://100.114.96.78:8891/api/obstacles?camera=0            # 추론 결과(JSON)
+curl -o out.mjpg http://100.114.96.78:8891/original?camera=0     # 영상
+```
 
-`base = http://<엣지 Tailscale IP>:8891`. MJPEG는
-`multipart/x-mixed-replace; boundary=frame`이고 파트마다 `Content-Type: image/jpeg`와
-`Content-Length`가 붙는다. 최대 12 fps, JPEG q70.
+### 스트림
 
-| 경로 | 내용 | 실측 대역 |
+MJPEG는 `multipart/x-mixed-replace; boundary=frame`이고 파트마다
+`Content-Type: image/jpeg`와 `Content-Length`가 붙는다. 최대 12 fps, JPEG q70.
+`camera=0`은 카메라 인덱스다.
+
+| 경로 | 내용 | 대역 |
 |---|---|---|
-| `/panels?camera=0` | original + depth + 장애물 3칸 (3840×720) | 780 KB/s |
-| `/original?camera=0` | 원본만 | 131 KB/s |
-| `/stream?camera=0` | 장애물 오버레이만 | 118 KB/s |
-| `/depth?camera=0` · `/missed?camera=0` | depth 컬러맵 · 놓친 후보 격자 | |
+| `/panels` | `original`+`depth`+`장애물` 세 칸을 옆으로 붙인 것 (3840×720) | 780 KB/s |
+| `/original` | 말단이 보낸 원본 | 131 KB/s |
+| `/depth` | MoGe2-Aerial 거리 컬러맵 | |
+| `/stream` | 원본 위에 박스·클래스·거리를 얹은 것 | 118 KB/s |
+| `/missed` | 검출이 놓친 후보들의 crop 격자 | |
 
-추론 결과 원본은 `/api/obstacles?camera=0`이다 — 프레임별 `flow`와 장애물마다
-`box·label·conf·range·age_s·frames_late·quality·moved_px`. 그 밖에 `/api/live`,
-`/api/health`. 푸시 구독(WebSocket·SSE)은 없다.
+| 경로 | 내용 |
+|---|---|
+| `/api/obstacles` | 장애물마다 `box·label·conf·range·age_s·quality·moved_px`, 프레임 `flow` |
+| `/api/live` | 카메라별 `frame_id·seq·n_obstacles·age_s` |
+| `/api/health` | 단계 가동 상태 |
 
-`/panels`는 6 Mbps쯤 든다 — DERP 중계로는 버겁다. 중계 경로가 예상되면
-`/original`이나 `/stream`(1 Mbps)에 `/api/obstacles` 폴링을 붙이는 편이 낫다.
-
-**인증이 없다.** tailnet ACL이 유일한 접근 통제다.
-
-```python
-import requests
-BASE = "http://100.x.y.z:8891"
-
-d = requests.get(f"{BASE}/api/obstacles?camera=0", timeout=5).json()
-for o in d["obstacles"]:
-    print(o["label"], o["conf"], o["box"], o.get("range"))
-
-r = requests.get(f"{BASE}/original?camera=0", stream=True, timeout=(3, 30))
-buf = b""
-for chunk in r.iter_content(8192):
-    buf += chunk
-    while True:
-        s, e = buf.find(b"\xff\xd8"), buf.find(b"\xff\xd9")
-        if s < 0 or e < 0 or e < s:
-            break
-        jpeg, buf = buf[s:e + 2], buf[e + 2:]
-```
+푸시 구독(WebSocket·SSE)은 없다 — MJPEG와 폴링뿐이다. 인증도 없다. tailnet ACL이
+유일한 접근 통제다.
 
 ## 라이선스 주의
 
