@@ -223,6 +223,13 @@ class ModelOutput:
 
 
 # ---------------------------------------------------------------- 모델: YOLOE prompt-free
+def overlay_min_conf(yoloe_cfg):
+    """오버레이에 그릴 최소 신뢰도 (models.yoloe.overlay.min_conf). null 이면 거르지 않는다.
+    yoloe 오버레이와 depth 오버레이의 검출 박스에 같이 쓴다."""
+    v = ((yoloe_cfg or {}).get("overlay", {}) or {}).get("min_conf")
+    return float(v) if v is not None else None
+
+
 class YoloeRunner:
     name = "yoloe"
 
@@ -256,8 +263,14 @@ class YoloeRunner:
                     if c.get("save_polygons", True):
                         d["polygon"] = np.round(poly, 1).tolist()
                 dets.append(d)
+        # 오버레이는 박스·라벨만 그린다 (폴리곤 마스크는 안 그림 — results.jsonl 의 polygon 과 depth 결합에는 그대로 쓴다).
+        # overlay.min_conf 미만 검출은 그림에서만 뺀다. results.jsonl 에는 모델 conf 이상 검출이 전부 남는다
         ov = c.get("overlay", {}) or {}
-        overlay = r.plot(line_width=ov.get("line_width"), masks=ov.get("masks", True))
+        shown = r
+        min_conf = overlay_min_conf(c)
+        if min_conf is not None and r.boxes is not None and len(r.boxes):
+            shown = r[r.boxes.conf >= min_conf]
+        overlay = shown.plot(line_width=ov.get("line_width"), masks=False)
         return {"infer_ms": round(ms, 1), "weight": Path(self.weight).name}, overlay, dets
 
 
@@ -539,7 +552,9 @@ def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cf
             fused = attach_depth(dets, depth, fusion)
             rec["detections"] = fused
         title = "%s  %s/%s #%s" % (m, device, base.get("run") or "live", base.get("n"))
-        out.append((m, rec, depth_overlay(bgr, depth, fused, title, vis), depth))
+        min_conf = overlay_min_conf((cfg.get("models", {}) or {}).get("yoloe"))
+        drawn = fused if fused is None or min_conf is None else [d for d in fused if d["conf"] >= min_conf]
+        out.append((m, rec, depth_overlay(bgr, depth, drawn, title, vis), depth))
     return out
 
 

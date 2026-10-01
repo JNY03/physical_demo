@@ -66,9 +66,11 @@ models:
     max_det: 100
     half: true
     save_polygons: true           # 검출마다 마스크 외곽선(픽셀 좌표)을 results.jsonl 에 남긴다
-    overlay:
+    overlay:                      # 박스·라벨만 그린다 (폴리곤 마스크는 그리지 않음)
       line_width: null            # null = 이미지 크기에 맞춰 자동
-      masks: true
+      min_conf: 0.25              # 오버레이에 그릴 최소 신뢰도 (yoloe · depth 오버레이 공통). null = 다 그림
+                                  # 그림에서만 거른다 — results.jsonl · Redis result 에는 위 conf 이상 검출이 전부 남는다
+                                  # 위 conf 보다 낮게 주면 효과 없음 (모델이 conf 미만은 내지 않는다)
 
   # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
   unidepth:
