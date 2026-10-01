@@ -1,0 +1,20 @@
+# 실제 기기 주소 (테일넷 IP) — hosts.example.json 을 복사해서 쓴다
+hosts.local.json
+.env
+*.env
+
+# 수집 데이터 · 추론 결과 · 로그
+stream_data/
+*.log
+*.frm
+*.npy
+
+# 모델 가중치
+*.pt
+*.pth
+*.onnx
+
+__pycache__/
+*.pyc
+venv/
+.venv/

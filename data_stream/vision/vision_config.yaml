@@ -1,0 +1,112 @@
+# =============================================================================
+# vision_config.yaml — vision_infer.py 설정
+#
+# 입력 : live (기본)  Redis camera_stream:<기기> 의 최신 프레임 (server_stream_multi_source.py 가 흘림)
+#        저장된 이미지   <data_root>/<기기>/<실행 YYYYMMDD_HHMMSS>/frames/*.jpg  (+ frames.jsonl)
+#        원본은 읽기만 한다.
+# 출력 : Redis vision_stream:<기기>:<모델> · vision_depth:<기기>:<모델>  (live 만)
+#        <data_root>/<기기>/<실행>/<output.dirname>/<모델>/          (두 모드 같은 형식)
+#            results.jsonl          한 장 = 한 줄 (검출 결과 / depth 통계·내부파라미터)
+#            overlay/<번호>.jpg      오버레이 시각화
+#            depth/<번호>.npy        depth 모델만. 미터 단위, 0 = 무효 픽셀
+#
+# 명령행 옵션(--devices / --models / --runs ...)이 여기 값보다 우선한다.
+# =============================================================================
+
+data_root: ../stream_data        # 상대 경로면 이 config 파일 위치 기준. 서버 --save 와 같아야 live 결과가 디스크에 저장된다
+
+# 명령행에서 안 고르면 쓰는 기본값
+defaults:
+  devices: [cam360, drone, robot1, robot2]
+  models: [yoloe]
+  runs: live                      # live = 실시간 스트림 최신 프레임 / 저장된 이미지: all | latest | 실행 폴더 이름 목록
+
+runtime:
+  device: cuda:0
+  watch_interval_s: 2.0           # --watch 일 때 새 프레임을 확인하는 간격
+
+# ── live (실시간) ───────────────────────────────────────────────────────────
+# 기기마다 Redis 의 가장 최근 프레임만 추론한다. 추론하는 사이 들어온 프레임은 건너뛴다.
+# 건너뛴 프레임은 나중에 --runs all|latest|<실행> 으로 채운다.
+# Redis 는 최근 것만 들고 있으면 된다 (전부 디스크에 저장). 아래 개수 × 크기가 메모리를 정한다.
+#   overlay JPEG 약 50~200KB · depth 원본 1280×720 float16 약 1.8MB
+live:
+  redis: redis://127.0.0.1:6380/0  # 서버 --redis 와 같게
+  maxlen: 300                     # vision_stream:<기기>:<모델> 에 남길 개수
+  depth_maxlen: 30                # vision_depth:<기기>:<모델> 에 남길 개수 (depth 원본이라 크다)
+  max_age_s: 5.0                  # 이보다 오래된 프레임은 처리하지 않는다 (서버가 멈췄거나 이전 실행의 것)
+  max_fps: null                   # 기기별 처리 상한. null = 가능한 만큼 / 숫자 / {drone: 2, robot1: 5}
+  save: true                      # 디스크에도 저장 (오프라인과 같은 형식)
+  report_interval_s: 10.0
+
+output:
+  dirname: vision                 # 실행 폴더 아래 만들 하위 폴더 이름
+  jpeg_quality: 90
+
+# ── 기기별 카메라 정보 ─────────────────────────────────────────────────────
+# fov_x_deg : depth 모델에 줄 수평 화각(도).
+#   null   → 모델이 스스로 추정
+#   숫자   → 그 값 사용
+#   meta   → frames.jsonl 의 sender.camera.hfov_deg 사용 (드론 agent 가 붙여 줌)
+# cam360 은 파노라마(등장방형)일 수 있다. 단안 depth 모델은 핀홀 영상 기준이라
+# 파노라마에서는 거리값을 그대로 믿지 않는다.
+devices:
+  cam360: {fov_x_deg: null}
+  drone:  {fov_x_deg: meta}
+  robot1: {fov_x_deg: null}
+  robot2: {fov_x_deg: null}
+
+models:
+  # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
+  yoloe:
+    weight: /home/jny/anchor360_depth/models/yoloe-11l-seg-pf.pt   # 경량: yoloe-11s-seg-pf.pt
+    conf: 0.25
+    iou: 0.5
+    imgsz: 640
+    max_det: 100
+    half: true
+    save_polygons: true           # 검출마다 마스크 외곽선(픽셀 좌표)을 results.jsonl 에 남긴다
+    overlay:
+      line_width: null            # null = 이미지 크기에 맞춰 자동
+      masks: true
+
+  # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
+  unidepth:
+    repo_path: /home/dg/capstone-db/external/UniDepth
+    model_name: /home/dg/capstone-db/image_server/checkpoints/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
+    resolution_level: 9           # 0~9, 높을수록 정밀·느림
+    infer_long_side: null         # 숫자면 긴 변을 이 크기로 줄여 추론 후 원본 크기로 되돌림
+    use_fp16: true
+    save_depth: true
+    depth_dtype: float16          # float16 | float32
+
+  # ── MoGe2-Aerial (MoGe-2 ViT-L + LoRA r=96, AerialMetric ECCV 2026) ──────
+  moge2_aerial:
+    repo_path: /home/dg/capstone-db/external/AerialMetric/MoGe
+    extra_sys_path: [/home/dg/capstone-db/external/AerialMetric/pydeps]   # utils3d, peft
+    checkpoint: /home/dg/capstone-db/external/AerialMetric/weights/Moge2-Aerial.pt
+    lora_rank: 96
+    resolution_level: 9           # 0~9
+    force_projection: true
+    apply_mask: true              # 하늘 등 무효 영역은 depth 0
+    infer_long_side: null
+    use_fp16: true
+    save_depth: true
+    depth_dtype: float16
+
+# ── depth 시각화 / YOLOE 결합 ──────────────────────────────────────────────
+depth_vis:
+  mode: blend                     # blend = 원본 위에 컬러맵 / side = 원본 | 컬러맵 나란히
+  alpha: 0.6                      # blend 비율 (컬러맵 쪽)
+  colormap: turbo                 # turbo | jet | inferno | magma | viridis | plasma
+  near_is_warm: true              # 가까울수록 빨강
+  range_percentile: [2, 98]       # 색 범위를 이 백분위로 자름
+  colorbar: true
+
+# yoloe 와 depth 모델을 함께 고르면 depth 결과에 검출별 거리를 붙이고
+# depth 오버레이에 박스 + 거리를 그린다.
+fusion:
+  enabled: true
+  depth_percentile: 40            # 마스크 안 depth 의 이 백분위를 물체 거리로 본다
+  mask_erode_px: 3                # 경계 배경 혼입을 줄이려고 마스크를 깎는다
+  min_valid_ratio: 0.2            # 마스크 안 유효 depth 비율이 이보다 낮으면 거리 null
