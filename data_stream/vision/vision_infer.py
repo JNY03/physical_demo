@@ -49,8 +49,11 @@ results.jsonl 한 줄
          fov_x_given, detections?: [{..., depth_m}]
 
 실행 순서 (저장소 루트에서. 2026-10-01 이 PC 에서 실측 확인)
-  # 0) 전용 Redis (127.0.0.1:6380). WSL 을 재시작하면 꺼지므로 그때마다 다시 띄운다
-  redis-server --port 6380 --bind 127.0.0.1 --save "" --appendonly no --daemonize yes
+  # 0) 전용 Redis :6380. WSL 을 재시작하면 꺼지므로 그때마다 다시 띄운다
+  #    이 PC 의 서버·비전은 127.0.0.1 로, tailnet 의 다른 기기는 100.114.96.78(이 PC tailscale 주소)로 구독한다
+  #    비밀번호가 없어 protected-mode 를 끈다 — tailscale0 에만 6380 을 열었다 (ufw). 인터넷 쪽에는 열지 말 것
+  redis-server --port 6380 --bind "127.0.0.1 100.114.96.78" --protected-mode no --save "" --appendonly no --daemonize yes
+  #    다른 기기에서 읽기: redis.Redis.from_url("redis://100.114.96.78:6380/0")
 
   # 1) 터미널 1 — 스트림 서버 (로봇·드론 주소는 data_stream/hosts.local.json)
   source data_stream/venv/bin/activate

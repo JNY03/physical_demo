@@ -68,7 +68,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
       dtype    "<f2" (float16)   shape  "H,W"   unit  "m"   header  vision_stream 과 같은 요약
 
   읽는 예 (파이썬)
-      r = redis.Redis(port=6380)
+      r = redis.Redis(port=6380)      # 다른 기기: redis.Redis(host="100.114.96.78", port=6380)
       eid, f = r.xrevrange("vision_stream:drone:yoloe", count=1)[0]          # 최신 결과
       res = json.loads(f[b"result"])                                          # 검출 목록 등
       img = r.xrange("camera_stream:drone", res["source_id"], res["source_id"])  # 그 결과의 원본 프레임
@@ -114,6 +114,8 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
 준비
   pip install redis paho-mqtt        (파이썬 3.8 이상)
   Redis 5.0 이상 (Stream 기능). 기본으로 이 기기 127.0.0.1:6380 의 전용 Redis 에 넣는다 (--redis 로 바꿈).
+  tailnet 의 다른 기기도 구독하려면 Redis 를 tailscale 주소에도 묶는다 (띄우는 명령은 vision/vision_infer.py 맨 위).
+    다른 기기에서: redis.Redis.from_url("redis://100.114.96.78:6380/0")   (100.114.96.78 = 이 PC tailscale 주소)
   Redis 나 paho-mqtt 가 없어도 멈추지 않는다. 저장은 계속하고 경고만 낸다.
 
 주소 설정: 기기 주소(테일넷 IP)는 코드에 두지 않는다. hosts.example.json 을 hosts.local.json 으로
