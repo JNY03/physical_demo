@@ -18,3 +18,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+
+# 외부 코드(UniDepth·AerialMetric)와 받은 가중치 — 설치 때 받는다
+external/
+models/

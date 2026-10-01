@@ -1,7 +1,0 @@
-__pycache__/
-*.pyc
-demo/test/try1/
-venv/
-
-# CLIP 사전학습 가중치 (338MB — 깃허브 100MB 제한 초과, 받아서 쓴다)
-weights/

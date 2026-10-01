@@ -59,7 +59,7 @@ devices:
 models:
   # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
   yoloe:
-    weight: /home/jny/anchor360_depth/models/yoloe-11l-seg-pf.pt   # 경량: yoloe-11s-seg-pf.pt
+    weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg-pf.pt   # 경량: yoloe-11s-seg-pf.pt
     conf: 0.25
     iou: 0.5
     imgsz: 640
@@ -72,8 +72,8 @@ models:
 
   # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
   unidepth:
-    repo_path: /home/dg/capstone-db/external/UniDepth
-    model_name: /home/dg/capstone-db/image_server/checkpoints/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
+    repo_path: /home/ny/physical_demo/data_stream/external/UniDepth
+    model_name: /home/ny/physical_demo/data_stream/models/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
     resolution_level: 9           # 0~9, 높을수록 정밀·느림
     infer_long_side: null         # 숫자면 긴 변을 이 크기로 줄여 추론 후 원본 크기로 되돌림
     use_fp16: true
@@ -82,9 +82,9 @@ models:
 
   # ── MoGe2-Aerial (MoGe-2 ViT-L + LoRA r=96, AerialMetric ECCV 2026) ──────
   moge2_aerial:
-    repo_path: /home/dg/capstone-db/external/AerialMetric/MoGe
-    extra_sys_path: [/home/dg/capstone-db/external/AerialMetric/pydeps]   # utils3d, peft
-    checkpoint: /home/dg/capstone-db/external/AerialMetric/weights/Moge2-Aerial.pt
+    repo_path: /home/ny/physical_demo/data_stream/external/AerialMetric/MoGe
+    extra_sys_path: [/home/ny/physical_demo/data_stream/external/AerialMetric/pydeps]   # utils3d, peft
+    checkpoint: /home/ny/physical_demo/data_stream/external/AerialMetric/weights/Moge2-Aerial.pt
     lora_rank: 96
     resolution_level: 9           # 0~9
     force_projection: true
