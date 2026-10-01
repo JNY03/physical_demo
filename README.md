@@ -102,7 +102,7 @@ ls -l ~/go1sdk
 | MQTT 브로커 | `pi7` 자체 (`127.0.0.1`) | **`pi8` 자체 (`127.0.0.1`)** | 5-1 절 |
 | MQTT 개체 ID (`HW_ENTITY_ID`) | `go1-001` | `go1-002` | `/etc/hw-robot.env` |
 | Unity/릴레이 로봇 ID (`--robot_id`) | `go1-1` | `go1-2` | `go1-sdk`, `robot-relay` 유닛 |
-| Unity 호스트 PC (`--unity_ip`) | `192.168.50.244` | 2호기 쪽 Unity PC 주소 | `go1-sdk`, `robot-relay` 유닛 |
+| Unity 호스트 PC (`--unity_ip`) | `192.168.50.244` | 같은 PC (변경 없음) | — |
 | Go1 내부망에서 Pi 주소 | `192.168.123.x` | 같아도 됨 (로봇마다 별도 망) | `pi_base_setup.sh --go1` |
 
 > Go1 쪽 주소(`192.168.123.161`, `.13`)는 로봇마다 같습니다. 각 Pi 가 자기 로봇에 유선으로 직결되므로 그대로 둡니다.
@@ -157,12 +157,13 @@ sudo cp robot-node.service robot-relay.service detect-bridge.service go1-sdk.ser
 sudo sed -i 's/--robot_id go1-1/--robot_id go1-2/' /etc/systemd/system/go1-sdk.service
 sudo sed -i -e 's/--node_id pi7/--node_id pi8/' -e 's/--default_robot_id go1-1/--default_robot_id go1-2/' \
         /etc/systemd/system/robot-relay.service
-
-# 2호기 Unity 호스트 PC 가 1호기와 다르면 주소도 바꾼다
-UNITY2=<2호기 Unity PC IP>
-sudo sed -i "s/--unity_ip 192.168.50.244/--unity_ip $UNITY2/" \
-        /etc/systemd/system/go1-sdk.service /etc/systemd/system/robot-relay.service
 ```
+
+> **Unity 는 1·2호기가 같은 PC(`192.168.50.244`)를 씁니다.**
+> 다로봇 채널(`robot-relay` → Unity `15201`)은 `robot_id`(`go1-1`/`go1-2`)가 붙어 있어 두 대가 섞이지 않습니다.
+> 다만 `go1-sdk` 가 직접 보내는 기존 단일 로봇 포트(상태 `15101`, 명령 미러 `15102`, waypoint `15104`)에는
+> 로봇 구분이 없습니다. 두 대의 `go1-sdk` 를 **동시에** 켜면 Unity 의 이 단일 로봇 화면에 두 로봇 값이 번갈아 들어오고,
+> Unity 에서 Pi 로 보내는 텔레옵(`15100`)·경로(`15110`)는 Unity 쪽에서 어느 Pi IP 로 보낼지 정해야 합니다.
 
 `detect-bridge` 는 장치 ID 기본값이 코드 인자(`--device go1-001 --node-id pi7`)로 되어 있어 drop-in 으로 덮어씁니다.
 
