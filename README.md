@@ -44,22 +44,20 @@ git checkout -b go1_raspi --track origin/go1_raspi
 
 ## 2. HW 브랜치 클론 → `~/hw`
 
-`hw/` 는 HW 브랜치에서 관리하므로 이 브랜치에는 없습니다. **`~/hw/pi/...` 경로가 나오도록** 받습니다.
+`hw/` 는 [Physical-Project-mk2](https://github.com/khw18033/Physical-Project-mk2) 의 `HW` 브랜치에서 관리하므로 이 브랜치에는 없습니다.
+HW 브랜치의 루트(`pi/`, `docs/`, ...)가 그대로 `~/hw` 가 됩니다.
 
 ```bash
-git clone -b <HW_BRANCH> <HW_REPO_URL> ~/hw
+git clone -b HW https://github.com/khw18033/Physical-Project-mk2.git ~/hw
 ls ~/hw/pi/robot/robot_node.py    # 이 파일이 보이면 정상
 ```
-
-> HW 브랜치의 루트가 `pi/`, `docs/` 가 아니라 그 위 단계라면(예: 루트 아래 `hw/pi/...`),
-> 다른 곳에 클론한 뒤 `ln -s <클론경로>/hw ~/hw` 로 `~/hw/pi` 가 맞도록 연결하세요.
 
 ## 3. 패키지 설치
 
 ```bash
 # 시스템 패키지
 sudo apt update
-sudo apt install -y git python3-venv python3-pip g++ libboost-dev ffmpeg mosquitto-clients chrony
+sudo apt install -y git python3-venv python3-pip g++ libboost-dev ffmpeg mosquitto mosquitto-clients chrony
 
 # Unitree SDK (upstream 그대로, 검증 커밋 4539a6c)
 git clone -b go1 https://github.com/unitreerobotics/unitree_legged_sdk.git ~/unitree_legged_sdk
@@ -92,14 +90,19 @@ ls -l ~/go1sdk
 
 ## 5. 장치 이름 바꾸기 (두 번째 로봇용)
 
-같은 브로커·같은 Unity 에 두 대가 붙으므로 **식별자가 겹치면 안 됩니다** (같은 ID 로 두 노드가 MQTT 에 붙으면 서로를 끊습니다).
+**1호기와 2호기는 서로 독립된 시스템입니다.** 코드와 기능만 같고, MQTT 브로커는 각자 자기 Pi 안에서 따로 돌립니다.
+**2호기는 1호기(`pi7`) 브로커를 참조하지 않습니다.**
+
+브로커가 분리돼 있더라도 Unity·관제·로그에서 두 로봇을 구분할 수 있도록 식별자는 다르게 둡니다.
 아래 표의 오른쪽 열은 예시입니다. 팀의 채번 규칙에 맞게 정하세요.
 
 | 항목 | 1호기 (현재) | 2호기 (예시) | 바꾸는 곳 |
 |---|---|---|---|
 | 호스트명 / 노드 ID | `pi7` | `pi8` | `hostnamectl`, `/etc/node_id` |
+| MQTT 브로커 | `pi7` 자체 (`127.0.0.1`) | **`pi8` 자체 (`127.0.0.1`)** | 5-1 절 |
 | MQTT 개체 ID (`HW_ENTITY_ID`) | `go1-001` | `go1-002` | `/etc/hw-robot.env` |
 | Unity/릴레이 로봇 ID (`--robot_id`) | `go1-1` | `go1-2` | `go1-sdk`, `robot-relay` 유닛 |
+| Unity 호스트 PC (`--unity_ip`) | `192.168.50.244` | 2호기 쪽 Unity PC 주소 | `go1-sdk`, `robot-relay` 유닛 |
 | Go1 내부망에서 Pi 주소 | `192.168.123.x` | 같아도 됨 (로봇마다 별도 망) | `pi_base_setup.sh --go1` |
 
 > Go1 쪽 주소(`192.168.123.161`, `.13`)는 로봇마다 같습니다. 각 Pi 가 자기 로봇에 유선으로 직결되므로 그대로 둡니다.
@@ -113,11 +116,21 @@ sudo hostnamectl set-hostname pi8
 # 식별자 파일·chrony·venv·Go1 내부망(eth0)·/etc/hw-node.env·robot-node 유닛을 한 번에 구성
 cd ~/hw/pi
 ./pi_base_setup.sh --entity go1-002 --node pi8 --zone zoneA --role robot \
-                   --go1 192.168.123.162 --broker <브로커주소>
+                   --go1 192.168.123.162 --broker 127.0.0.1
+
+# 2호기 자체 MQTT 브로커 (1883: 말단·백엔드, 9001: 관제 웹 WebSocket)
+sudo cp ~/hw/pi/deploy/mosquitto-hw.conf /etc/mosquitto/conf.d/hw.conf
+sudo systemctl enable --now mosquitto
+sudo systemctl restart mosquitto
+systemctl is-active mosquitto
 ```
 
-`--broker`: 1호기는 자기 안의 mosquitto(`127.0.0.1`)를 씁니다. 관제 쪽이 **한 브로커에서 두 로봇을** 보려면
-2호기는 1호기 브로커(`pi7` 의 IP) 또는 엣지 브로커 주소를 넣으세요.
+`--broker 127.0.0.1`: 2호기 노드는 **자기 Pi 안의 mosquitto** 에만 붙습니다.
+2호기를 보는 관제 웹·백엔드는 `pi8.local:1883` (웹은 `ws://pi8.local:9001`) 로 접속합니다.
+
+> `/etc/hw-node.env` 의 `HW_BROKER_HOST` 가 `127.0.0.1` 인지 꼭 확인하세요.
+> `pi7` 이나 `192.168.50.172` 같은 1호기 주소가 들어 있으면 두 시스템이 섞입니다.
+> `fix_broker_host.sh` 는 이 값을 `127.0.0.1` 로 되돌리는 스크립트라서 2호기에서도 그대로 쓸 수 있습니다.
 
 ### 5-2. 환경 파일
 
@@ -126,7 +139,7 @@ cd ~/hw/pi
 ```bash
 scp physical@pi7.local:/etc/hw-robot.env /tmp/ && sudo mv /tmp/hw-robot.env /etc/
 sudo sed -i 's/^HW_ENTITY_ID=.*/HW_ENTITY_ID=go1-002/' /etc/hw-robot.env
-sudo grep -E '^HW_(ENTITY_ID|NODE_ID|DETECT_URL)' /etc/hw-robot.env   # 남은 1호기 값이 없는지 확인
+sudo grep -E '^HW_(ENTITY_ID|NODE_ID|BROKER_HOST|DETECT_URL)' /etc/hw-robot.env /etc/hw-node.env   # 1호기 값(pi7, go1-001, 1호기 IP)이 남아 있지 않은지 확인
 ```
 
 ### 5-3. systemd 유닛 설치 (ID 는 설치본에서만 변경)
@@ -144,6 +157,11 @@ sudo cp robot-node.service robot-relay.service detect-bridge.service go1-sdk.ser
 sudo sed -i 's/--robot_id go1-1/--robot_id go1-2/' /etc/systemd/system/go1-sdk.service
 sudo sed -i -e 's/--node_id pi7/--node_id pi8/' -e 's/--default_robot_id go1-1/--default_robot_id go1-2/' \
         /etc/systemd/system/robot-relay.service
+
+# 2호기 Unity 호스트 PC 가 1호기와 다르면 주소도 바꾼다
+UNITY2=<2호기 Unity PC IP>
+sudo sed -i "s/--unity_ip 192.168.50.244/--unity_ip $UNITY2/" \
+        /etc/systemd/system/go1-sdk.service /etc/systemd/system/robot-relay.service
 ```
 
 `detect-bridge` 는 장치 ID 기본값이 코드 인자(`--device go1-001 --node-id pi7`)로 되어 있어 drop-in 으로 덮어씁니다.
@@ -177,9 +195,10 @@ sudo systemctl enable --now robot-node robot-relay detect-bridge go1-camview go1
 ## 6. 확인
 
 ```bash
-systemctl status robot-node robot-relay detect-bridge --no-pager
+systemctl status mosquitto robot-node robot-relay detect-bridge --no-pager
 journalctl -u robot-node -n 30 --no-pager
-mosquitto_sub -h <브로커주소> -t 'zoneA/robot/#' -v -W 10 | cut -c1-120   # go1-001, go1-002 가 모두 보이는지
+mosquitto_sub -h localhost -t 'zoneA/robot/#' -v -W 10 | cut -c1-120   # 2호기 자체 브로커에 go1-002 만 보이면 정상 (go1-001 이 보이면 안 됨)
+ss -tnp | grep ':1883'                                                    # 접속 대상이 127.0.0.1 뿐인지 (1호기 IP 가 없어야 함)
 ```
 
 브라우저에서 `http://pi8.local:8090/` 으로 2호기 카메라 뷰가 열리면 정상입니다.
