@@ -6,7 +6,7 @@
 #        원본은 읽기만 한다.
 # 출력 : Redis vision_stream:<기기>:<모델> · vision_depth:<기기>:<모델>  (live 만)
 #        <data_root>/<기기>/<실행>/<output.dirname>/<모델>/          (두 모드 같은 형식)
-#            results.jsonl          한 장 = 한 줄 (검출 결과 / depth 통계·내부파라미터)
+#            results.jsonl          한 장 = 한 줄 (검출 결과 / depth 통계·내부파라미터 / 검출별 거리·GPS)
 #            overlay/<번호>.jpg      오버레이 시각화
 #            depth/<번호>.npy        depth 모델만. 미터 단위, 0 = 무효 픽셀
 #
@@ -58,19 +58,24 @@ devices:
 
 models:
   # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
+  # ── YOLOE (기본 prompt-free, 내장 어휘 4585종) ─────────────────────────────
   yoloe:
-    weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg-pf.pt   # 경량: yoloe-11s-seg-pf.pt
+    weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg-pf.pt   # prompt-free 가중치. 경량: yoloe-11s-seg-pf.pt
     conf: 0.25
     iou: 0.5
     imgsz: 640
     max_det: 100
     half: true
     save_polygons: true           # 검출마다 마스크 외곽선(픽셀 좌표)을 results.jsonl 에 남긴다
-    overlay:                      # 박스·라벨만 그린다 (폴리곤 마스크는 그리지 않음)
-      line_width: null            # null = 이미지 크기에 맞춰 자동
-      min_conf: 0.25              # 오버레이에 그릴 최소 신뢰도 (yoloe · depth 오버레이 공통). null = 다 그림
-                                  # 그림에서만 거른다 — results.jsonl · Redis result 에는 위 conf 이상 검출이 전부 남는다
-                                  # 위 conf 보다 낮게 주면 효과 없음 (모델이 conf 미만은 내지 않는다)
+    prompt:
+      mode: free                  # free = prompt-free 내장 어휘 / text = 아래 classes 만 텍스트 프롬프트로 찾는다
+      # free 모드 — 내장 어휘 이름(영어, 대소문자 무시). 어휘에 없는 이름은 시작할 때 알려 주고 무시한다
+      include: []                 # 비우면 전부. 주면 이 클래스만
+      exclude: []                 # 뺄 클래스. 예) [keyboard, computer keyboard, laptop]
+      # text 모드 — 원하는 클래스를 자유 문구로. 시작할 때 MobileCLIP 으로 한 번 임베딩한다 (추론 속도는 같음)
+      classes: [person, boat, life jacket, car]
+      text_weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
+      text_encoder_dir: /home/ny/physical_demo/data_stream/models               # mobileclip_blt.ts 가 있는 폴더 (없으면 여기로 받는다)
 
   # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
   unidepth:
@@ -105,10 +110,45 @@ depth_vis:
   range_percentile: [2, 98]       # 색 범위를 이 백분위로 자름
   colorbar: true
 
-# yoloe 와 depth 모델을 함께 고르면 depth 결과에 검출별 거리를 붙이고
-# depth 오버레이에 박스 + 거리를 그린다.
+# depth 모델을 돌리면 yoloe 검출에 검출별 거리를 붙이고 depth 오버레이에 박스 + 거리를 그린다.
+# --models 에 yoloe 가 없어도 결합용으로 yoloe 를 적재한다 (그때 yoloe 결과 자체는 저장하지 않음).
 fusion:
   enabled: true
   depth_percentile: 40            # 마스크 안 depth 의 이 백분위를 물체 거리로 본다
   mask_erode_px: 3                # 경계 배경 혼입을 줄이려고 마스크를 깎는다
   min_valid_ratio: 0.2            # 마스크 안 유효 depth 비율이 이보다 낮으면 거리 null
+
+# ── 검출 GPS 좌표 (depth 모델 + 결합 때, geo.py) ─────────────────────────────
+# 검출마다  depth_m(광축 Z) · uv(마스크 무게중심) · range_m(직선거리) · cam_xyz_m · ned_m[북,동,아래]
+#          · lat · lon (도, WGS84) · alt_m (해발) 을 results.jsonl 과 vision_stream result 에 붙인다.
+# 프레임마다 pose(쓴 드론 위치·자세 + dt_s) · frame_ts · geo_status 도 붙인다.
+#   geo_status: ok | no_fix (gps.fix_type < min_fix_type → ned_m 까지만) | no_attitude | no_state | stale_state
+# 위치·자세: 브리지 MQTT state (도·m·도, GPS_단위_정리_261002.md). 프레임 sender.ts 와 ts 가 가장 가까운 것
+#   live = Redis state_stream:<기기> · 저장된 이미지 = <실행>/states.jsonl
+geo:
+  enabled: true
+  min_fix_type: 2                 # 미만이면 위도·경도 null (fix 없는 0,0 을 좌표로 쓰지 않는다)
+  max_state_dt_s: 0.5             # 프레임과 state 시각 차이가 이보다 크면 쓰지 않는다 (stale_state)
+  redis_scan: 64                  # live: state_stream 최근 몇 개에서 찾을지 (state 약 8건/초)
+  devices:                        # 여기 있는 기기만 계산한다. 카메라 장착 (기체 FRD 기준)
+    drone:
+      pitch_down_deg: 45          # 정면에서 아래로 숙인 각 (수직 하방 = 90)
+      yaw_deg: 0                  # 오른쪽으로 돌린 각
+      roll_deg: 0                 # 광축 둘레로 돌린 각
+      lever_arm_m: [0, 0, 0]      # 기체 원점(FC) → 카메라 [앞, 오른쪽, 아래] m
+
+# ── 오버레이 표시 (yoloe · depth 공통) ─────────────────────────────────────
+# label: 박스 위에 쓸 줄 목록. 한 줄 = 항목 목록. 값이 없는 항목은 빠진다
+#   name 클래스 이름 · conf 신뢰도 · cls 클래스 번호 · depth 광축 거리 Z · range 직선거리
+#   gps 위도,경도 · alt 해발고도 · ned 드론 기준 북·동·아래 오프셋(m)
+overlay:
+  min_conf: 0.25                  # 그릴 최소 신뢰도. null = 다 그림. 그림에서만 거른다 (results 에는 전부 남음)
+  line_width: null                # null = 이미지 크기에 맞춰 자동
+  font_scale: null                # null = 자동
+  title: true                     # 영상 위 띠에 모델·기기·번호
+  gps_decimals: 6                 # 위도·경도 표시 자리수 (6 ≈ 0.1 m). 저장값은 8자리
+  yoloe:
+    label: [[name, conf]]
+  depth:
+    label: [[name, conf, range], [gps]]
+    pose: true                    # 영상 위 띠에 드론 GPS·고도·자세·state 시각 차이 한 줄

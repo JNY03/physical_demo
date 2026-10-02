@@ -15,10 +15,12 @@ vision_infer.py — 스트림 프레임에 비전 모델 추론 (YOLOE · UniDep
   원본 frames/ · frames.jsonl · states.jsonl 은 읽기만 한다.
 
 모델 (--models, 여러 개 동시에 가능)
-  yoloe          YOLOE prompt-free 검출+분할 (내장 어휘 4585종)
+  yoloe          YOLOE 검출+분할. 기본 prompt-free (내장 어휘 4585종, exclude/include 로 조정)
+                 config models.yoloe.prompt.mode: text 면 classes 에 적은 클래스만 텍스트 프롬프트로 찾는다
   unidepth       UniDepth V2 metric depth (m)
   moge2_aerial   MoGe2-Aerial — MoGe-2 ViT-L + 항공 LoRA (AerialMetric, ECCV 2026), metric depth (m)
-  yoloe 와 depth 모델을 함께 고르면 depth 결과에 검출별 거리가 붙는다 (config fusion).
+  depth 모델을 고르면 depth 결과에 검출별 거리가 붙는다 (config fusion. yoloe 를 안 골라도 결합용으로 적재).
+  config geo.devices 에 있는 기기(드론)는 검출별 GPS 좌표도 붙는다 (geo.py — 위치·자세는 MQTT state).
 
 Redis 출력 (live)
   vision_stream:<기기>:<모델>   (최근 live.maxlen 개)
@@ -44,9 +46,13 @@ Redis 출력 (live)
 results.jsonl 한 줄
   공통   n, frame, source, run, model, image_wh, infer_ms, (header: frames.jsonl 의 그 장 정보)
          live 면 live, source_id, recv_ms, done_ms, lag_ms 도
-  yoloe  detections: [{cls, name, conf, xyxy, polygon?}]
+  yoloe  prompt (free | text), detections: [{cls, name, conf, xyxy, polygon?}]
   depth  depth_file, depth_stats{min,p5,median,p95,max,valid_ratio}, intrinsics(픽셀 K), fov_x_deg,
-         fov_x_given, detections?: [{..., depth_m}]
+         fov_x_given, detections?: [{cls, name, conf, xyxy, depth_m, uv}]
+         geo 기기면  frame_ts, pose{ts, lat, lon, fix_type, amsl_m, relative_m, roll/pitch/yaw_deg, dt_s ...},
+                    geo_status (ok | no_fix | no_attitude | no_state | stale_state),
+                    detections 마다 range_m, cam_xyz_m, ned_m[북,동,아래], lat, lon (도), alt_m (해발)
+  오버레이에 쓸 항목은 config overlay (박스 라벨 줄 · 제목 · 드론 위치 줄)
 
 실행 순서 (저장소 루트에서. 2026-10-01 이 PC 에서 실측 확인)
   # 0) 전용 Redis :6380. WSL 을 재시작하면 꺼지므로 그때마다 다시 띄운다
@@ -80,6 +86,7 @@ results.jsonl 한 줄
           Redis 메모리 한도는 서버가 시작할 때 건다 (--redis-maxmemory). 전부 디스크에 있으므로 Redis 는 최근 것만.
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import signal
@@ -92,6 +99,8 @@ import numpy as np
 import yaml
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from geo import DiskStates, GeoLocator, frame_ts, redis_lookup  # noqa: E402
 DEVICES = ("cam360", "drone", "robot1", "robot2")
 MODELS = ("yoloe", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360"}
@@ -222,23 +231,62 @@ class ModelOutput:
         self.fh.close()
 
 
-# ---------------------------------------------------------------- 모델: YOLOE prompt-free
-def overlay_min_conf(yoloe_cfg):
-    """오버레이에 그릴 최소 신뢰도 (models.yoloe.overlay.min_conf). null 이면 거르지 않는다.
-    yoloe 오버레이와 depth 오버레이의 검출 박스에 같이 쓴다."""
-    v = ((yoloe_cfg or {}).get("overlay", {}) or {}).get("min_conf")
-    return float(v) if v is not None else None
-
-
+# ---------------------------------------------------------------- 모델: YOLOE (prompt-free / 텍스트 프롬프트)
 class YoloeRunner:
+    """models.yoloe.prompt.mode
+         free  prompt-free 가중치(weight)의 내장 어휘 4585종. include 를 주면 그 클래스만, exclude 는 뺀다
+               (predict 의 classes= 로 넘겨 NMS 전에 거른다 — 빠진 클래스가 max_det 를 차지하지 않는다)
+         text  text_weight(일반 YOLOE 가중치)에 classes 를 텍스트 프롬프트로 넣는다.
+               MobileCLIP 텍스트 인코더(mobileclip_blt.ts)로 시작할 때 한 번만 임베딩을 만들고, 추론 중에는 안 쓴다"""
     name = "yoloe"
 
     def __init__(self, cfg, device):
         from ultralytics import YOLOE
         self.cfg = cfg
         self.device = device
-        self.weight = cfg["weight"]
-        self.model = YOLOE(self.weight)          # prompt-free: 내장 어휘 그대로, set_classes 안 함
+        pr = cfg.get("prompt") or {}
+        self.mode = str(pr.get("mode", "free")).lower()
+        self.keep = None                                 # predict classes= (클래스 번호). None = 전부
+        if self.mode == "text":
+            classes = [str(c).strip() for c in pr.get("classes") or [] if str(c).strip()]
+            if not classes:
+                raise SystemExit("models.yoloe.prompt.mode 가 text 인데 classes 가 비었습니다")
+            self.weight = pr.get("text_weight") or cfg["weight"]
+            if Path(self.weight).stem.endswith("-pf"):
+                raise SystemExit("텍스트 프롬프트에는 prompt-free(-pf) 가 아닌 가중치가 필요합니다 (prompt.text_weight)")
+            self.model = YOLOE(self.weight)
+            # ultralytics 는 텍스트 인코더를 작업 폴더나 weights_dir 에서 찾는다 (없으면 받는다 ~570MB)
+            with contextlib.chdir(pr.get("text_encoder_dir") or Path(self.weight).parent):
+                pe = self.model.get_text_pe(classes)
+            self.model.set_classes(classes, pe)
+            log("  yoloe 텍스트 프롬프트 %d종: %s" % (len(classes), ", ".join(classes)))
+        elif self.mode == "free":
+            self.weight = cfg["weight"]
+            self.model = YOLOE(self.weight)              # 내장 어휘 그대로, set_classes 안 함
+            names = self.model.names
+            by_name = {}
+            for i, n in names.items():
+                by_name.setdefault(str(n).lower(), []).append(int(i))
+
+            def ids(key):
+                out = []
+                for n in pr.get(key) or []:
+                    found = by_name.get(str(n).strip().lower())
+                    if found:
+                        out += found
+                    else:
+                        log("  yoloe prompt.%s: 내장 어휘에 없는 이름 '%s' — 무시" % (key, n))
+                return set(out)
+            include, exclude = ids("include"), ids("exclude")
+            if include or exclude:
+                self.keep = sorted((include or set(int(i) for i in names)) - exclude)
+                if not self.keep:
+                    raise SystemExit("models.yoloe.prompt: include/exclude 로 남는 클래스가 없습니다")
+            log("  yoloe prompt-free %d종%s%s" % (len(self.keep) if self.keep else len(names),
+                                                 " · include %d" % len(include) if include else "",
+                                                 " · exclude %d" % len(exclude) if exclude else ""))
+        else:
+            raise SystemExit("models.yoloe.prompt.mode 는 free 또는 text: %s" % self.mode)
         self.half = bool(cfg.get("half", True)) and device.startswith("cuda")
         self(np.zeros((480, 640, 3), np.uint8))  # 첫 장 지연을 미리 치른다
 
@@ -246,7 +294,7 @@ class YoloeRunner:
         c = self.cfg
         t0 = time.perf_counter()
         r = self.model.predict(bgr, conf=c.get("conf", 0.25), iou=c.get("iou", 0.5),
-                               imgsz=c.get("imgsz", 640), max_det=c.get("max_det", 100),
+                               imgsz=c.get("imgsz", 640), max_det=c.get("max_det", 100), classes=self.keep,
                                device=self.device, quantize=16 if self.half else None, verbose=False)[0]
         ms = (time.perf_counter() - t0) * 1000
         dets = []
@@ -263,15 +311,7 @@ class YoloeRunner:
                     if c.get("save_polygons", True):
                         d["polygon"] = np.round(poly, 1).tolist()
                 dets.append(d)
-        # 오버레이는 박스·라벨만 그린다 (폴리곤 마스크는 안 그림 — results.jsonl 의 polygon 과 depth 결합에는 그대로 쓴다).
-        # overlay.min_conf 미만 검출은 그림에서만 뺀다. results.jsonl 에는 모델 conf 이상 검출이 전부 남는다
-        ov = c.get("overlay", {}) or {}
-        shown = r
-        min_conf = overlay_min_conf(c)
-        if min_conf is not None and r.boxes is not None and len(r.boxes):
-            shown = r[r.boxes.conf >= min_conf]
-        overlay = shown.plot(line_width=ov.get("line_width"), masks=False)
-        return {"infer_ms": round(ms, 1), "weight": Path(self.weight).name}, overlay, dets
+        return {"infer_ms": round(ms, 1), "weight": Path(self.weight).name, "prompt": self.mode}, dets
 
 
 # ---------------------------------------------------------------- 모델: depth 공통
@@ -453,7 +493,7 @@ def colorbar(width, lo, hi, vis):
     fs = bar_h / 30.0
     for i in range(5):
         x = int((width - 1) * i / 4)
-        label = "%.1fm" % (lo + (hi - lo) * i / 4)
+        label = ("%.2fm" if hi - lo < 2 else "%.1fm") % (lo + (hi - lo) * i / 4)
         (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)
         tx = min(max(0, x - tw // 2), width - tw)
         cv2.putText(bar, label, (tx, bar_h - 4), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), 3, cv2.LINE_AA)
@@ -461,84 +501,216 @@ def colorbar(width, lo, hi, vis):
     return bar
 
 
-def draw_text(img, text, org, fs, color):
-    x, y = org
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)
-    y = max(th + 4, y)
-    cv2.rectangle(img, (x, y - th - 4), (x + tw + 4, y + 2), (0, 0, 0), -1)
-    cv2.putText(img, text, (x + 2, y - 2), cv2.FONT_HERSHEY_SIMPLEX, fs, color, 1, cv2.LINE_AA)
+# ---------------------------------------------------------------- 오버레이 (config overlay)
+LABEL_TOKENS = ("name", "conf", "cls", "depth", "range", "gps", "alt", "ned")
 
 
-def depth_overlay(bgr, depth, dets, title, vis):
+def check_overlay_cfg(cfg):
+    for kind in ("yoloe", "depth"):
+        for line in label_spec(cfg.get("overlay") or {}, kind):
+            bad = [t for t in line if t not in LABEL_TOKENS]
+            if bad:
+                raise SystemExit("overlay.%s.label 에 모르는 항목 %s (가능: %s)" % (kind, bad, ", ".join(LABEL_TOKENS)))
+
+
+def label_spec(ocfg, kind):
+    """overlay.<kind>.label → 줄 목록 [[항목, ...], ...]. 한 줄짜리 평평한 목록도 받는다"""
+    spec = (ocfg.get(kind) or {}).get("label")
+    if spec is None:
+        spec = [["name", "conf"]] if kind == "yoloe" else [["name", "conf", "range"], ["gps"]]
+    if spec and not isinstance(spec[0], (list, tuple)):
+        spec = [spec]
+    return [list(line) for line in spec]
+
+
+def label_token(tok, d, dec):
+    """검출 하나의 표시 문자열. 값이 없으면 None (그 항목을 뺀다)"""
+    if tok == "name":
+        return d["name"]
+    if tok == "conf":
+        return "%.2f" % d["conf"]
+    if tok == "cls":
+        return "#%d" % d["cls"]
+    if tok == "depth":
+        return "Z%.2fm" % d["depth_m"] if d.get("depth_m") is not None else None
+    if tok == "range":
+        v = d.get("range_m", d.get("depth_m"))         # GPS 계산을 안 하면 range_m 이 없다 → Z 로
+        return "%.2fm" % v if v is not None else None
+    if tok == "gps":
+        return "%.*f,%.*f" % (dec, d["lat"], dec, d["lon"]) if d.get("lat") is not None else None
+    if tok == "alt":
+        return "alt%.1fm" % d["alt_m"] if d.get("alt_m") is not None else None
+    if tok == "ned":
+        return "N%.1f E%.1f D%.1f" % tuple(d["ned_m"]) if d.get("ned_m") else None
+    return None
+
+
+def class_color(cls):
+    from ultralytics.utils.plotting import colors
+    return colors(int(cls), True)                      # BGR, ultralytics 와 같은 색
+
+
+def draw_dets(img, dets, ocfg, kind):
+    """박스 + config 로 고른 라벨 줄들. overlay.min_conf 미만은 그림에서만 뺀다"""
+    h, w = img.shape[:2]
+    fs = float(ocfg.get("font_scale") or max(0.4, w / 1600.0))
+    lw = int(ocfg.get("line_width") or max(1, round(w / 640)))
+    min_conf = ocfg.get("min_conf")
+    dec = int(ocfg.get("gps_decimals", 6))
+    spec = label_spec(ocfg, kind)
+    for d in dets or []:
+        if min_conf is not None and d["conf"] < float(min_conf):
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in d["xyxy"]]
+        color = class_color(d["cls"])
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, lw)
+        lines = [" ".join(t for t in (label_token(k, d, dec) for k in line) if t) for line in spec]
+        lines = [s for s in lines if s]
+        if not lines:
+            continue
+        sizes = [cv2.getTextSize(s, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)[0] for s in lines]
+        lh = max(th for _, th in sizes) + 6
+        y = y1 - lh * len(lines)
+        if y < 0:                                       # 위에 자리가 없으면 박스 안쪽 위
+            y = y1
+        text_color = (0, 0, 0) if sum(color) > 380 else (255, 255, 255)
+        for s, (tw, _) in zip(lines, sizes):
+            x = min(max(0, x1), max(0, w - tw - 4))
+            cv2.rectangle(img, (x, y), (x + tw + 4, y + lh), color, -1)
+            cv2.putText(img, s, (x + 2, y + lh - 4), cv2.FONT_HERSHEY_SIMPLEX, fs, text_color, 1, cv2.LINE_AA)
+            y += lh
+    return img
+
+
+def pose_line(rec, dec):
+    """depth 오버레이 위쪽에 드론 위치·자세 한 줄"""
+    st, p = rec.get("geo_status"), rec.get("pose")
+    if st is None:
+        return None
+    if not p:
+        return "pose: %s" % st
+    if p.get("lat") is not None and st != "no_fix":
+        g = "GPS %.*f,%.*f fix%s" % (dec, p["lat"], dec, p["lon"], p.get("fix_type"))
+    else:
+        g = "GPS no fix(%s)" % p.get("fix_type")
+    parts = [g]
+    if p.get("relative_m") is not None:
+        parts.append("rel %.1fm" % p["relative_m"])
+    if p.get("yaw_deg") is not None:
+        parts.append("rpy %.1f %.1f %.1f" % (p["roll_deg"], p["pitch_deg"], p["yaw_deg"]))
+    if p.get("dt_s") is not None:
+        parts.append("dt %.2fs" % p["dt_s"])
+    if st != "ok":
+        parts.append("[%s]" % st)
+    return "  ".join(parts)
+
+
+def add_header(img, lines, ocfg):
+    """제목·드론 위치 줄을 영상 위 검은 띠에 쓴다 (영상 위에 쓰면 위쪽 박스 라벨을 가린다)"""
+    lines = [s for s in lines if s]
+    if not lines:
+        return img
+    fs = float(ocfg.get("font_scale") or max(0.4, img.shape[1] / 1600.0))
+    lh = cv2.getTextSize("Ag", cv2.FONT_HERSHEY_SIMPLEX, fs, 1)[0][1] + 10
+    band = np.zeros((lh * len(lines) + 4, img.shape[1], 3), np.uint8)
+    for i, s in enumerate(lines):
+        cv2.putText(band, s, (6, lh * (i + 1) - 4), cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), 1, cv2.LINE_AA)
+    return np.vstack([band, img])
+
+
+def yoloe_overlay(bgr, dets, title, ocfg):
+    out = draw_dets(bgr.copy(), dets, ocfg, "yoloe")
+    return add_header(out, [title if ocfg.get("title", True) else None], ocfg)
+
+
+def depth_overlay(bgr, depth, dets, title, vis, ocfg, rec):
     color, lo, hi = colorize(depth, vis)
     if vis.get("mode", "blend") == "side":
         out = np.hstack([bgr, color])
     else:
         a = float(vis.get("alpha", 0.6))
         out = cv2.addWeighted(color, a, bgr, 1 - a, 0)
-    h, w = bgr.shape[:2]
-    fs = max(0.4, w / 1600.0)
-    lw = max(1, round(w / 640))
-    for d in dets or []:
-        x1, y1, x2, y2 = [int(round(v)) for v in d["xyxy"]]
-        dm = d.get("depth_m")
-        cv2.rectangle(out, (x1, y1), (x2, y2), (255, 255, 255), lw)
-        draw_text(out, "%s %s" % (d["name"], "%.2fm" % dm if dm is not None else "-"), (x1, y1 - 2), fs, (255, 255, 255))
-    draw_text(out, title, (4, int(22 * fs / 0.5)), fs, (255, 255, 255))
+    draw_dets(out, dets, ocfg, "depth")
+    out = add_header(out, [title if ocfg.get("title", True) else None,
+                           pose_line(rec, int(ocfg.get("gps_decimals", 6)))
+                           if (ocfg.get("depth") or {}).get("pose", True) else None], ocfg)
     if vis.get("colorbar", True):
         out = np.vstack([out, colorbar(out.shape[1], lo, hi, vis)])
     return out
 
 
 def attach_depth(dets, depth, fusion):
-    """검출마다 마스크(없으면 박스 가운데) 안 depth 의 백분위를 거리로 붙인다."""
+    """검출마다 마스크(없으면 박스 가운데) 안 depth 의 백분위를 거리(Z)로, 마스크 무게중심을 대표 픽셀(uv)로 붙인다.
+    박스 영역만 잘라서 계산한다 (검출이 많아도 전체 크기 마스크를 만들지 않는다)."""
     h, w = depth.shape
     out = []
     erode = int(fusion.get("mask_erode_px", 3))
     pct = float(fusion.get("depth_percentile", 40))
     min_ratio = float(fusion.get("min_valid_ratio", 0.2))
+    kernel = np.ones((2 * erode + 1, 2 * erode + 1), np.uint8) if erode > 0 else None
     for d in dets:
-        m = np.zeros((h, w), np.uint8)
+        e = {k: v for k, v in d.items() if not k.startswith("_") and k != "polygon"}
+        e["depth_m"], e["uv"] = None, None
+        out.append(e)
+        bx1, by1, bx2, by2 = d["xyxy"]
+        # 잘라 낸 영역 가장자리에서도 깎이도록 erode 만큼 여유를 둔다
+        x0, y0 = max(0, int(bx1) - erode - 1), max(0, int(by1) - erode - 1)
+        x3, y3 = min(w, int(np.ceil(bx2)) + erode + 2), min(h, int(np.ceil(by2)) + erode + 2)
+        if x3 <= x0 or y3 <= y0:
+            continue
+        m = np.zeros((y3 - y0, x3 - x0), np.uint8)
         poly = d.get("_poly")
         if poly is not None and len(poly) >= 3:
-            cv2.fillPoly(m, [np.round(poly).astype(np.int32)], 1)
-            if erode > 0:
-                eroded = cv2.erode(m, np.ones((2 * erode + 1, 2 * erode + 1), np.uint8))
+            cv2.fillPoly(m, [np.round(np.asarray(poly) - (x0, y0)).astype(np.int32)], 1)
+            if kernel is not None:
+                eroded = cv2.erode(m, kernel)
                 if eroded.any():
                     m = eroded
         else:
-            x1, y1, x2, y2 = d["xyxy"]
-            cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, (x2 - x1) / 4, (y2 - y1) / 4
+            cx, cy, bw, bh = (bx1 + bx2) / 2 - x0, (by1 + by2) / 2 - y0, (bx2 - bx1) / 4, (by2 - by1) / 4
             m[max(0, int(cy - bh)):int(cy + bh) + 1, max(0, int(cx - bw)):int(cx + bw) + 1] = 1
-        region = depth[m > 0]
+        ys, xs = np.nonzero(m)
+        if not xs.size:
+            continue
+        e["uv"] = [round(float(xs.mean()) + x0, 1), round(float(ys.mean()) + y0, 1)]
+        region = depth[y0:y3, x0:x3][ys, xs]
         valid = region[(region > 0) & np.isfinite(region)]
-        dm = None
-        if region.size and valid.size / float(region.size) >= min_ratio:
-            dm = round(float(np.percentile(valid, pct)), 3)
-        e = {k: v for k, v in d.items() if not k.startswith("_") and k != "polygon"}
-        e["depth_m"] = dm
-        out.append(e)
+        if valid.size / float(region.size) >= min_ratio:
+            e["depth_m"] = round(float(np.percentile(valid, pct)), 3)
     return out
 
 
+def build_geo(cfg):
+    """기기 → GeoLocator. config geo.enabled 이고 geo.devices 에 장착 정보가 있는 기기만"""
+    g = cfg.get("geo") or {}
+    if not g.get("enabled", True):
+        return {}
+    return {dv: GeoLocator(dg or {}, g) for dv, dg in (g.get("devices") or {}).items()}
+
+
 # ---------------------------------------------------------------- 한 장 추론 (오프라인 · live 공통)
-def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cfg):
+def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cfg, pose_fn=None):
     """한 장에 모델을 적용해 [(모델, 기록, 오버레이, depth 또는 None)] 을 돌려준다.
     save_yoloe   : yoloe 결과를 돌려줄지 (False 여도 depth 결합에 필요하면 검출은 돌린다)
-    depth_models : 돌릴 depth 모델"""
+    depth_models : 돌릴 depth 모델
+    pose_fn      : pose_fn(프레임 ts) → (드론 위치·자세, ts 차이 s). 검출 GPS 계산에 쓴다 (geo.py)"""
     fusion = cfg.get("fusion", {}) or {}
     vis = cfg.get("depth_vis", {}) or {}
+    ocfg = cfg.get("overlay", {}) or {}
     dev_cfg = (cfg.get("devices", {}) or {}).get(device, {})
+    locator = (cfg.get("_geo") or {}).get(device)
     w = bgr.shape[1]
     out = []
     dets = None
     if "yoloe" in runners and (save_yoloe or (depth_models and fusion.get("enabled", True))):
-        info, overlay, dets = runners["yoloe"](bgr)
+        info, dets = runners["yoloe"](bgr)
         if save_yoloe:
             rec = dict(base, model="yoloe", **info)
             rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]
-            out.append(("yoloe", rec, overlay, None))
+            title = "yoloe  %s/%s #%s" % (device, base.get("run") or "live", base.get("n"))
+            out.append(("yoloe", rec, yoloe_overlay(bgr, rec["detections"], title, ocfg), None))
     fov = fov_hint(dev_cfg, header)
+    pose = None                                         # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
     for m in depth_models:
         info, depth, K = runners[m](bgr, fov_x=fov)
         rec = dict(base, model=m, **info)
@@ -550,11 +722,21 @@ def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cf
         fused = None
         if dets is not None and fusion.get("enabled", True):
             fused = attach_depth(dets, depth, fusion)
+            if locator is not None:
+                if pose is None:
+                    ts = frame_ts(header)
+                    p, dt = pose_fn(ts) if pose_fn else (None, None)
+                    max_dt = float((cfg.get("geo") or {}).get("max_state_dt_s", 0.5))
+                    stale = p is not None and dt is not None and abs(dt) > max_dt
+                    pose = (ts, None if p is None else dict(p, dt_s=None if dt is None else round(dt, 3)), stale)
+                ts, p, stale = pose
+                st = locator.locate(fused, K, None if stale else p)
+                rec["frame_ts"] = ts
+                rec["pose"] = p
+                rec["geo_status"] = "stale_state" if stale else st
             rec["detections"] = fused
         title = "%s  %s/%s #%s" % (m, device, base.get("run") or "live", base.get("n"))
-        min_conf = overlay_min_conf((cfg.get("models", {}) or {}).get("yoloe"))
-        drawn = fused if fused is None or min_conf is None else [d for d in fused if d["conf"] >= min_conf]
-        out.append((m, rec, depth_overlay(bgr, depth, drawn, title, vis), depth))
+        out.append((m, rec, depth_overlay(bgr, depth, fused, title, vis, ocfg, rec), depth))
     return out
 
 
@@ -617,6 +799,8 @@ def _process_run(device, run, own, runners, cfg, args, frames):
     busy = [m for m in own if any(p.relative_to(run).as_posix() not in outs[m].done for p, _ in todo)]
     log("%s/%s %s — %d장 처리 (전체 %d) → %s" % (device, run.name, "+".join(busy), len(todo), len(frames),
                                              run / dirname))
+    states = DiskStates(run / "states.jsonl") if device in (cfg.get("_geo") or {}) else None
+    pose_fn = states.lookup if states is not None else None
     done = 0
     t_start = time.time()
     for i, (path, header) in enumerate(todo):
@@ -637,7 +821,8 @@ def _process_run(device, run, own, runners, cfg, args, frames):
         need_depth = [m for m in own if m in DEPTH_MODELS and rel not in outs[m].done]
         save_yoloe = "yoloe" in outs and rel not in outs["yoloe"].done
         # yoloe 를 다른 프로세스가 맡고 있어도 결합용 검출은 여기서 돌린다 (저장은 안 함)
-        for m, rec, overlay, depth in infer_frame(bgr, base, header, device, save_yoloe, need_depth, runners, cfg):
+        for m, rec, overlay, depth in infer_frame(bgr, base, header, device, save_yoloe, need_depth, runners, cfg,
+                                                  pose_fn):
             mcfg = cfg["models"][m]
             outs[m].write(rec, overlay, depth if mcfg.get("save_depth", True) else None,
                           mcfg.get("depth_dtype", "float16"))
@@ -720,6 +905,14 @@ class LiveRunner:
             self.outs[dv][m] = ModelOutput(run_dir, dirname, m, False, self.cfg["output"].get("jpeg_quality", 90))
         return self.outs[dv]
 
+    def pose(self, dv, ts):
+        """Redis state_stream:<기기> 최근 항목 중 프레임 ts 에 가장 가까운 드론 위치·자세"""
+        try:
+            return redis_lookup(self.r, "state_stream:" + dv, ts, int((self.cfg.get("geo") or {}).get("redis_scan", 64)))
+        except self.redis_mod.RedisError as e:
+            self.warn_once(("state", dv), "%s state_stream 을 못 읽음 (%s) — GPS 계산 없이 계속" % (dv, e))
+            return None, None
+
     # -- 한 장
     def handle(self, dv, eid, fields):
         image = fields.get(b"image")
@@ -746,7 +939,8 @@ class LiveRunner:
                 "image_wh": [w, h], "live": True, "source_id": eid.decode(), "recv_ms": recv_ms}
         base["header"] = {k: header[k] for k in ("n", "file", "via") if k in header}
         results = infer_frame(bgr, base, header, dv, "yoloe" in self.models,
-                              [m for m in self.models if m in DEPTH_MODELS], self.runners, self.cfg)
+                              [m for m in self.models if m in DEPTH_MODELS], self.runners, self.cfg,
+                              lambda ts: self.pose(dv, ts))
         done_ms = int(time.time() * 1000)
         pipe = self.r.pipeline(transaction=False)
         infer_ms = 0.0
@@ -937,8 +1131,14 @@ def main():
     log("data_root=%s  기기=%s  모델=%s  %s  장치=%s"
         % (data_root, " ".join(devices), " ".join(models),
            "실시간(live)" if live else "저장된 이미지=" + " ".join(want_runs), gpu))
+    cfg["_geo"] = build_geo(cfg)
+    check_overlay_cfg(cfg)
+    load = list(models)
+    if "yoloe" not in load and any(m in DEPTH_MODELS for m in load) and (cfg.get("fusion") or {}).get("enabled", True):
+        load.insert(0, "yoloe")                         # depth 결합·GPS 계산용 검출. yoloe 결과 자체는 저장하지 않는다
+        log("depth 결합용으로 yoloe 도 적재 (yoloe 결과는 저장하지 않음 — 저장하려면 --models 에 yoloe 추가)")
     runners = {}
-    for m in models:
+    for m in load:
         t0 = time.time()
         log("모델 적재: %s" % m)
         runners[m] = RUNNERS[m](cfg["models"][m], gpu)

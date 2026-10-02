@@ -59,8 +59,9 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
                         done_ms   = 추론을 마친 시각 (ms)      lag_ms = done_ms - recv_ms
                  yoloe  detections: [{cls, name, conf, xyxy:[x1,y1,x2,y2], polygon:[[x,y],...]}]
                  depth  depth_stats {min, p5, median, p95, max, valid_ratio} (m) · intrinsics (픽셀 K 3x3)
-                        fov_x_deg · fov_x_given · detections: [{cls, name, conf, xyxy, depth_m}]
-                        (yoloe 와 같이 돌 때만 검출별 거리가 붙는다)
+                        fov_x_deg · fov_x_given · detections: [{cls, name, conf, xyxy, depth_m, uv}]
+                        드론은 검출별 GPS 도: range_m · ned_m · lat · lon · alt_m, 프레임 pose · geo_status
+                        (vision/geo.py, vision_config.yaml geo)
       overlay  오버레이 JPEG 바이트 (yoloe: 박스·라벨, min_conf 이상만 / depth: 컬러맵 + 검출별 거리 + 색 막대)
       header   {"source", "model", "n", "run", "file", "source_id"}
   vision_depth:<소스>:<모델>    depth 모델만, 한 장 = 한 항목 (최근 30개, live.depth_maxlen — 한 장 약 1.8MB)
