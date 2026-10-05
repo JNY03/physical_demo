@@ -97,9 +97,10 @@ class PhysicalCommandServer:
         self.device_id = device_id
         self.owner = owner
         self.log = log
-        # publish(topic, payload_bytes, qos)/subscribe(topic, qos) — 없으면 client 사용.
+        # publish(topic, payload_bytes, qos, retain=False)/subscribe(topic, qos) — 없으면 client 사용.
         # 재접속으로 client 가 갈릴 수 있으므로 노드는 항상 어댑터를 넘긴다.
-        self._publish = publish or (lambda t, p, qos: client.publish(t, p, qos=qos))
+        self._publish = publish or (lambda t, p, qos, retain=False:
+                                    client.publish(t, p, qos=qos, retain=retain))
         self._subscribe = subscribe or (lambda t, qos: client.subscribe(t, qos=qos))
         self.downlink = f"terminal/{device_id}/downlink"
         self.uplink = f"terminal/{device_id}/uplink"
@@ -115,10 +116,21 @@ class PhysicalCommandServer:
         self.log(f"[규약] downlink 구독 {self.downlink}, Capability 발행")
 
     def publish_capability(self):
+        """Capability 는 **retain** 으로 낸다.
+
+        접속 직후 한 번만 내는 메시지라, 그 뒤에 구독한 쪽(부팅 때 노드보다 늦게 붙은
+        관제 웹 등)은 영영 받지 못했다 — 웹은 선언된 어휘만 쓰므로 teleop 같은 새 명령이
+        "안 움직이는" 것으로 나타났다(실측 2026-10-05, 재시작해야 동작). retain 이면 브로커가
+        마지막 선언을 들고 있다가 늦게 구독한 쪽에도 곧바로 준다. uplink 의 다른 메시지는
+        retain 이 아니라 이 값을 덮지 않는다.
+
+        ⚠ retain 된 Capability 는 노드가 꺼져도 남는다 — **생존 판정에 쓰지 말 것**
+          (생존은 {base}/status 의 LWT 가 맡는다). 장치를 없애거나 id 를 바꾸면 옛 토픽에
+          빈 retain 을 보내 지운다: mosquitto_pub -t terminal/<id>/uplink -r -n"""
         env = PB()
         env.capability.device_id = self.device_id
         env.capability.actions.extend(sorted(set(self.owner.ACTIONS) | set(self._streams())))
-        self._send(env)
+        self._publish(self.uplink, env.SerializeToString(), 1, retain=True)
 
     def _streams(self):
         return getattr(self.owner, "STREAM_ACTIONS", None) or {}

@@ -37,11 +37,14 @@ class _Info:
 class FakeClient:
     def __init__(self):
         self.sent = []
+        self.retained = []            # retain=True 로 나간 uplink 봉투 종류
         self.lock = threading.Lock()
 
     def publish(self, t, pl, qos=0, retain=False):
         with self.lock:
             self.sent.append((time.monotonic(), t, pl))
+            if retain and t.startswith("terminal/"):
+                self.retained.append(PB.FromString(pl).WhichOneof("body"))
         return _Info()
 
     def subscribe(self, t, qos=0):
@@ -131,6 +134,8 @@ def main():
     cap = [b for w, b in fc.uplink() if w == "capability"][0]
     assert {"teleop", "move_relative", "move_forward", "turn"} <= set(cap.actions), cap.actions
     ok(f"Capability.actions 에 teleop·move_relative 선언 ({len(cap.actions)}개)")
+    assert fc.retained == ["capability"], fc.retained
+    ok("Capability 는 retain 으로 발행 — 늦게 구독한 웹도 받는다")
 
     # ---------------- teleop ----------------
     print("[teleop]")
@@ -299,6 +304,8 @@ def main():
     ok("sdk_auto 꺼짐 + 브리지 없음 → teleop·move_relative 모두 "
        "FAILED_PRECONDITION/go1_sdk_not_running")
 
+    assert fc.retained == ["capability"], f"Capability 말고도 retain 으로 나감: {fc.retained}"
+    ok("uplink 에서 retain 은 Capability 뿐 (Acceptance·Status·Result 는 retain 아님)")
     print("전부 통과", flush=True)
     os._exit(0)
 

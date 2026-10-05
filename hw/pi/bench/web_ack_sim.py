@@ -369,7 +369,8 @@ class AckSim:
         self.client = None
         self.pcmd = PhysicalCommandServer(
             client=None, device_id=device_id, owner=self.robot, log=self.log,
-            publish=lambda t, pl, qos: self.client.publish(t, pl, qos=qos),
+            publish=lambda t, pl, qos, retain=False: self.client.publish(
+                t, pl, qos=qos, retain=retain),
             subscribe=lambda t, qos: self.client.subscribe(t, qos=qos))
 
     def log(self, *a):

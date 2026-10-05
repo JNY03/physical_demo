@@ -65,7 +65,8 @@ class BaseNode:
         # publish/subscribe 는 어댑터로 넘겨 재접속으로 client 가 갈려도 항상 현재 것을 쓴다.
         self.pcmd = PhysicalCommandServer(
             client=None, device_id=self.identity.entity_id, owner=self,
-            publish=lambda t, pl, qos: self.client.publish(t, pl, qos=qos),
+            publish=lambda t, pl, qos, retain=False: self.client.publish(
+                t, pl, qos=qos, retain=retain),
             subscribe=lambda t, qos: self.client.subscribe(t, qos=qos))
         self._connect()
 

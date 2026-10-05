@@ -82,7 +82,7 @@ class FakeClient:
     def subscribe(self, topic, qos=0):
         pass
 
-    def publish(self, topic, payload, qos=0):
+    def publish(self, topic, payload, qos=0, retain=False):
         env = PB(); env.ParseFromString(payload)
         with self.lock:
             self.uplink.append(env)
