@@ -1,0 +1,23 @@
+# Go1 정면 영상 업로더 (HW-R-07)
+# 카메라 --ws H.264--> pi1 --ffmpeg--> JPEG --POST /upload--> 인지 서버
+#
+# 로봇 전원이 꺼져 있으면 카메라 웹소켓이 타임아웃난다. 프로세스는 스스로 재연결을
+# 계속 시도하므로 죽지 않는다. 로봇이 돌아오면 저절로 붙는다.
+[Unit]
+Description=Go1 front camera uploader (HW-R-07)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=physical
+WorkingDirectory=/home/physical/hw/pi
+StandardInput=null
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m robot.go1_front_upload --fps 10 --quality 5
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

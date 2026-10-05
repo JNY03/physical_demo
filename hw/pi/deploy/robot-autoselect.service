@@ -1,0 +1,11 @@
+# 붙어 있는 로봇에 컨테이너를 맞춘다. 타이머와 udev 가 이 유닛을 부른다.
+[Unit]
+Description=피지컬팀 mk2 로봇 컨테이너 자동 선택
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/physical/hw/pi/deploy/robot-autoselect.sh
+# 로봇이 없어 아무것도 안 해도 실패가 아니다.
+SuccessExitStatus=0

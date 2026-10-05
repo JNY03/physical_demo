@@ -1,0 +1,104 @@
+# 로봇 노드 — 기종별로 띄웠다 내린다
+# =====================================
+# 이미지는 하나이고 기종은 env 로 갈린다(HW_CONTROLLER_LINK). 프로파일을 써서
+# 한 번에 하나만 뜨게 한다 — 같은 파이에서 둘을 동시에 띄우려면 HW_ENTITY_ID 가
+# 서로 달라야 하고(같으면 client_id 플래핑으로 서로를 끊는다) spool 도 나눠야 한다.
+#
+#   docker compose --profile ep  up -d      # EP 띄우기
+#   docker compose --profile ep  down       # 내리기
+#   docker compose --profile go1 up -d      # Go1 로 갈아타기
+#   docker compose --profile ep logs -f
+#
+# network_mode: host 가 핵심이다. Go1 은 192.168.123.x, EP 는 RNDIS 192.168.42.2,
+# 브로커는 또 다른 대역 — 셋 다 호스트 인터페이스에 걸려 있어 포트 매핑이 무의미하다.
+
+x-common: &common
+  image: hw-robot:latest
+  network_mode: host
+  restart: unless-stopped
+  env_file:
+    - /etc/hw-node.env          # 공통(브로커·구역). 없으면 기본값으로 뜬다
+  environment:
+    HW_NODE_ID: pi1
+    HW_ENTITY_TYPE: robot
+    HW_SPOOL_PATH: /var/lib/hw-node/spool.jsonl
+
+services:
+  go1:
+    <<: *common
+    profiles: ["go1"]
+    container_name: hw-robot-go1
+    environment:
+      HW_NODE_ID: pi1
+      HW_ENTITY_TYPE: robot
+      HW_SPOOL_PATH: /var/lib/hw-node/spool.jsonl
+      HW_CONTROLLER_LINK: go1
+      HW_ENTITY_ID: go1-001
+      HW_DEVICE_TYPE: go1_robot
+    volumes:
+      - go1-spool:/var/lib/hw-node
+
+  ep:
+    <<: *common
+    profiles: ["ep"]
+    container_name: hw-robot-ep
+    environment:
+      HW_NODE_ID: pi1
+      HW_ENTITY_TYPE: robot
+      HW_SPOOL_PATH: /var/lib/hw-node/spool.jsonl
+      HW_CONTROLLER_LINK: ep
+      HW_ENTITY_ID: ep-001
+      HW_DEVICE_TYPE: robomaster_ep
+      HW_EP_CONN_TYPE: rndis
+      # 트윈(Unity 표시) 출구. 비워 두면 twin_relay_out 이 아무것도 하지 않는다 -
+      # 그래서 이 줄이 없던 동안 운영 노드는 화면에 한 번도 나오지 않았다.
+      # 업무 평면(MQTT state, 대기 중 5초)과 **주기가 다르다**: 기록은 드물어도 되지만
+      # 화면은 이어져야 한다. 솎는 것은 twin_relay_out 이 HZ 만 보고 한다.
+      HW_TWIN_RELAY_HOST: 127.0.0.1
+      HW_TWIN_RELAY_PORT: 15200
+      HW_TWIN_RELAY_HZ: 10
+      # 1 로 두면 변환의 양쪽을 로그에 찍는다. 축이 틀어졌을 때만 켠다.
+      HW_TWIN_RELAY_DEBUG: 0
+    # USB 시리얼 경로를 쓸 때만 필요하다. RNDIS(네트워크)만 쓰면 없어도 된다.
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    group_add:
+      - dialout
+    volumes:
+      - ep-spool:/var/lib/hw-node
+
+  # 개발용 — common/ 을 마운트해 재빌드 없이 코드 수정을 반영한다.
+  # schema.py 가 이미지에 구워지는 함정(백엔드 회신 §6-11)을 개발 중에는 피한다.
+  ep-dev:
+    <<: *common
+    profiles: ["ep-dev"]
+    container_name: hw-robot-ep-dev
+    environment:
+      HW_NODE_ID: pi1
+      HW_ENTITY_TYPE: robot
+      HW_SPOOL_PATH: /var/lib/hw-node/spool.jsonl
+      HW_CONTROLLER_LINK: ep
+      HW_ENTITY_ID: ep-001
+      HW_DEVICE_TYPE: robomaster_ep
+      HW_EP_CONN_TYPE: rndis
+      # 트윈(Unity 표시) 출구. 비워 두면 twin_relay_out 이 아무것도 하지 않는다 -
+      # 그래서 이 줄이 없던 동안 운영 노드는 화면에 한 번도 나오지 않았다.
+      # 업무 평면(MQTT state, 대기 중 5초)과 **주기가 다르다**: 기록은 드물어도 되지만
+      # 화면은 이어져야 한다. 솎는 것은 twin_relay_out 이 HZ 만 보고 한다.
+      HW_TWIN_RELAY_HOST: 127.0.0.1
+      HW_TWIN_RELAY_PORT: 15200
+      HW_TWIN_RELAY_HZ: 10
+      # 1 로 두면 변환의 양쪽을 로그에 찍는다. 축이 틀어졌을 때만 켠다.
+      HW_TWIN_RELAY_DEBUG: 0
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    group_add:
+      - dialout
+    volumes:
+      - ep-spool:/var/lib/hw-node
+      - /home/physical/hw/pi/common:/app/common:ro
+      - /home/physical/hw/pi/robot:/app/robot:ro
+
+volumes:
+  go1-spool:
+  ep-spool:

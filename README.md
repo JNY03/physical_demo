@@ -14,7 +14,7 @@ Go1 로봇 등에 올라가는 라즈베리파이(현재 `pi7`)의 **홈 디렉�
 |---|---|---|
 | `README.md`, `.gitignore`, `requirements.txt` | ✅ | 이 브랜치 |
 | `fix_broker_host.sh`, 작업 메모 `*.md` 3개 | ✅ | 이 브랜치 |
-| `hw/` (노드 코드 본체·유닛 파일) | ❌ | **HW 브랜치를 클론** (2절) |
+| `hw/` (노드 코드 본체·유닛 파일·문서) | ✅ | 이 브랜치 (2절) |
 | `unitree_legged_sdk/` | ❌ | upstream 클론 (3절) |
 | `go1sdk/` (`go1_sdk_pc` 등 실행 파일) | ❌ | `hw/pi/robot/*.cpp` 를 빌드 (4절) |
 | `venv/` | ❌ | `requirements.txt` 로 생성 (3절) |
@@ -40,17 +40,19 @@ git checkout -b go1_raspi --track origin/go1_raspi
 ```
 
 > 홈 전체가 git 작업 트리가 되므로, 홈 아래 다른 폴더에서 `git status` 를 치면 이 저장소가 잡힙니다.
-> `hw/`, `unitree_legged_sdk/` 는 각자 `.git` 을 가진 독립 저장소라 영향이 없습니다.
+> `hw/` 는 이 저장소에 포함돼 있고, `unitree_legged_sdk/` 는 자기 `.git` 을 가진 독립 저장소라 영향이 없습니다.
 
-## 2. HW 브랜치 클론 → `~/hw`
+## 2. 노드 코드 `~/hw`
 
-`hw/` 는 [Physical-Project-mk2](https://github.com/khw18033/Physical-Project-mk2) 의 `HW` 브랜치에서 관리하므로 이 브랜치에는 없습니다.
-HW 브랜치의 루트(`pi/`, `docs/`, ...)가 그대로 `~/hw` 가 됩니다.
+`hw/` 는 **이 브랜치에 들어 있습니다.** 1절에서 브랜치를 받으면 `~/hw` 도 함께 생깁니다.
 
 ```bash
-git clone -b HW https://github.com/khw18033/Physical-Project-mk2.git ~/hw
 ls ~/hw/pi/robot/robot_node.py    # 이 파일이 보이면 정상
 ```
+
+> `hw/` 는 원래 [Physical-Project-mk2](https://github.com/khw18033/Physical-Project-mk2) 의 `HW` 브랜치에서
+> 가져온 것입니다. 1·2호기 Go1 Pi 에 **같은 코드를 올리는 기준은 이 브랜치**이므로, Go1 Pi 에서 고친 코드는
+> 여기에 커밋합니다. HW 브랜치와 맞출 때는 두 쪽을 비교해 직접 옮깁니다(자동으로 동기화되지 않습니다).
 
 ## 3. 패키지 설치
 
@@ -73,7 +75,7 @@ python3 -m venv ~/venv
 
 ## 4. Go1 SDK 브리지 빌드 → `~/go1sdk`
 
-`go1sdk/` 의 소스는 `hw/pi/robot/` 의 것과 같으므로, 장치마다 HW 브랜치 소스로 빌드합니다.
+`go1sdk/` 의 소스는 `hw/pi/robot/` 의 것과 같으므로, 장치마다 이 브랜치의 소스로 빌드합니다.
 
 ```bash
 mkdir -p ~/go1sdk
@@ -134,7 +136,7 @@ systemctl is-active mosquitto
 
 ### 5-2. 환경 파일
 
-`/etc/hw-robot.env` 는 저장소에 없습니다(장치 고유값·토큰 포함). 1호기에서 복사한 뒤 ID 만 바꿉니다.
+`/etc/hw-robot.env` 는 저장소에 없습니다(장치 고유값). 1호기에서 복사한 뒤 ID 만 바꿉니다.
 
 ```bash
 scp physical@pi7.local:/etc/hw-robot.env /tmp/ && sudo mv /tmp/hw-robot.env /etc/
@@ -210,9 +212,9 @@ ss -tnp | grep ':1883'                                                    # 접�
 
 | 바뀐 것 | 수정·커밋할 곳 | 각 Pi 에서 |
 |---|---|---|
-| `hw/` 의 코드·유닛 | HW 브랜치 | `git -C ~/hw pull` → 서비스 재시작 (C++ 이면 4절 재빌드) |
-| 이 브랜치의 파일 | `go1_raspi` 브랜치 | `cd ~ && git pull` |
-| 유닛 파일 | HW 브랜치 | 5-3 절 복사·ID 변경을 다시 수행 |
+| `hw/` 의 코드 | `go1_raspi` 브랜치 | `cd ~ && git pull` → 서비스 재시작 (C++ 이면 4절 재빌드) |
+| 이 브랜치의 그 밖의 파일 | `go1_raspi` 브랜치 | `cd ~ && git pull` |
+| 유닛 파일 (`hw/pi/deploy/`) | `go1_raspi` 브랜치 | `git pull` 뒤 5-3 절 복사·ID 변경을 다시 수행 |
 
 ```bash
 sudo systemctl restart robot-node robot-relay detect-bridge

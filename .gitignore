@@ -11,14 +11,15 @@
 !/탐지_로봇데이터요구_260914.md
 !/작업프롬프트_라즈베리파이세팅_260921.md
 !/회신_pi7단말노드_260922.md
+# 노드 코드 본체·유닛 파일·문서. 2호기 Pi 에 그대로 옮기기 위해 이 저장소에 함께 둔다.
+!/hw/
 
 # ---- 참고: 의도적으로 제외한 것 (위 /* 로 이미 무시됨) ----
-# hw/                          HW 브랜치에서 따로 클론해 오는 폴더 (README 2절)
 # unitree_legged_sdk/          upstream 저장소를 그대로 클론 (README 3절)
 # go1sdk/                      hw/pi/robot/*.cpp 로 장치마다 빌드하는 산출물 (README 4절)
 # venv/                        requirements.txt 로 재생성
 # captures/, pi7_go1-*.jpg/.json   현장 촬영 데이터
-# hw_backup_260921/            구 버전 백업
+# hw_backup_260921/, hw_pi_backup_*/   구 버전 hw 백업
 # etc-config-backup-*          pi7 의 /etc 설정 백업 (장치 고유값)
 # .ssh/ .claude/ .cache/ .config/ .vscode-server/ .bash_history 등  개인·환경 파일
 
