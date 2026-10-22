@@ -134,6 +134,7 @@ import socketserver
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -152,6 +153,37 @@ except ImportError:
 
 # ---------------------------------------------------------------- 고정값
 SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004}
+
+# ── 통합 제어 ────────────────────────────────────────────────────────────────
+# 화면이 그릴 버튼. **어휘는 받는 노드가 정한다**(BaseNode.ACTIONS) — 여기 목록은
+# 화면에 무엇을 보여 줄지일 뿐이고, 유효성 검사를 하지 않는다. 두 목록을 두면
+# 노드가 어휘를 늘릴 때 이쪽이 낡고, 그 순간 "보냈는데 아무 일도 안 일어난다"가
+# 된다. 모르는 action 을 보내면 노드가 거절하고 그 사유가 uplink 로 올라온다.
+#
+# 기종 이름을 쓰지 않는다. Go1 이든 EP 든 drive_start 하나로 말한다.
+UI_ACTIONS = {
+    "robot": ["ping", "diag", "drive_start", "drive_stop",
+              "move_forward", "turn", "abort"],
+    "edge": ["ping", "diag", "perceive_start", "perceive_stop",
+             "ingest_start", "ingest_stop", "publish_start", "publish_stop",
+             "snapshot"],
+    "camera": ["ping", "diag"],
+}
+
+# 소스 이름 → (어느 어휘를 쓰나, downlink 의 device_id).
+# device_id 는 --device-id 로 덮을 수 있다. 기본은 소스 이름 그대로 — 기기 주소를
+# 코드에 두지 않기 위해서다. 실제 노드의 HW_ENTITY_ID 와 맞춰야 명령이 닿는다.
+SOURCE_KIND = {"cam360": "camera", "drone": "edge",
+               "robot1": "robot", "robot2": "robot"}
+DEVICE_IDS = {}          # 소스 이름 → device_id. 기동 때 인자로 채운다
+
+
+def _device_id(src):
+    return DEVICE_IDS.get(src.name, src.name)
+
+
+def _actions_for(name):
+    return UI_ACTIONS.get(SOURCE_KIND.get(name, "camera"), ["ping", "diag"])
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "robot1": "robot1", "robot2": "robot2"}
 HOSTS_FILE = Path(__file__).resolve().parent / "hosts.local.json"   # 실제 주소는 여기에 (깃에 올리지 않음)
@@ -637,6 +669,10 @@ class Source:
         self.state_fh = None
         self.cv = threading.Condition()
         self.latest = (0, None)                 # /stream 으로 보여 줄 최신 한 장
+        # 명령을 내보낼 MQTT 클라이언트. 상태를 받는 그 연결을 그대로 쓴다 —
+        # 발행용으로 하나 더 열면 client_id 가 둘이 되고, 브로커가 어느 쪽을
+        # 살릴지는 그때그때 다르다. 붙기 전이거나 paho 가 없으면 None 이다.
+        self.mqtt = None
 
     def _open_new(self):
         """다음 번호의 frames/<번호>.jpg 를 새로 만든다. 기존 파일은 절대 덮어쓰지 않는다."""
@@ -847,6 +883,12 @@ def make_handler(src, vision=None):
                 return self._mjpeg()
             if path == "/vision":
                 return self._vision(parse_qs(query).get("model", [None])[0])
+            if path == "/actions":
+                # 이 소스에 걸 수 있는 명령. 화면이 버튼을 그릴 때 쓴다.
+                return self._json(200, {"source": src.name,
+                                        "device_id": _device_id(src),
+                                        "actions": _actions_for(src.name),
+                                        "ready": src.mqtt is not None})
             if path == "/health":
                 h = src.health()
                 if vision is not None:
@@ -860,11 +902,39 @@ def make_handler(src, vision=None):
                 cells += ["<figure style='margin:4px'><figcaption>%s</figcaption>"
                           "<img src='/vision?model=%s' style='max-width:100%%'></figure>" % (m, m) for m in models]
                 note = "" if models else " · 비전 결과 없음 (vision_infer.py 가 돌면 새로고침)"
+                # 제어 줄. 버튼은 /actions 가 주는 목록으로 그린다 — 어휘가 코드
+                # 두 곳에 박히지 않게 한다. 브로커에 안 붙었으면 눌러도 503 이
+                # 돌아오고, 그 사유가 그대로 화면에 뜬다(조용히 실패하지 않는다).
+                btns = "".join(
+                    "<button onclick=\"cmd('%s')\">%s</button>" % (a, a)
+                    for a in _actions_for(src.name))
+                ctrl = (
+                    "<div style='margin:8px;padding:8px;background:#1a1a1a;border-radius:6px'>"
+                    "<div style='font-size:12px;color:#9aa;margin-bottom:6px'>"
+                    "제어 — <code>terminal/%s/downlink</code></div>"
+                    "<div style='display:flex;flex-wrap:wrap;gap:6px'>%s</div>"
+                    "<pre id='out' style='margin:8px 0 0;color:#9cf;font-size:12px;"
+                    "white-space:pre-wrap'></pre></div>"
+                    "<style>button{background:#2a2a2a;color:#ddd;border:1px solid #444;"
+                    "border-radius:4px;padding:6px 10px;cursor:pointer;font-size:13px}"
+                    "button:hover{background:#333}</style>"
+                    "<script>"
+                    "async function cmd(a){const o=document.getElementById('out');"
+                    "o.textContent=a+' ...';"
+                    "try{const r=await fetch('/command',{method:'POST',"
+                    "headers:{'Content-Type':'application/json'},"
+                    "body:JSON.stringify({action:a})});"
+                    "const j=await r.json();"
+                    "o.textContent=a+' → '+r.status+'  '+JSON.stringify(j);}"
+                    "catch(e){o.textContent=a+' → 실패: '+e;}}"
+                    "</script>" % (_device_id(src), btns))
                 page = ("<!doctype html><meta charset='utf-8'><title>%s</title>"
                         "<body style='margin:0;background:#111;color:#ddd;font-family:sans-serif'>"
-                        "<p style='margin:8px'>%s :%d · <a style='color:#9cf' href='/health'>health</a>%s</p>"
+                        "<p style='margin:8px'>%s :%d · <a style='color:#9cf' href='/health'>health</a>"
+                        " · <a style='color:#9cf' href='/actions'>actions</a>%s</p>"
+                        "%s"
                         "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr))'>%s</div>"
-                        "</body>" % (src.name, src.name, src.port, note, "".join(cells)))
+                        "</body>" % (src.name, src.name, src.port, note, ctrl, "".join(cells)))
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             self._json(404, {"status": "error", "detail": "없는 주소"})
 
@@ -929,6 +999,37 @@ def make_handler(src, vision=None):
                 self.close_connection = True
                 return
             try:
+                if path == "/command":
+                    # 화면 → 말단. 통합 명령 규약의 downlink 로 그대로 흘린다.
+                    # **이 파일은 어휘를 해석하지 않는다** — 무엇이 유효한지는
+                    # 받는 노드가 안다(BaseNode.ACTIONS). 여기서 한 번 더 검사하면
+                    # 노드가 어휘를 늘릴 때마다 이쪽도 고쳐야 하고, 두 목록이
+                    # 어긋나는 순간 "보냈는데 아무 일도 안 일어난다"가 된다.
+                    if src.mqtt is None:
+                        return self._json(503, {"status": "error",
+                                                "detail": "브로커에 붙지 않음 — 명령을 보낼 수 없음"})
+                    try:
+                        req = json.loads(body.decode("utf-8"))
+                    except Exception:
+                        return self._json(400, {"status": "error", "detail": "JSON 이 아님"})
+                    action = str(req.get("action", "")).strip()
+                    if not action:
+                        return self._json(400, {"status": "error", "detail": "action 이 비어 있음"})
+                    topic = "terminal/%s/downlink" % _device_id(src)
+                    msg = {"action": action, "params": req.get("params") or {},
+                           "command_id": req.get("command_id") or uuid.uuid4().hex[:12],
+                           "issued_at": round(time.time(), 3), "issued_by": "stream-ui"}
+                    info = src.mqtt.publish(topic, json.dumps(msg, ensure_ascii=False), qos=1)
+                    ok = getattr(info, "rc", 1) == 0
+                    log("%s 명령 %s → %s (%s)" % (src.name, action, topic, "보냄" if ok else "실패"))
+                    # 결과는 여기서 기다리지 않는다. 4단계 진행(ACK→수행중→
+                    # 물리변화→완료)은 uplink 로 올라와 상태 스트림에 쌓이고,
+                    # 화면은 그것을 읽는다. 여기서 기다리면 느린 명령 하나가
+                    # 화면 전체를 붙잡는다.
+                    return self._json(200 if ok else 502,
+                                      {"status": "ok" if ok else "error",
+                                       "topic": topic, "command_id": msg["command_id"],
+                                       "detail": None if ok else "발행 실패"})
                 if path in ("/upload_pano", "/upload"):
                     ctype = self.headers.get("Content-Type", "")
                     boundary = content_type_param(ctype, "boundary")
@@ -1182,6 +1283,9 @@ def start_mqtt(src, host):
     cli.on_connect = on_connect
     cli.on_disconnect = on_disconnect
     cli.on_message = on_message
+    # 명령 발행에 쓴다. 구독과 같은 연결이라 상태가 오는 그 브로커로 정확히
+    # 나간다 — 화면이 보고 있는 대상과 명령이 가는 대상이 어긋날 수 없다.
+    src.mqtt = cli
     cli.reconnect_delay_set(min_delay=1, max_delay=10)
     src.set_status("state", "붙는 중 " + url)
     try:
@@ -1339,11 +1443,26 @@ def main():
     ap.add_argument("--no-pull", action="store_true",
                     help="파이에서 가져오지 않고 포트로 들어오는 것만 받는다 (엣지가 넘겨 줄 때 서버 쪽)")
     ap.add_argument("--bind", default="0.0.0.0", metavar="주소", help="포트를 열 주소 (기본 0.0.0.0 = 전부)")
+    ap.add_argument("--device-id", action="append", default=[], metavar="소스=id",
+                    help="명령을 보낼 때 쓸 device_id. terminal/<id>/downlink 로 나간다. "
+                         "기본은 소스 이름 그대로 — 실제 노드의 HW_ENTITY_ID 와 맞춰야 "
+                         "명령이 닿는다. 예: --device-id robot1=go1-001 --device-id drone=edge1")
     ap.add_argument("--unpack", metavar="폴더", help="저장된 .frm 을 .jpg + .json 으로 풀고 끝낸다")
     args = ap.parse_args()
 
     if args.unpack:
         return unpack(args.unpack)
+
+    # 명령이 나갈 device_id. 안 주면 소스 이름 그대로 — 저장소에 특정 기기의
+    # id 를 박지 않기 위해서다. 실제 노드의 HW_ENTITY_ID 와 맞춰야 닿는다.
+    for item in args.device_id:
+        if "=" not in item:
+            raise SystemExit("--device-id 는 소스=id 형식이다: %s" % item)
+        nm, _, did = item.partition("=")
+        nm = ALIASES.get(nm.strip().lower())
+        if nm is None:
+            raise SystemExit("모르는 소스: %s" % item)
+        DEVICE_IDS[nm] = did.strip()
 
     if args.on:
         names = []
