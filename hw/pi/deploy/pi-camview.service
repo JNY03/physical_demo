@@ -1,0 +1,20 @@
+# 파이 카메라 모듈 웹 뷰어 — CSI 카메라를 MJPEG 로 브라우저에 보여 준다
+# HTTP :8091. Go1 카메라 뷰어(8090, go1-camview.service)와 별개다.
+# 카메라가 안 붙어 있어도 서버는 뜨며, 페이지에 원인이 표시된다.
+[Unit]
+Description=Raspberry Pi camera module viewer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=physical
+SupplementaryGroups=video
+WorkingDirectory=/home/physical/hw/pi
+Environment=PI_CAM_WIDTH=1280 PI_CAM_HEIGHT=720 PI_CAM_FPS=15 PI_CAM_QUALITY=70
+ExecStart=/usr/bin/python3 -m bench.pi_cam_view 8091
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

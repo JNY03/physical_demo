@@ -1,0 +1,23 @@
+# 인지 결과 -> 디지털 트윈 포워더 (HW-R-07)
+# 서버 GET /control/<camera_id> --폴링--> pi1 --UDP 5009--> Unity
+#
+# go1-front-upload 가 올린 프레임의 인지 결과를 되받는 것이라 둘은 한 쌍이다.
+# 업로더가 죽어 있으면 여기는 갱신 없는 같은 timestamp 만 보고 전송을 생략한다.
+[Unit]
+Description=Go1 detection forwarder to Unity twin (HW-R-07)
+After=network-online.target go1-front-upload.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=physical
+WorkingDirectory=/home/physical/hw/pi
+StandardInput=null
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m robot.go1_detect_forward --unity-ip 192.168.50.244 --hz 10
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

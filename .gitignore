@@ -39,3 +39,17 @@ wsl-*.txt
 _*.py
 _*.sh
 _frames/
+
+# ── go1_raspi 에서 가져온 제외 항목 ──────────────────────────────────────────
+# 원본 저장소는 **루트가 라즈베리파이의 홈 디렉터리**라 `/*` 전체 무시 + 허용
+# 목록 방식이었다. 통합 저장소의 루트는 홈이 아니므로 그 방식을 가져오지 않는다
+# — 그대로 합치면 drone_rpi/·edge/·data_stream/ 까지 전부 무시된다.
+# 대신 그쪽이 의도적으로 뺐던 것들만 경로를 붙여 옮긴다.
+unitree_legged_sdk/          # upstream 저장소를 그대로 클론해 쓴다
+go1sdk/                      # hw/pi/robot/*.cpp 를 장치마다 빌드한 산출물
+captures/                    # 현장 촬영 데이터
+pi7_go1-*.jpg
+pi7_go1-*.json
+hw_backup_*/                 # 구 버전 hw 백업
+hw_pi_backup_*/
+etc-config-backup-*          # 장치 고유 설정 백업

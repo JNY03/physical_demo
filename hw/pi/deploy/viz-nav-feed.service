@@ -1,0 +1,38 @@
+# pi1 가시화 중계 (viz-nav-feed) — 경로 사건·배터리·yaw 를 로컬 브로커로 옮긴다
+#
+# 보기만 한다: 포트를 bind 하지 않고(AF_PACKET 수동 캡처), 로봇·브리지로 아무것도 보내지 않는다.
+# 그래서 부팅 자동 시작해도 된다. 이 서비스가 죽어도 유니티 ↔ go1_sdk_pc 경로는 그대로다.
+#
+# 설치:
+#   sudo cp pi/deploy/viz-nav-feed.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now viz-nav-feed
+#   journalctl -u viz-nav-feed -f
+#
+# 캡처 포트·원천을 바꾸려면(시험) /etc/viz-nav-feed.env 에 적는다:
+#   VIZ_PATH_PORT=25110  VIZ_STATE_PORT=25101  VIZ_TELEOP_PORT=25100  VIZ_MOTION_PORT=25009
+#   VIZ_PATH_EVENT_SOURCE=auto|journal|capture
+[Unit]
+Description=pi1 가시화 중계 (viz-nav-feed)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=physical
+WorkingDirectory=/home/physical/hw/pi
+ExecStart=/home/physical/venv/bin/python3 -u -m robot.viz_nav_feed
+Environment=PYTHONUNBUFFERED=1
+Environment=HW_ZONE_ID=zoneA HW_ENTITY_ID=go1-001 HW_NODE_ID=pi1
+EnvironmentFile=-/etc/viz-nav-feed.env
+
+# root 로 돌리지 않는다. 수동 캡처에 필요한 권한 하나만 준다.
+# journal 은 physical 의 adm 그룹으로 읽는다.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
