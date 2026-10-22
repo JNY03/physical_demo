@@ -1,0 +1,97 @@
+# 드론 엣지 — 인지 파이프라인 + 버스 어댑터
+# ==========================================
+# 컨테이너 둘이 한 파드에 있다. 서로 localhost 로만 말하므로 파드 경계가 곧
+# 신뢰 경계다 — 어댑터가 엣지의 HTTP 창구를 바깥에 열어 주지 않는다.
+#
+#   server   인지 파이프라인(검출·거리·스트리밍). 말단에서 당겨 온다.
+#   adapter  통합 명령 버스. terminal/{id}/downlink 를 구독해 위 창구로 옮긴다.
+#
+# 배치는 라벨로 정한다:
+#   kubectl label node <이름> physical.io/role=edge
+#
+# **GPU 는 선택이다.** ovd.provider=color 로 두면 모델도 GPU 도 없이 돈다
+# (1280x720 에서 CPU 7.7ms 실측). 그 구성으로 먼저 띄워 배포 경로를 검증하고,
+# 모델이 필요해지면 resources 에 GPU 를 더하고 config.json 의 provider 를 바꾼다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drone-edge
+  namespace: physical
+  labels: { app: drone-edge, tier: edge }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: drone-edge }
+  template:
+    metadata:
+      labels: { app: drone-edge, tier: edge }
+    spec:
+      nodeSelector:
+        physical.io/role: edge
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: server
+          image: drone-edge:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8891 }
+          volumeMounts:
+            # 설정은 바깥에서 준다 — 말단 주소가 여기 들어간다. 이미지를 다시
+            # 굽지 않고 기기를 바꿀 수 있어야 한다.
+            - { name: config, mountPath: /app/config.json, subPath: config.json }
+            # 가중치와 산출물은 이미지 밖. 가중치는 ~1.6GB 라 이미지에 넣으면
+            # 배포가 무거워지고, 산출물은 파드가 다시 떠도 남아야 한다.
+            - { name: models, mountPath: /app/models }
+            - { name: store, mountPath: /app/store }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "4", memory: "8Gi" }
+            # GPU 를 쓰려면 아래 주석을 푼다(노드에 device plugin 필요).
+            #   limits: { nvidia.com/gpu: 1 }
+          readinessProbe:
+            httpGet: { path: /api/live, port: 8891 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          # /api/health 를 쓰지 않는다. 저장소 사용량 집계가 섞여 있어 파일이
+          # 쌓이면 느려진다 — 2026-10-22 에 records 19,989개에서 8.9초가 걸려
+          # 프로브가 통째로 실패했다. /api/live 는 메모리 상태만 본다.
+          livenessProbe:
+            httpGet: { path: /api/live, port: 8891 }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+
+        - name: adapter
+          image: drone-edge:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "mqtt_node.py"]
+          envFrom:
+            - configMapRef: { name: physical-config }
+          env:
+            - name: HW_ENTITY_TYPE
+              value: "edge"
+            - name: HW_ENTITY_ID
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: HW_NODE_ID
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+      volumes:
+        - name: config
+          configMap: { name: edge-config }
+        - name: models
+          hostPath: { path: /var/lib/drone-edge/models, type: DirectoryOrCreate }
+        - name: store
+          hostPath: { path: /var/lib/drone-edge/store, type: DirectoryOrCreate }
+---
+# 스트리밍 화면을 클러스터 밖에서 보기 위한 창구. 가시화 웹이 여기로 붙는다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: drone-edge
+  namespace: physical
+spec:
+  selector: { app: drone-edge }
+  ports:
+    - { name: http, port: 8891, targetPort: 8891 }

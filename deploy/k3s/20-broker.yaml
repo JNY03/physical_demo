@@ -1,0 +1,79 @@
+# MQTT 브로커 — 통합 제어 버스
+# ==============================
+# **이미 브로커가 있으면 이 파일을 적용하지 않는다.** 10-config.yaml 의
+# HW_BROKER_HOST 를 그쪽 주소로 바꾸면 끝이다. 현장에 mosquitto 가 이미 도는
+# 경우가 흔해서 선택 사항으로 둔다.
+#
+# 인증이 없다(allow_anonymous). 폐쇄망 전제다 — **공개망에 두지 말 것.**
+# 공개망에 둘 거라면 TLS(wss)와 인증을 켜고, 노드 쪽 env(HW_MQTT_USER/PASS,
+# HW_TLS_CA)를 함께 채운다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosquitto-conf
+  namespace: physical
+data:
+  mosquitto.conf: |
+    persistence true
+    persistence_location /mosquitto/data/
+
+    # 노드용 — 생 TCP
+    listener 1883
+    allow_anonymous true
+
+    # 가시화 웹용 — 브라우저는 생 TCP 를 못 열어서 WebSocket 으로 붙는다.
+    # 같은 브로커·같은 토픽이고 전송 계층만 다르다.
+    listener 9001
+    protocol websockets
+    allow_anonymous true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-broker
+  namespace: physical
+  labels: { app: mqtt-broker, tier: bus }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mqtt-broker }
+  template:
+    metadata:
+      labels: { app: mqtt-broker, tier: bus }
+    spec:
+      # 브로커는 어디서 돌아도 되지만, 말단이 끊겨도 살아 있어야 하므로 보통
+      # 엣지 쪽에 둔다. 배치를 강제하지 않는다 — 필요하면 nodeSelector 를 더한다.
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: mosquitto
+          image: eclipse-mosquitto:2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: mqtt, containerPort: 1883 }
+            - { name: ws, containerPort: 9001 }
+          volumeMounts:
+            - { name: conf, mountPath: /mosquitto/config/mosquitto.conf, subPath: mosquitto.conf }
+            - { name: data, mountPath: /mosquitto/data }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+          livenessProbe:
+            tcpSocket: { port: 1883 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: conf
+          configMap: { name: mosquitto-conf }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt-broker
+  namespace: physical
+spec:
+  selector: { app: mqtt-broker }
+  ports:
+    - { name: mqtt, port: 1883, targetPort: 1883 }
+    - { name: ws, port: 9001, targetPort: 9001 }

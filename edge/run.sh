@@ -195,20 +195,51 @@ CANDIDATES=(
   "$HOME/Physical-Project-mk2-jny-backup/research/oln_training/venv/bin/python"
 )
 
+# **켜진 단계가 요구하는 것만 검사한다.** 예전에는 torch+ultralytics 를 무조건
+# 요구했는데, 그러면 모델 없이 쓰려는 구성이 기동조차 못 한다. 실제로는 둘 다
+# 지연 import 다(models.py 최상위는 cv2·numpy·onnxruntime 뿐) — ovd.provider=color
+# 에 depth 를 끄면 어느 쪽도 불리지 않는다. 검사가 그 사실보다 엄격했던 것이다.
+NEED=$(python3 - "$HERE/config.json" <<'PYEOF' 2>/dev/null || echo "cv2 numpy"
+import json, sys
+try:
+    c = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("cv2 numpy"); raise SystemExit
+need = {"cv2", "numpy"}
+ovd = c.get("ovd", {})
+if ovd.get("enabled", True) and str(ovd.get("provider", "yoloe")).lower() != "color":
+    need |= {"torch", "ultralytics"}
+if c.get("ovd2", {}).get("enabled"):
+    need |= {"torch", "ultralytics"}
+d = c.get("depth", {})
+if d.get("enabled"):
+    need |= {"onnxruntime"} if d.get("provider") == "zipdepth" else {"torch"}
+if c.get("clip", {}).get("enabled") or c.get("unknown", {}).get("enabled", True):
+    need |= {"onnxruntime"}
+print(" ".join(sorted(need)))
+PYEOF
+)
+echo "== 이 설정이 요구하는 것: $NEED"
+
 PY=""
 for c in "${CANDIDATES[@]}"; do
   [ -n "$c" ] && [ -x "$c" ] || continue
-  if "$c" -c "import torch, ultralytics" >/dev/null 2>&1; then PY="$c"; break; fi
+  if "$c" -c "import sys; [__import__(m) for m in sys.argv[1:]]" $NEED >/dev/null 2>&1; then
+    PY="$c"; break
+  fi
 done
 
 if [ -z "$PY" ]; then
-  echo "torch + ultralytics가 있는 파이썬을 찾지 못했다." >&2
+  echo "이 설정이 요구하는 파이썬을 찾지 못했다 — 필요: $NEED" >&2
   echo "확인한 곳:" >&2
   for c in "${CANDIDATES[@]}"; do [ -n "$c" ] && echo "  $c" >&2; done
   echo >&2
   echo "고치는 법 중 하나:" >&2
   echo "  EDGE_PYTHON=/경로/python ./run.sh" >&2
-  echo "  또는  python3.12 -m venv venv312 && ./venv312/bin/pip install \\" >&2
+  echo "  모델 없이 돌리려면 config.json 에서" >&2
+  echo "    ovd.provider=\"color\", ovd2.enabled=false, depth.enabled=false" >&2
+  echo "  로 두면 cv2·numpy 만 있으면 된다(GPU 불필요)." >&2
+  echo "  모델을 쓰려면  python3.12 -m venv venv312 && ./venv312/bin/pip install \\" >&2
   echo "          torch torchvision --index-url https://download.pytorch.org/whl/cu123 \\" >&2
   echo "        && ./venv312/bin/pip install -r requirements.txt" >&2
   exit 1

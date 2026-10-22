@@ -1,0 +1,57 @@
+# 배포 설정 — **쓰는 사람이 고치는 파일은 여기 하나다.**
+# ======================================================
+# 기기 주소·구역·이미지가 전부 여기 모여 있다. 나머지 매니페스트에는 특정 기기의
+# 주소가 한 줄도 없다 — 저장소를 받아 그대로 쓰면 조용히 엉뚱한 곳으로 가는 일이
+# 없어야 하기 때문이다.
+#
+# 고칠 것:
+#   1. broker.host   — MQTT 브로커 주소. 같은 클러스터에 띄웠으면 20-broker.yaml
+#                      의 서비스 이름(mqtt-broker)을 그대로 두면 된다.
+#   2. zone.id       — 구역 식별자. 한 현장에 여러 구역이 있으면 나눈다.
+#   3. image.*       — 레지스트리 경로. 사설 레지스트리면 pullSecret 도 함께.
+#
+# 노드 배치는 이 파일이 아니라 **노드 라벨**로 정한다(README.md 참조):
+#   kubectl label node <이름> physical.io/role=terminal
+#   kubectl label node <이름> physical.io/role=edge
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: physical
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: physical-config
+  namespace: physical
+data:
+  # ── 전송 ─────────────────────────────────────────────────────────────────
+  # 클러스터 안에 브로커를 띄웠다면 서비스 DNS 이름. 바깥 브로커를 쓰면 그 주소.
+  HW_BROKER_HOST: "mqtt-broker.physical.svc.cluster.local"
+  HW_BROKER_PORT: "1883"
+
+  # ── 식별 ─────────────────────────────────────────────────────────────────
+  # entity_id 는 기기마다 달라야 한다. 여기서는 **정하지 않는다** — 매니페스트가
+  # 노드 이름(spec.nodeName)에서 끌어다 쓴다. 같은 id 로 둘이 붙으면 client_id
+  # 플래핑으로 서로를 끊는다.
+  HW_ZONE_ID: "zoneA"
+
+  # ── 주기 ─────────────────────────────────────────────────────────────────
+  HW_HB_INTERVAL: "5.0"
+  HW_KEEPALIVE: "10"
+
+  # ── 드론 엣지 ────────────────────────────────────────────────────────────
+  # 엣지 어댑터 노드가 같은 파드의 엣지 서버에 붙는 주소. 사이드카라 localhost 다.
+  EDGE_API: "http://127.0.0.1:8891"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: physical-images
+  namespace: physical
+data:
+  # 태그가 아니라 digest 로 고정하는 것을 권한다 — 태그는 같은 이름으로 내용이
+  # 바뀔 수 있어 이벤트 시점에 예상과 다른 것이 뜬다. 예:
+  #   node: "registry.example/physical-node@sha256:abc..."
+  node: "physical-node:latest"
+  edge: "drone-edge:latest"
+  broker: "eclipse-mosquitto:2"
