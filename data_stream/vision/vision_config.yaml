@@ -1,0 +1,154 @@
+# =============================================================================
+# vision_config.yaml — vision_infer.py 설정
+#
+# 입력 : live (기본)  Redis camera_stream:<기기> 의 최신 프레임 (server_stream_multi_source.py 가 흘림)
+#        저장된 이미지   <data_root>/<기기>/<실행 YYYYMMDD_HHMMSS>/frames/*.jpg  (+ frames.jsonl)
+#        원본은 읽기만 한다.
+# 출력 : Redis vision_stream:<기기>:<모델> · vision_depth:<기기>:<모델>  (live 만)
+#        <data_root>/<기기>/<실행>/<output.dirname>/<모델>/          (두 모드 같은 형식)
+#            results.jsonl          한 장 = 한 줄 (검출 결과 / depth 통계·내부파라미터 / 검출별 거리·GPS)
+#            overlay/<번호>.jpg      오버레이 시각화
+#            depth/<번호>.npy        depth 모델만. 미터 단위, 0 = 무효 픽셀
+#
+# 명령행 옵션(--devices / --models / --runs ...)이 여기 값보다 우선한다.
+# =============================================================================
+
+data_root: ../stream_data        # 상대 경로면 이 config 파일 위치 기준. 서버 --save 와 같아야 live 결과가 디스크에 저장된다
+
+# 명령행에서 안 고르면 쓰는 기본값
+defaults:
+  devices: [cam360, drone, robot1, robot2]
+  models: [yoloe]
+  runs: live                      # live = 실시간 스트림 최신 프레임 / 저장된 이미지: all | latest | 실행 폴더 이름 목록
+
+runtime:
+  device: cuda:0
+  watch_interval_s: 2.0           # --watch 일 때 새 프레임을 확인하는 간격
+
+# ── live (실시간) ───────────────────────────────────────────────────────────
+# 기기마다 Redis 의 가장 최근 프레임만 추론한다. 추론하는 사이 들어온 프레임은 건너뛴다.
+# 건너뛴 프레임은 나중에 --runs all|latest|<실행> 으로 채운다.
+# Redis 는 최근 것만 들고 있으면 된다 (전부 디스크에 저장). 아래 개수 × 크기가 메모리를 정한다.
+#   overlay JPEG 약 50~200KB · depth 원본 1280×720 float16 약 1.8MB
+live:
+  redis: redis://127.0.0.1:6380/0  # 서버 --redis 와 같게
+  maxlen: 300                     # vision_stream:<기기>:<모델> 에 남길 개수
+  depth_maxlen: 30                # vision_depth:<기기>:<모델> 에 남길 개수 (depth 원본이라 크다)
+  max_age_s: 5.0                  # 이보다 오래된 프레임은 처리하지 않는다 (서버가 멈췄거나 이전 실행의 것)
+  max_fps: null                   # 기기별 처리 상한. null = 가능한 만큼 / 숫자 / {drone: 2, robot1: 5}
+  save: true                      # 디스크에도 저장 (오프라인과 같은 형식)
+  report_interval_s: 10.0
+
+output:
+  dirname: vision                 # 실행 폴더 아래 만들 하위 폴더 이름
+  jpeg_quality: 90
+
+# ── 기기별 카메라 정보 ─────────────────────────────────────────────────────
+# fov_x_deg : depth 모델에 줄 수평 화각(도).
+#   null   → 모델이 스스로 추정
+#   숫자   → 그 값 사용
+#   meta   → frames.jsonl 의 sender.camera.hfov_deg 사용 (드론 agent 가 붙여 줌)
+# cam360 은 파노라마(등장방형)일 수 있다. 단안 depth 모델은 핀홀 영상 기준이라
+# 파노라마에서는 거리값을 그대로 믿지 않는다.
+devices:
+  cam360: {fov_x_deg: null}
+  drone:  {fov_x_deg: meta}
+  robot1: {fov_x_deg: null}
+  robot2: {fov_x_deg: null}
+
+models:
+  # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
+  # ── YOLOE (기본 prompt-free, 내장 어휘 4585종) ─────────────────────────────
+  yoloe:
+    weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg-pf.pt   # prompt-free 가중치. 경량: yoloe-11s-seg-pf.pt
+    conf: 0.25
+    iou: 0.5
+    imgsz: 640
+    max_det: 100
+    half: true
+    save_polygons: true           # 검출마다 마스크 외곽선(픽셀 좌표)을 results.jsonl 에 남긴다
+    prompt:
+      mode: free                  # free = prompt-free 내장 어휘 / text = 아래 classes 만 텍스트 프롬프트로 찾는다
+      # free 모드 — 내장 어휘 이름(영어, 대소문자 무시). 어휘에 없는 이름은 시작할 때 알려 주고 무시한다
+      include: []                 # 비우면 전부. 주면 이 클래스만
+      exclude: []                 # 뺄 클래스. 예) [keyboard, computer keyboard, laptop]
+      # text 모드 — 원하는 클래스를 자유 문구로. 시작할 때 MobileCLIP 으로 한 번 임베딩한다 (추론 속도는 같음)
+      classes: [person, boat, life jacket, car]
+      text_weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
+      text_encoder_dir: /home/ny/physical_demo/data_stream/models               # mobileclip_blt.ts 가 있는 폴더 (없으면 여기로 받는다)
+
+  # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
+  unidepth:
+    repo_path: /home/ny/physical_demo/data_stream/external/UniDepth
+    model_name: /home/ny/physical_demo/data_stream/models/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
+    resolution_level: 9           # 0~9, 높을수록 정밀·느림
+    infer_long_side: null         # 숫자면 긴 변을 이 크기로 줄여 추론 후 원본 크기로 되돌림
+    use_fp16: true
+    save_depth: true
+    depth_dtype: float16          # float16 | float32
+
+  # ── MoGe2-Aerial (MoGe-2 ViT-L + LoRA r=96, AerialMetric ECCV 2026) ──────
+  moge2_aerial:
+    repo_path: /home/ny/physical_demo/data_stream/external/AerialMetric/MoGe
+    extra_sys_path: [/home/ny/physical_demo/data_stream/external/AerialMetric/pydeps]   # utils3d, peft
+    checkpoint: /home/ny/physical_demo/data_stream/external/AerialMetric/weights/Moge2-Aerial.pt
+    lora_rank: 96
+    resolution_level: 9           # 0~9
+    force_projection: true
+    apply_mask: true              # 하늘 등 무효 영역은 depth 0
+    infer_long_side: null
+    use_fp16: true
+    save_depth: true
+    depth_dtype: float16
+
+# ── depth 시각화 / YOLOE 결합 ──────────────────────────────────────────────
+depth_vis:
+  mode: blend                     # blend = 원본 위에 컬러맵 / side = 원본 | 컬러맵 나란히
+  alpha: 0.6                      # blend 비율 (컬러맵 쪽)
+  colormap: turbo                 # turbo | jet | inferno | magma | viridis | plasma
+  near_is_warm: true              # 가까울수록 빨강
+  range_percentile: [2, 98]       # 색 범위를 이 백분위로 자름
+  colorbar: true
+
+# depth 모델을 돌리면 yoloe 검출에 검출별 거리를 붙이고 depth 오버레이에 박스 + 거리를 그린다.
+# --models 에 yoloe 가 없어도 결합용으로 yoloe 를 적재한다 (그때 yoloe 결과 자체는 저장하지 않음).
+fusion:
+  enabled: true
+  depth_percentile: 40            # 마스크 안 depth 의 이 백분위를 물체 거리로 본다
+  mask_erode_px: 3                # 경계 배경 혼입을 줄이려고 마스크를 깎는다
+  min_valid_ratio: 0.2            # 마스크 안 유효 depth 비율이 이보다 낮으면 거리 null
+
+# ── 검출 GPS 좌표 (depth 모델 + 결합 때, geo.py) ─────────────────────────────
+# 검출마다  depth_m(광축 Z) · uv(마스크 무게중심) · range_m(직선거리) · cam_xyz_m · ned_m[북,동,아래]
+#          · lat · lon (도, WGS84) · alt_m (해발) 을 results.jsonl 과 vision_stream result 에 붙인다.
+# 프레임마다 pose(쓴 드론 위치·자세 + dt_s) · frame_ts · geo_status 도 붙인다.
+#   geo_status: ok | no_fix (gps.fix_type < min_fix_type → ned_m 까지만) | no_attitude | no_state | stale_state
+# 위치·자세: 브리지 MQTT state (도·m·도, GPS_단위_정리_261002.md). 프레임 sender.ts 와 ts 가 가장 가까운 것
+#   live = Redis state_stream:<기기> · 저장된 이미지 = <실행>/states.jsonl
+geo:
+  enabled: true
+  min_fix_type: 2                 # 미만이면 위도·경도 null (fix 없는 0,0 을 좌표로 쓰지 않는다)
+  max_state_dt_s: 0.5             # 프레임과 state 시각 차이가 이보다 크면 쓰지 않는다 (stale_state)
+  redis_scan: 64                  # live: state_stream 최근 몇 개에서 찾을지 (state 약 8건/초)
+  devices:                        # 여기 있는 기기만 계산한다. 카메라 장착 (기체 FRD 기준)
+    drone:
+      pitch_down_deg: 45          # 정면에서 아래로 숙인 각 (수직 하방 = 90)
+      yaw_deg: 0                  # 오른쪽으로 돌린 각
+      roll_deg: 0                 # 광축 둘레로 돌린 각
+      lever_arm_m: [0, 0, 0]      # 기체 원점(FC) → 카메라 [앞, 오른쪽, 아래] m
+
+# ── 오버레이 표시 (yoloe · depth 공통) ─────────────────────────────────────
+# label: 박스 위에 쓸 줄 목록. 한 줄 = 항목 목록. 값이 없는 항목은 빠진다
+#   name 클래스 이름 · conf 신뢰도 · cls 클래스 번호 · depth 광축 거리 Z · range 직선거리
+#   gps 위도,경도 · alt 해발고도 · ned 드론 기준 북·동·아래 오프셋(m)
+overlay:
+  min_conf: 0.25                  # 그릴 최소 신뢰도. null = 다 그림. 그림에서만 거른다 (results 에는 전부 남음)
+  line_width: null                # null = 이미지 크기에 맞춰 자동
+  font_scale: null                # null = 자동
+  title: true                     # 영상 위 띠에 모델·기기·번호
+  gps_decimals: 6                 # 위도·경도 표시 자리수 (6 ≈ 0.1 m). 저장값은 8자리
+  yoloe:
+    label: [[name, conf]]
+  depth:
+    label: [[name, conf, range], [gps]]
+    pose: true                    # 영상 위 띠에 드론 GPS·고도·자세·state 시각 차이 한 줄

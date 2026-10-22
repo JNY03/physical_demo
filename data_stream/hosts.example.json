@@ -1,0 +1,5 @@
+{
+  "robot1": "<robot1 pi 주소>",
+  "robot2": "<robot2 pi 주소>",
+  "drone": "<drone pi 주소>"
+}
