@@ -47,22 +47,28 @@ cd edge
 
 ```powershell
 cd C:\...\physical_demo\edge
-.\run.cmd                # 기동 → http://127.0.0.1:8891/
-.\run.cmd --port 9000
-.\run.cmd stop
+.\run.ps1                # 기동 → http://127.0.0.1:8891/
+.\run.ps1 --port 9000
+.\run.ps1 stop
 ```
 
-`Ctrl-C` 한 번으로 전부 내려간다. `run.cmd`가 Git Bash를 찾아 `run.sh`에 넘기고,
+`Ctrl-C` 한 번으로 전부 내려간다. `run.ps1`이 Git Bash를 찾아 `run.sh`에 넘기고,
 `run.sh`는 자기가 Windows 위에 있는 것을 알아채면 WSL로 넘긴 뒤 **감시자로 남아**
 Ctrl-C를 받으면 pid와 포트를 직접 보고 죽인다. wsl.exe가 콘솔 Ctrl-C를 삼키고
 리눅스 쪽에 넘기지 않는 경우가 있어서, 신호 전달만 믿으면 창은 닫혔는데 서버가
-포트를 쥔 채 남는다.
+포트를 쥔 채 남는다. 실측으로 Ctrl-C 후 **1.3초**에 포트가 풀리고 프롬프트가
+돌아온다.
 
-- **PowerShell에서 `bash run.sh`는 쓰지 않는다.** 거기서 `bash`는 System32의 WSL
+- **PowerShell에서 `.\run.cmd`를 쓰지 않는다.** 동작은 같지만 cmd가 Ctrl-C 뒤에
+  `Terminate batch job (Y/N)?`을 묻고 대답할 때까지 콘솔을 붙잡는다. 엣지는 이미
+  내려갔는데 프롬프트가 안 돌아와서 "Ctrl-C가 안 먹는다"로 보인다(2026-09-29
+  실측: 포트도 풀리고 WSL 쪽 server.py도 사라진 뒤였다). cmd에서 띄워야 하면
+  `run.cmd`를 쓰되, Ctrl-C 뒤에 `Y`를 눌러야 프롬프트가 돌아온다.
+- **PowerShell에서 `bash run.sh`도 쓰지 않는다.** 거기서 `bash`는 System32의 WSL
   기본 배포판 실행기로 잡히고, 기본 배포판이 Ubuntu가 아니면 `/bin/bash`조차 없어
-  죽는다. Git Bash 안에서라면 `./run.sh`가 그대로 된다.
-- cmd는 Ctrl-C 뒤에 `Terminate batch job (Y/N)?`을 한 번 더 묻는다. 그 질문이 뜰
-  때는 이미 정리가 끝난 뒤다.
+  `execvpe`로 죽는다. Git Bash 안에서라면 `./run.sh`가 그대로 된다.
+- 같은 이유로 말단 배포도 PowerShell의 `bash ./deploy.sh`로는 안 된다. `deploy.sh`는
+  `rsync`가 필요해 Git Bash에도 없으므로 **WSL 안에서** 실행한다.
 
 ### 화면과 제어
 

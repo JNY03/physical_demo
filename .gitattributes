@@ -2,6 +2,10 @@
 # 첫 줄부터 `$'\r': command not found`로 죽는다. 셸 스크립트는 LF로 못박는다.
 *.sh text eol=lf
 
-# 반대로 배치 파일은 CRLF여야 cmd가 제대로 읽는다.
+# systemd 유닛도 LF다. CRLF면 ExecStart 값 끝에 \r이 붙어 실행 파일을 못 찾는다.
+*.service text eol=lf
+
+# 반대로 배치 파일은 CRLF여야 cmd가 제대로 읽는다. PowerShell 스크립트도 같다.
 *.cmd text eol=crlf
 *.bat text eol=crlf
+*.ps1 text eol=crlf
