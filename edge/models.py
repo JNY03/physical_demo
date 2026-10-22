@@ -125,6 +125,88 @@ class YoloeOvd:
         return out
 
 
+class ColorShapeOvd:
+    """색 분할 검출기 — 모델 없이 HSV 임계와 기하로 고정 대상을 잡는다.
+
+    **왜 이것이 필요한가**: OVD는 학습 어휘에 없는 커스텀 물체를 이름 붙이지
+    못한다. 2026-09-29 실측(파란 U자 통과 구조물, 항공 시점)에서 YOLOE
+    prompt-free는 `diving board` 0.79 / `field` 0.62를 냈고, YOLO-World에
+    `box`를 프롬프트로 넣어도 0.08이라 합의가 0건이었다 — 확정이 나오지 않는다.
+    같은 프레임에서 HSV 분할은 6/6, 영상 1798프레임에서 1798/1798을 잡았다.
+
+    **OVD를 대체하는 게 아니라 같은 슬롯에 꽂힌다.** `detect(bgr)`가 OVD와
+    똑같은 `{box, label, conf}` 목록을 돌려주므로 stage1·합의·추적·depth·말단
+    반영 경로가 전부 그대로 돈다. 되돌리는 것은 `ovd.provider` 한 줄이다.
+
+    conf는 **1.0 고정**이다. 색 임계는 확률 모델이 아니라 결정적 규칙이라
+    0.87 같은 값을 지어내면 그 숫자가 근거인 척하게 된다(AI-S-03). 대신
+    `area_px`를 함께 실어 판단 근거를 남긴다.
+
+    구멍(`hole_label`)은 볼록껍질 안에서 색이 아닌 최대 영역이다. U자 구조물의
+    통과 개구부가 여기 해당한다. 가려져 보이지 않으면 내지 않는다.
+    """
+
+    def __init__(self, cfg: dict):
+        c = dict(cfg.get("color_ovd") or {})
+        self._cfg = cfg
+        self.label = str(c.get("label", "object"))
+        self.hole_label = c.get("hole_label")            # None이면 구멍을 안 낸다
+        self.lo = np.array(c.get("hsv_lo", [95, 90, 40]), dtype=np.uint8)
+        self.hi = np.array(c.get("hsv_hi", [130, 255, 255]), dtype=np.uint8)
+        self.min_area = int(c.get("min_area_px", 5000))
+        self.hole_min_frac = float(c.get("hole_min_area_frac", 0.03))
+        self.max_objects = int(c.get("max_objects", 1))
+        self._k_close = np.ones((int(c.get("close_px", 9)),) * 2, np.uint8)
+        self._k_open = np.ones((int(c.get("open_px", 5)),) * 2, np.uint8)
+        self._k_hole = np.ones((int(c.get("hole_open_px", 15)),) * 2, np.uint8)
+        self.vocab = [self.label] + ([self.hole_label] if self.hole_label else [])
+
+    def available(self) -> bool:
+        return True
+
+    def detect(self, bgr) -> list[dict]:
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        m = cv2.inRange(hsv, self.lo, self.hi)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, self._k_close)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, self._k_open)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+        if n <= 1:
+            return []
+        order = np.argsort(-stats[1:, cv2.CC_STAT_AREA]) + 1
+        out: list[dict] = []
+        for i in order[: max(1, self.max_objects)]:
+            x, y, w, h, area = (int(v) for v in stats[i])
+            if area < self.min_area:
+                break
+            out.append({"box": [float(x), float(y), float(x + w), float(y + h)],
+                        "label": self.label, "conf": 1.0, "area_px": area,
+                        "source_kind": "color"})
+            if not self.hole_label:
+                continue
+            comp = (lab == i).astype(np.uint8)
+            cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+            hull = cv2.convexHull(max(cnts, key=cv2.contourArea))
+            hm = np.zeros_like(comp)
+            cv2.drawContours(hm, [hull], -1, 1, -1)
+            hole = ((hm == 1) & (comp == 0)).astype(np.uint8)
+            hole = cv2.morphologyEx(hole, cv2.MORPH_OPEN, self._k_hole)
+            hn, _, hs, _ = cv2.connectedComponentsWithStats(hole, 8)
+            if hn <= 1:
+                continue
+            j = 1 + int(np.argmax(hs[1:, cv2.CC_STAT_AREA]))
+            hx, hy, hw, hh, harea = (int(v) for v in hs[j])
+            # **가려지면 내지 않는다.** 기체가 뒤로 돌면 개구부가 막히는데,
+            # 그때 마지막 위치를 유지하면 없는 문을 있다고 말하는 셈이다.
+            if harea <= self.hole_min_frac * area:
+                continue
+            out.append({"box": [float(hx), float(hy), float(hx + hw), float(hy + hh)],
+                        "label": self.hole_label, "conf": 1.0, "area_px": harea,
+                        "source_kind": "color"})
+        return out
+
+
 class WorldOvd:
     """YOLO-World 텍스트 프롬프트 — 현장 어휘로 좁혀 보는 두 번째 눈.
 

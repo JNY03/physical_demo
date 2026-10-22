@@ -37,6 +37,8 @@
   "ovd": {
     "$comment": "stage1 — 동기. YOLOE prompt-free **한 종만** 쓴다(사용자 2026-09-21). 내장 어휘 4585종이라 텍스트 프롬프트가 필요 없고, 어휘를 사람이 정하지 않으므로 어휘 설계 실수가 미지 집합을 오염시키는 경로가 없다. YOLO-World 경로는 제거했다 — provider를 늘리는 것이 아니라 하나로 확정한 것이다(AI-B-09).",
     "enabled": true,
+    "provider": "color",
+    "$comment_provider": "**1차 검출기를 여기서 고른다.** 되돌리는 것도 이 한 줄이다.\n  \"yoloe\" — YOLOE prompt-free 4585종. 아래 weights/conf/iou/imgsz를 쓴다.\n  \"color\" — color_ovd 절의 HSV 규칙. 모델을 올리지 않는다.\n둘은 같은 detect() 규약(box/label/conf)을 지키므로 stage1 아래(합의·추적·depth·말단 반영·스트리밍)는 그대로 돈다.\n**color로 갈 때 함께 보는 것 둘**: ovd2.enabled를 false로(합의 상대가 될 어휘가 없다), object_tracks.confirm_groups를 1로. 기본 구성으로 되돌리려면 provider를 yoloe로, ovd2.enabled를 true로, confirm_groups를 2로 되돌린다.",
     "weights": "models/yoloe-11s-seg-pf.pt",
     "conf": 0.1,
     "iou": 0.5,
@@ -46,9 +48,25 @@
     "confident_conf": 0.35,
     "$comment_confident": "YOLOE 결과도 전부 확정으로 보지 않는다(사용자 2026-09-21). conf가 confident_conf 이상이면 confident — 말단 시점 반영까지 보낸다. 그 아래는 tentative — 근거로만 남기고 말단 레코드에는 올리지 않으며, 저장소와 오버레이에는 그대로 보여 가시화가 판단할 수 있게 한다(AI-S-03: 신뢰도와 근거 충분도는 별개, AI-S-04: 확정 label로 승격 금지). conf는 detect 임계(0.10)보다 높게 잡는다 — 0.10은 '후보로 볼 만한가', confident_conf는 '말단 상태를 바꿔도 되는가'로 목적이 다르다."
   },
+  "color_ovd": {
+    "$comment": "ovd.provider=\"color\"일 때 쓰는 검출 규칙. **모델이 없다** — HSV 임계와 연결성분·볼록껍질만 쓴다. 2026-09-29 실측에서 이 파란 U자 구조물을 YOLOE prompt-free는 diving board 0.79 / field 0.62로, YOLO-World에 box를 넣어도 0.08로 봐서 합의가 0건이었다(확정 없음). 같은 대상에 색 분할은 샘플 6/6, 60초 영상 1798/1798 프레임을 잡았다. 학습 어휘에 없는 고정 대상에는 이쪽이 맞다.",
+    "label": "tunnel",
+    "hole_label": "goal",
+    "$comment_hole": "볼록껍질 안에서 색이 아닌 최대 영역 = U자의 통과 개구부. null로 두면 구멍을 내지 않는다. 가려져 면적이 hole_min_area_frac 아래로 떨어지면 그 프레임에는 내지 않는다 — 마지막 위치를 유지하면 없는 문을 있다고 말하는 셈이다.",
+    "hsv_lo": [95, 90, 40],
+    "hsv_hi": [130, 255, 255],
+    "$comment_hsv": "파란 플라스틱 기준. 색상 95~130, 채도 90 이상으로 잔디·그늘과 갈린다. 대상 색이 바뀌면 여기만 고친다.",
+    "min_area_px": 5000,
+    "hole_min_area_frac": 0.03,
+    "max_objects": 1,
+    "close_px": 9,
+    "open_px": 5,
+    "hole_open_px": 15
+  },
   "ovd2": {
     "$comment": "두 번째 OVD — **현장 어휘(GT 텍스트)를 프롬프트로 넣는 눈**. 확정은 prompt-free(ovd)와 이쪽의 **합의**로 정한다(semantics.merge_by_consensus). 단일 모델의 conf는 그 모델의 확신일 뿐 근거 충분도가 아니고(AI-S-03), 실측에서 YOLOE는 0.94/0.87처럼 높은 conf로 틀렸으므로 임계로는 거를 수 없었다. 서로 다른 어휘·학습·구조를 가진 두 모델이 같은 자리에서 같은 것을 말하면 그것은 질이 다른 근거다. 어휘가 비면 이 눈은 쉬고 단일 conf 임계로 축소된다(AI-C-05).",
-    "enabled": true,
+    "enabled": false,
+    "$comment_gate": "**ovd.provider=color 동안은 꺼 둔다**(2026-09-30) — 색 검출기가 내는 tunnel/goal은 YOLO-World 어휘에 없어 합의 상대가 없고, 켜 두면 합의 0건이 되어 확정이 사라진다. provider를 yoloe로 되돌릴 때 이 값을 true로, confirm_groups를 2로 함께 되돌린다.\n[이전 구성 참고] **이 눈이 확정의 문지기다**(2026-09-29). clip.active_domain=box_only와 object_tracks.confirm_groups=2를 함께 쓰면, ovd2가 아는 개념(box)에서만 합의가 성립하므로 **box만 확정된다**. YOLOE가 내는 나머지 4584종은 전부 tentative로 남아 말단에 가지 않는다 — 검출을 줄이는 게 아니라 확정을 좁히는 것이라, 저장소와 오버레이에는 그대로 남아 가시화가 판단할 수 있다.\n셋은 한 묶음이다. enabled를 끄면 confirm_groups를 1로 내려야 하고(안 그러면 장애물 0개, 2026-09-21에 겪었다), 어휘를 넓히면 그만큼 확정 대상도 넓어진다.",
     "weights": "models/yolov8s-worldv2.pt",
     "conf": 0.05,
     "iou": 0.5,
@@ -61,6 +79,11 @@
     },
     "vocabularies": {
       "$comment": "도메인별 OVD 텍스트 어휘. 비우거나 없으면 prompt-free(내장 4585종). prompt-free는 미지 집합을 깨끗하게 만들지만 이름 자체를 믿을 수 없다 — 2026-09-21 실내 실측에서 모니터를 computer chair, 벽면을 press room으로 불렀다. 어휘를 바꾸면 임계와 품질은 재측정 대상이다(AI-B-01).",
+      "$comment_box_only": "box 한 종만 두는 어휘. 합의는 머리 명사로 판정하므로(semantics.concept_key) 이 두 줄이 YOLOE의 box·cardboard box·storage box·shoe box 등 13종과 모두 맞는다. synonyms는 쓰지 않는다 — 부분 목록을 만들면 목록에 없는 변형이 syn: 키를 못 받아 오히려 합의에서 빠진다. carton·crate·package·container·bin은 머리 명사가 달라 합의되지 않는다(의도한 것이다. box만 확정한다).",
+      "box_only": [
+        "cardboard box",
+        "box"
+      ],
       "generic": [
         "office chair",
         "backpack",
@@ -224,7 +247,7 @@
     "$comment_backend": "backend: 'torch'(기본, CUDA fp16) | 'onnx'(quantized, CPU). 2026-09-21 벤치(bench_clip.py, crop 60장): int8 ONNX CPU 823ms / int8 ONNX CUDA 969ms / fp32 ONNX CUDA 81ms / **torch fp16 CUDA 34.6ms**. 기준선 대비 24배다. quantized 그래프는 CUDA EP에 연산이 없어 memcpy로 CPU↔GPU를 오가므로 GPU로 갈 수 없다 — 양자화는 CPU 전용 최적화다. 작은 모델이 답도 아니다: MobileCLIP2-S0는 파라미터 7.7배 적은데 GPU에서 2.8배 느리다(96.3ms). GPU가 없는 호스트에서는 device가 cpu로 내려간다(AI-C-05).",
     "use_target_sim_threshold": true,
     "default_target_sim": 0.22,
-    "active_domain": "generic",
+    "active_domain": "box_only",
     "domains": {
       "urban": {
         "dictionary": "class_features.urban.json",
@@ -331,8 +354,8 @@
     "geometry_alpha": 0.5,
     "$comment_alpha": "해소된 기하를 레코드에 반영하는 평활 계수. 기하는 가용 박스의 confidence 가중 평균이라 한 모델이 한 관측에서 빠지면 값이 확 옮겨가고, 그러면 관측 간 매칭(track_iou)이 끊겨 새 객체가 생기며 누적 지지가 리셋된다(실측: 확정 객체 수 중앙 0).",
     "$comment_init": "새 객체 초기화 최소 confidence. 논문은 0.30이지만 그 값은 그쪽 검출기 분포 기준이다 — 이 구성(YOLOE prompt-free + YOLO-World 텍스트) 실측에서 검출 196건의 p50이 0.156, p75가 0.316이라 0.30은 74%를 잘라내 클러스터 11개 중 8개가 객체가 되지 못했다. 다른 구성의 임계를 그대로 옮기지 않는다(AI-B-01).",
-    "confirm_groups": 2,
-    "$comment_confirm": "확정에 필요한 소스 그룹 수. **2 = 두 모델 합의.** OVD를 하나만 켜면 어떤 객체도 확정되지 않아 장애물이 0개가 된다(2026-09-21에 겪었다) — 그때는 1로 내리거나 config에서 지워 켜진 OVD 수를 따르게 한다.",
+    "confirm_groups": 1,
+    "$comment_confirm": "확정에 필요한 소스 그룹 수. 2 = 두 모델 합의, 1 = 단일 소스. **ovd.provider=color 동안은 1이다**(2026-09-30) — 소스가 색 검출기 하나뿐인데 2를 요구하면 어떤 객체도 확정되지 않아 장애물이 0개가 된다(2026-09-21에 겪었다). provider를 yoloe로 되돌릴 때 2로 함께 되돌린다.\n[이전 설명] 2 = 두 모델 합의, 1 = 단일 모델. **2로 되돌렸다**(2026-09-29) — ovd2를 box_only 어휘로 다시 켜서 box만 확정되게 하는 구성이라, 여기가 1이면 YOLOE 단독 검출까지 전부 확정돼 문지기가 무의미해진다. OVD를 하나만 켜면서 2를 두면 반대로 어떤 객체도 확정되지 않아 장애물이 0개가 된다(2026-09-21에 겪었다). 아예 지우면 켜진 OVD 수를 따라간다(server.py 기동부).",
     "expose_alpha": 0.4,
     "expose_snap_px": 24.0,
     "$comment_smooth": "노출 박스 평활화. 실측 떨림이 중앙 0~5px, 최대 10.8px인데 그대로 그리면 정지 장면에서도 박스가 떤다. 변화가 expose_snap_px를 넘으면 계수가 1이 되어 **실제 이동은 지연 없이** 따라간다 — 움직일 때 박스가 뒤처지면 이 파이프라인의 목적이 무너진다. alpha=1이면 평활 없음."
@@ -385,6 +408,14 @@
     "$comment_faint": "확정(초록)이 아닌 것 — 근거 없는 RPN 후보, 잠정 OVD, CLIP 배경 — 을 그리는 층의 불투명도. 지우지 않고 뒤로 물린다: 지우면 RPN이 무엇을 덮고 있는지 볼 수 없고, 같은 세기로 그리면 확정값을 가린다.",
     "jpeg_quality": 70,
     "scale": 1.0,
+    "show_conf": false,
+    "show_age": false,
+    "$comment_label": "라이브 오버레이 라벨에 conf와 나이를 찍을지. **둘 다 껐다**(2026-09-30) — ovd.provider=color의 conf는 결정적 규칙이라 늘 1.00이고, 그 숫자가 근거인 척 자리만 차지한다. 나이도 같은 이유로 뺐다. 라벨이 `tunnel 1.00 (0.4s) 13.8m`에서 `tunnel 13.8m`로 줄어 클래스와 거리만 읽힌다.\nprovider를 yoloe로 되돌릴 때는 **둘 다 true로 되돌린다** — 확률 검출기에서는 conf와 나이가 판단 근거다(낮은 conf인지, 몇 초 낡은 판정인지가 화면에서 보여야 한다, AI-S-03).",
+    "class_colors": {
+      "$comment": "클래스별 박스 색(BGR). 있으면 품질색(초록/노랑)보다 이것이 이긴다 — 클래스가 몇 개뿐인 구성에서는 '얼마나 믿을 만한가'보다 '무엇인가'가 먼저 읽혀야 한다. 비워 두면 예전처럼 품질색으로 돌아간다.",
+      "tunnel": [255, 176, 48],
+      "goal": [40, 40, 255]
+    },
     "draw_min_conf": 0.35,
     "draw_max_obstacles": 8,
     "$comment_draw": "**그리기 상한.** 실측에서 장애물 22개가 한 번에 떠 라벨이 서로를 덮었다(2026-09-21 사무실 장면). 전송과 저장은 그대로 두고 그리기만 줄인다 — 데이터를 버리는 것이 아니라 볼 수 있게 하는 것이고, 가려진 수는 머리글에 '+N hidden'으로 드러난다. 거리가 붙은 것과 conf 높은 것이 먼저 자리를 가져간다.",

@@ -46,8 +46,8 @@ import requests
 from edge_rpn import Rpn as EdgeRpn
 from missed import (MissedTracker, crop_of, find_missed,
                     geometric_verdict, suspect_classes)
-from models import (AerialDepth, ClipScorer, TorchClipScorer, WorldOvd,
-                    YoloeOvd, ZipDepth, class_prior_range, resolve)
+from models import (AerialDepth, ClipScorer, ColorShapeOvd, TorchClipScorer,
+                    WorldOvd, YoloeOvd, ZipDepth, class_prior_range, resolve)
 from semantics import (FeatureDictionary, LlmFeatureGenerator, Ollama,
                        ObjectTracks, VlmDescriber, absorb, concept_key,
                        expand_box, iou, merge_by_consensus, merge_overlapping)
@@ -133,17 +133,26 @@ def reflected_overlay(bgr, meta: dict):
 
         # 정렬 품질이 낮으면 선을 얇게 — 박스가 어디 있는지 덜 믿는다는 표시다.
         q = float(o.get("quality", 1.0))
-        color = GREEN if q >= 0.6 else YELLOW
+        # 클래스별 색이 설정에 있으면 그것이 이긴다. 클래스가 몇 개뿐인 구성
+        # (color provider)에서는 품질색보다 **무엇인지**가 먼저 읽혀야 한다.
+        cc = (scfg.get("class_colors") or {}).get(str(lab))
+        color = tuple(int(v) for v in cc) if cc else (GREEN if q >= 0.6 else YELLOW)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2 if q >= 0.6 else 1)
         if lab:
             n_lab += 1
 
         bits = []
         if lab:
+            # conf와 나이는 **끌 수 있다**(stream.show_conf / show_age).
+            # 결정적 검출기(color provider)의 conf는 늘 1.00이라 정보가 없고,
+            # 클래스와 거리만 읽으면 되는 화면에서는 자리만 차지한다. 기본은
+            # 켬이다 — 확률 검출기에서는 그 두 값이 판단 근거이기 때문이다.
             conf = o.get("conf")
-            bits.append(f"{lab}" + (f" {conf:.2f}" if isinstance(conf, (int, float)) else ""))
+            show_c = bool(scfg.get("show_conf", True)) and isinstance(conf, (int, float))
+            bits.append(f"{lab}" + (f" {conf:.2f}" if show_c else ""))
             age = o.get("age_s")
-            if isinstance(age, (int, float)) and age >= 0.1:
+            if (bool(scfg.get("show_age", True))
+                    and isinstance(age, (int, float)) and age >= 0.1):
                 bits.append(f"({age:.1f}s)")
         if rng.get("meters") is not None:
             n_rng += 1
@@ -2093,10 +2102,21 @@ def build_state(cfg: dict) -> None:
         maxsize=int(cfg.get("server", {}).get("async_queue", 4)))
     STATE["started_at"] = time.time()
 
+    # 1차 검출기는 **설정으로 고른다**(ovd.provider). 둘 다 같은 detect() 규약을
+    # 지키므로 stage1 아래(합의·추적·depth·말단 반영)는 손대지 않는다.
+    #   yoloe  프롬프트 없는 4585종 — 무엇이든 이름은 붙지만 커스텀 물체엔 틀린다
+    #   color  HSV 임계 — 이름을 우리가 정한다. 그 색의 그 물체만 본다
     if cfg.get("ovd", {}).get("enabled", True):
+        provider = str(cfg.get("ovd", {}).get("provider", "yoloe")).lower()
         try:
-            STATE["ovd"] = YoloeOvd(cfg)
-            print(f"OVD 로드됨 — YOLOE prompt-free, 내장 어휘 {len(STATE['ovd'].vocab)}종")
+            if provider == "color":
+                STATE["ovd"] = ColorShapeOvd(cfg)
+                print("OVD 로드됨 — 색 분할(color), 클래스 "
+                      f"{STATE['ovd'].vocab} (모델 없음)")
+            else:
+                STATE["ovd"] = YoloeOvd(cfg)
+                print("OVD 로드됨 — YOLOE prompt-free, 내장 어휘 "
+                      f"{len(STATE['ovd'].vocab)}종")
         except Exception as exc:
             STATE["ovd"], STATE["ovd_error"] = None, repr(exc)[:200]
             print(f"OVD 없음 → 해당 단계만 비활성: {STATE['ovd_error']}")
