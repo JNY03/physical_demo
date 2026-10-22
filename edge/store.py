@@ -216,10 +216,32 @@ class Rotation:
                 out[name] = {"removed": n, "freed_mb": round(freed / 1048576, 1)}
                 self.removed_total += n
                 self.freed_total += freed
+        # 가지치기는 어차피 디렉터리를 다 훑었다. 그 김에 사용량 캐시를 채워
+        # 두면 헬스가 비싼 스캔을 직접 할 일이 없다.
+        self._usage_cache = (now, self._scan_usage())
         return out
 
-    def usage(self) -> dict:
-        """디렉터리별 현재 사용량. 상한이 실제로 무엇을 막고 있는지 헬스에 드러낸다."""
+    def usage(self, *, max_age_s: float = 60.0) -> dict:
+        """디렉터리별 현재 사용량. 상한이 실제로 무엇을 막고 있는지 헬스에 드러낸다.
+
+        **캐시한다.** 이 계산은 디렉터리의 모든 항목을 stat 하므로 파일이 쌓이면
+        선형으로 느려진다 — 2026-10-22 실측으로 records 19,989개에 8.9초가
+        걸렸고(9p 마운트), 그동안 `/api/health` 가 통째로 멈춰 있었다. 헬스가
+        멈추면 감시가 눈을 감는다. 같은 값을 쓰는 가지치기가 이미 주기적으로
+        돌므로 그쪽이 채운 값을 재사용하고, 오래되면 그때만 다시 센다.
+
+        신선도를 숨기지 않는다 — 결과에 `_age_s` 를 함께 낸다(AI-S-03).
+        """
+        now = time.time()
+        cached = getattr(self, "_usage_cache", None)
+        if cached and now - cached[0] <= max_age_s:
+            return {**cached[1], "_age_s": round(now - cached[0], 1)}
+        out = self._scan_usage()
+        self._usage_cache = (now, out)
+        return {**out, "_age_s": 0.0}
+
+    def _scan_usage(self) -> dict:
+        """실제 스캔. 비싸다 — usage() 의 캐시를 거쳐서만 부른다."""
         out = {}
         for name in set(self.file_caps) | set(self.byte_caps):
             d = self.root / name

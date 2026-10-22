@@ -51,7 +51,7 @@ import time
 import paho.mqtt.client as mqtt
 
 from common import config
-from robot.controller_link import ControllerLink, RobotState
+from robot.controller_link import ControllerLink, DriveError, RobotState
 
 # --- robot/state 레이아웃 상수 (위 표 참조) ---
 # ⚠ 전부 **바이트 오프셋**이다. int16 인덱스와 헷갈리면 값이 조용히 깨진다
@@ -83,7 +83,12 @@ CELL_MIN_MV = 1000
 
 
 class Go1Link(ControllerLink):
-    """Go1 내부 MQTT 를 구독해 상태만 읽는다. 명령은 보내지 않는다."""
+    """Go1 내부 MQTT 를 구독해 상태만 읽는다. 명령은 보내지 않는다.
+
+    구동 수명주기(`drive_up`/`drive_down`/`drive_probe`)는 `sdk_control` 이 맡는다
+    — `go1-sdk` systemd 유닛을 올리고 내리는 일이라 **Go1 에만 있는 개념**이다.
+    상위(robot_node·명령 어휘)는 그 이름을 몰라야 하므로 여기서만 안다.
+    """
 
     def __init__(self, host=None, port=1883):
         self.host = host or config.GO1_MQTT_HOST
@@ -288,3 +293,26 @@ class Go1Link(ControllerLink):
         # 전부 0 인 프레임은 측정값이 아니다 — 판정은 _bms_detail 안에 한 번만 둔다.
         d["battery"] = self._bms_detail(bms)
         return d
+
+    # ── 구동 수명주기 — Go1 전용 go1-sdk 브리지 ─────────────────────────────
+    # 이 세 메서드가 `sdk_control` 을 아는 **유일한 자리**다. 상위는 중립 어휘
+    # (drive_start/drive_stop)만 쓰고 `sdk_*` 라는 이름을 모른다.
+    def drive_up(self):
+        from robot import sdk_control
+        try:
+            info = sdk_control.start()
+        except sdk_control.SdkControlError as e:
+            raise DriveError(str(e)) from e
+        return {**info, "supported": True}
+
+    def drive_down(self):
+        from robot import sdk_control
+        try:
+            info = sdk_control.stop()
+        except sdk_control.SdkControlError as e:
+            raise DriveError(str(e)) from e
+        return {**info, "supported": True}
+
+    def drive_probe(self):
+        from robot import sdk_control
+        return sdk_control.probe()

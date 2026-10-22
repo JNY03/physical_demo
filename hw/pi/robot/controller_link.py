@@ -85,6 +85,14 @@ class RobotState:
         return asdict(self)
 
 
+class DriveError(RuntimeError):
+    """구동을 올리거나 내리지 못했다. 기종별 사유를 그대로 담아 올린다.
+
+    기종 고유 예외(Go1 의 SdkControlError 등)를 상위가 알면 거기서부터 결합이
+    생긴다. 링크가 이 하나로 바꿔 던지고, 상위는 사유 문자열만 본다.
+    """
+
+
 class ControllerLink(ABC):
     """구현체는 이 셋만 채우면 된다."""
 
@@ -100,6 +108,35 @@ class ControllerLink(ABC):
     @abstractmethod
     def link_health(self) -> str:
         """ok | degraded | fault — 내부 링크 자체의 건강 상태."""
+
+    # ── 구동 수명주기 ────────────────────────────────────────────────────────
+    # **기종 이름이 규약에 새지 않게 하는 자리다.** 예전에는 robot_node 가
+    # `sdk_control`(Go1 의 go1-sdk systemd 유닛)을 직접 불렀고, 그래서 명령
+    # 어휘에 `sdk_start`/`sdk_stop`/`sdk_auto` 라는 Unitree SDK 수명주기가
+    # 그대로 드러났다. EP 로 갈아타면 그 이름은 거짓이 된다.
+    #
+    # 기본 구현은 **아무것도 하지 않고 "해당 없음"을 말한다**. 구동 브리지를
+    # 따로 올려야 하는 기종만 덮어쓰면 되고, 그렇지 않은 기종(SimLink·EpLink)
+    # 은 손대지 않아도 그대로 돈다 — 모르면 0 이 아니라 '해당 없음'이다.
+    def drive_up(self) -> dict:
+        """구동을 쓸 수 있는 상태로 만든다. 멱등이다(이미 떠 있으면 그대로).
+
+        Returns: {"already": bool, "waited_s": float, "supported": bool}
+        """
+        return {"already": True, "waited_s": 0.0, "supported": False}
+
+    def drive_down(self) -> dict:
+        """구동을 내린다. 내리기 전에 움직임을 먼저 멈추는 책임은 구현체에 있다."""
+        return {"already": True, "waited_s": 0.0, "supported": False}
+
+    def drive_probe(self) -> tuple[bool, bool]:
+        """(올라와 있나, 명령을 받을 준비가 됐나).
+
+        둘을 나누는 이유: 브리지가 떴다고 바로 쓸 수 있는 게 아니다. 기종에 따라
+        상태 보고가 올라오기까지 시간이 걸리고, 그 전에 명령을 걸면 열린 루프가
+        된다. 구동 분리가 없는 기종은 (True, True) 로 답한다.
+        """
+        return True, True
 
 
 class SimLink(ControllerLink):

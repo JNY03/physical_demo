@@ -37,7 +37,8 @@ from common.physical_command import CommandError
 from common.node import BaseNode
 from common.schema import envelope
 from common.spool import CONTINUOUS, EVENT
-from robot import controller_link, go1_mission, go1_teleop, media, twin_relay_out, sdk_control
+from robot import controller_link, go1_mission, go1_teleop, media, twin_relay_out
+from robot.controller_link import DriveError
 
 
 def _iso_at(unix_ts):
@@ -546,7 +547,7 @@ class RobotNode(BaseNode):
         ⚠ 브리지가 기동하면 로봇이 **일어선다.** 그래서 조용히 하지 않고
         sdk_starting 단계를 내보내 관제 화면에 드러낸다 — 사람이 보고 있어야 하는
         동작을 화면이 알려주지 않는 것이 가장 나쁘다."""
-        up, ready = sdk_control.probe()
+        up, ready = self.link.drive_probe()
         if up and ready:
             return
         if not self.sdk_autostart:
@@ -556,10 +557,10 @@ class RobotNode(BaseNode):
                           "note": "브리지 기동 — 로봇이 일어선다"},
                          ensure_ascii=False), None
         try:
-            info = sdk_control.start()
-        except sdk_control.SdkControlError as e:
+            info = self.link.drive_up()
+        except DriveError as e:
             raise CommandError("FAILED_PRECONDITION", str(e))
-        yield json.dumps({"event": "sdk_ready", "waited_s": info["waited_s"]},
+        yield json.dumps({"event": "sdk_ready", "waited_s": info.get("waited_s", 0.0)},
                          ensure_ascii=False), None
 
     # ================= 공통 코어 훅 =================
@@ -1077,10 +1078,10 @@ class RobotNode(BaseNode):
 
         def run():
             try:
-                info = sdk_control.start()
-                print(f"[텔레옵] 브리지 준비 ({info['waited_s']}s)")
-            except sdk_control.SdkControlError as e:
-                print(f"[텔레옵] 브리지 기동 실패: {e}")
+                info = self.link.drive_up()
+                print(f"[텔레옵] 구동 준비 ({info.get('waited_s', 0)}s)")
+            except DriveError as e:
+                print(f"[텔레옵] 구동 기동 실패: {e}")
                 self.teleop.stop("sdk_start_failed")
             finally:
                 self.sdk_starting = False
@@ -1151,43 +1152,50 @@ class RobotNode(BaseNode):
             result["yaw_deg"] = float(yaw_end)
         yield "completed", result
 
-    def _act_sdk_start(self, params):
-        """구동 브리지를 띄운다 (HW-R-06). **로봇이 일어선다.**
+    def _act_drive_start(self, params):
+        """구동을 쓸 수 있게 만든다 (HW-R-06). **기종에 따라 로봇이 일어선다.**
 
         평시에는 내려 두는 것이 기본이다 — 아무도 없는 자리에서 로봇이 일어서지
         않게 하려는 것이다. 관제가 임무 전에 미리 준비시키고 싶을 때 쓴다.
-        이동 명령은 필요하면 스스로 띄우므로(sdk_auto) 이 명령이 필수는 아니다."""
+        이동 명령은 필요하면 스스로 올리므로(drive_auto) 이 명령이 필수는 아니다.
+
+        **기종 이름을 규약에 쓰지 않는다.** 예전 이름 `sdk_start` 는 Go1 의
+        go1-sdk 유닛을 가리켰고, EP 로 갈아타면 거짓이 되는 이름이었다. 무엇을
+        올릴지는 링크 구현이 안다(controller_link.drive_up). 구동 분리가 없는
+        기종은 supported=0 으로 답하고 아무것도 하지 않는다."""
         yield "executing", None
-        yield json.dumps({"event": "sdk_starting",
-                          "note": "브리지 기동 — 로봇이 일어선다"},
+        yield json.dumps({"event": "drive_starting",
+                          "note": "구동 기동 — 기종에 따라 로봇이 일어선다"},
                          ensure_ascii=False), None
         try:
-            info = sdk_control.start()
-        except sdk_control.SdkControlError as e:
+            info = self.link.drive_up()
+        except DriveError as e:
             raise CommandError("FAILED_PRECONDITION", str(e))
-        yield "completed", {"already_up": 1.0 if info["already"] else 0.0,
-                            "waited_s": info["waited_s"]}
+        yield "completed", {"already_up": 1.0 if info.get("already") else 0.0,
+                            "waited_s": info.get("waited_s", 0.0),
+                            "supported": 1.0 if info.get("supported") else 0.0}
 
-    def _act_sdk_stop(self, params):
-        """구동 브리지를 내린다 (HW-R-06).
+    def _act_drive_stop(self, params):
+        """구동을 내린다 (HW-R-06).
 
-        내리기 전에 구동을 먼저 멈춘다 — 프로세스만 죽이면 마지막 속도 명령이 로봇에
-        남을 수 있다. 로봇은 **선 채로** 남는다(sport mode 가 자세를 유지하므로
-        주저앉지 않는다). 눕히려면 리모컨을 쓴다."""
+        내리기 전에 움직임을 먼저 멈추는 책임은 링크 구현에 있다 — 프로세스만
+        죽이면 마지막 속도 명령이 로봇에 남을 수 있다. Go1 은 **선 채로** 남는다
+        (sport mode 가 자세를 유지하므로 주저앉지 않는다). 눕히려면 리모컨을 쓴다."""
         if self.in_mission():
             raise CommandError("FAILED_PRECONDITION", "mission_in_progress")
         yield "executing", None
         try:
-            info = sdk_control.stop()
-        except sdk_control.SdkControlError as e:
+            info = self.link.drive_down()
+        except DriveError as e:
             raise CommandError("INTERNAL", str(e))
-        yield "completed", {"was_up": 0.0 if info["already"] else 1.0}
+        yield "completed", {"was_up": 0.0 if info.get("already") else 1.0,
+                            "supported": 1.0 if info.get("supported") else 0.0}
 
-    def _act_sdk_auto(self, params):
-        """이동 명령이 왔을 때 브리지를 자동으로 띄울지 켜고 끈다 (on=1|0).
+    def _act_drive_auto(self, params):
+        """이동 명령이 왔을 때 구동을 자동으로 올릴지 켜고 끈다 (on=1|0).
 
-        끄면 브리지가 없을 때 이동 명령이 go1_sdk_not_running 으로 거부된다 —
-        "로봇이 스스로 일어서는 일이 절대 없게" 하고 싶은 현장에서 쓴다."""
+        끄면 구동이 없을 때 이동 명령이 거부된다 — "로봇이 스스로 일어서는 일이
+        절대 없게" 하고 싶은 현장에서 쓴다."""
         on = bool(float(params.get("on", 1.0)))
         self.sdk_autostart = on
         yield "completed", {"autostart": 1.0 if on else 0.0}
@@ -1316,9 +1324,16 @@ class RobotNode(BaseNode):
         "move_forward": _act_move_forward,
         "turn": _act_turn,
         "move_relative": _act_move_relative,
-        "sdk_start": _act_sdk_start,
-        "sdk_stop": _act_sdk_stop,
-        "sdk_auto": _act_sdk_auto,
+        # 구동 수명주기 — **중립 이름이 정본이다.** 무엇을 올릴지는 링크가 안다.
+        "drive_start": _act_drive_start,
+        "drive_stop": _act_drive_stop,
+        "drive_auto": _act_drive_auto,
+        # 별칭(하위 호환). 기존 관제 웹과 bench 스크립트가 sdk_* 를 쓰고 있어
+        # 같은 핸들러를 가리키게 남긴다. 새 코드는 drive_* 를 쓴다 —
+        # sdk_* 는 Go1 의 go1-sdk 유닛 이름이라 다른 기종에서는 거짓이 된다.
+        "sdk_start": _act_drive_start,
+        "sdk_stop": _act_drive_stop,
+        "sdk_auto": _act_drive_auto,
         "abort": _act_abort,
         "stream": _act_stream,
         # 회신 §8-11 — 규약 경로용. "stream" 은 레거시 JSON cmd 경로 때문에 남긴다.
@@ -1328,8 +1343,11 @@ class RobotNode(BaseNode):
     # 스트림 어휘 — 규약 서버가 건마다 스레드·Result 없이 처리한다(physical_command 참조).
     STREAM_ACTIONS = {"teleop": _teleop_stream}
     # sdk_start 는 로봇을 일으켜 세운다 — 화면상의 설정 변경이 아니라 물리 동작이다.
+    # drive_start 는 구동을 올린다 — 기종에 따라 로봇이 일어선다. 화면상의 설정
+    # 변경이 아니라 물리 동작이므로 여기 든다. 별칭 sdk_start 도 같이 든다.
     PHYSICAL_ACTIONS = frozenset({"assign_mission", "abort_mission", "stream",
-                                  "stream_start", "stream_stop", "sdk_start"})
+                                  "stream_start", "stream_stop",
+                                  "drive_start", "sdk_start"})
 
 
 if __name__ == "__main__":
