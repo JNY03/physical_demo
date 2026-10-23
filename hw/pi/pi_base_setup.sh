@@ -6,7 +6,7 @@
 # 사용:
 #   ./pi_base_setup.sh --entity wl-001 --node pi7 --zone zoneA --role sensor
 #   ./pi_base_setup.sh --entity rb-01  --node pi8 --zone zoneA --role robot \
-#                      --ntp 192.168.50.10 --broker 192.168.50.10
+#                      --ntp <NTP 주소> --broker <브로커 주소>
 #
 # 옵션
 #   --entity   Entity 식별자(장치 ID). type-serial 형식. 채번 대장에서 받아온다 (HW-C-07)

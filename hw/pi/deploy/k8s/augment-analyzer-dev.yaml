@@ -50,7 +50,7 @@ spec:
               exec python3 -u -m augment.analyzer   # -u: 로그가 즉시 보이도록
           env:
             - name: HW_BROKER_HOST
-              value: "192.168.50.244"
+              value: "CHANGE-ME"
             - name: HW_ZONE_ID
               value: "zoneA"
             - name: HW_NODE_ID

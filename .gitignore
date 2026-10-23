@@ -53,3 +53,8 @@ pi7_go1-*.json
 hw_backup_*/                 # 구 버전 hw 백업
 hw_pi_backup_*/
 etc-config-backup-*          # 장치 고유 설정 백업
+
+# 시연 오버레이·중간 산출물 이미지 — 결과물이라 저장소에 남길 것이 아니다
+*_overlay.png
+*_overlay.jpg
+_frames/

@@ -15,7 +15,7 @@ User=physical
 WorkingDirectory=/home/physical/hw/pi
 StandardInput=null
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -m robot.go1_detect_forward --unity-ip 192.168.50.244 --hz 10
+ExecStart=/usr/bin/python3 -m robot.go1_detect_forward --unity-ip CHANGE-ME --hz 10
 Restart=always
 RestartSec=3
 

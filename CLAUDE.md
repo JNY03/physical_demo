@@ -38,7 +38,7 @@ python3 detect_api_server.py --port 8000   # 관제 웹용 HTTP 창구(별도 �
 코드는 `demo/test/`에 있고, 역할 경계가 “실제 하드웨어/가시화 파트와 통합할 때 갈아끼울 지점”에 맞춰져 있다. 파이프라인 본체 2개(`class_finder_service`/`navigate_to_target_service`)는 **입력원과 출력창구가 바뀌어도 건드리지 않는다** — 그래서 진입점이 둘(mock/mqtt), 창구가 하나(api server) 붙어 있다.
 
 ### 1. `mock_stream_receiver.py` / `mqtt_stream_receiver.py` — 교체 가능한 입력 경계
-둘은 **입력원만 다르고 오케스트레이션이 같다**(명령/스캔 → 8프레임 → 위치추정 → 관측요약 → 경로). mock은 `datasets/`를 재생하고, mqtt는 로봇(`ws://pi7.tailcb6bfb.ts.net:9001/mqtt`)에서 받는다. 메시지 타입(`ClassDiscoveryCommand`/`FrameMessage`/`GoToClassCommand`)과 서비스 함수 시그니처를 미리 맞춰 둔 덕분에 서비스 쪽은 그대로다. 8프레임의 회전각(0/45/…/315)은 mock의 `ROTATION_FRAMES` 한 곳에만 두고 다른 모듈은 메시지로 받아 쓴다 — 각도를 다른 곳에 다시 적지 말 것.
+둘은 **입력원만 다르고 오케스트레이션이 같다**(명령/스캔 → 8프레임 → 위치추정 → 관측요약 → 경로). mock은 `datasets/`를 재생하고, mqtt는 로봇(`ws://pi7.<MagicDNS 이름>:9001/mqtt`)에서 받는다. 메시지 타입(`ClassDiscoveryCommand`/`FrameMessage`/`GoToClassCommand`)과 서비스 함수 시그니처를 미리 맞춰 둔 덕분에 서비스 쪽은 그대로다. 8프레임의 회전각(0/45/…/315)은 mock의 `ROTATION_FRAMES` 한 곳에만 두고 다른 모듈은 메시지로 받아 쓴다 — 각도를 다른 곳에 다시 적지 말 것.
 
 mqtt 쪽만의 전제 셋 — 규약의 authoritative 출처는 로봇 쪽에서 받은 `detection-protocol_0914.md`다:
 - **관제 웹은 명령을 보내지 않는다**(연동 스키마 §1: GET only). 그래서 go-to-class 명령을 기다리지 않고 판이 정상 종료되면 경로 산출까지 자동으로 끝낸다.

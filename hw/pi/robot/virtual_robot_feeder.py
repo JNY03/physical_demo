@@ -62,7 +62,7 @@ class VirtualRobot:
 def main():
     ap = argparse.ArgumentParser(description="가상 로봇 -> 온보딩 파이 릴레이 송출")
     ap.add_argument("--relay", required=True,
-                    help="릴레이 주소. 예: 192.168.50.172 또는 192.168.50.172:15200")
+                    help="릴레이 주소. 예: <릴레이 주소> 또는 <릴레이 주소>:15200")
     ap.add_argument("--type", default="go1",
                     help="로봇 기종. go1 / robomaster_ep 등")
     ap.add_argument("--count", type=int, default=1, help="가상 로봇 대수")

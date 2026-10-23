@@ -11,7 +11,7 @@ go1_sdk_pc 의 send_unity_state 와 **완전히 같은 형식**으로 "움직이
     seq tms world_x world_z yaw(rad) vx vy wz estop mode
 
 사용:
-    HW_UNITY_IP=192.168.50.244 python3 -m bench.unity_state_test [초]
+    HW_UNITY_IP=<Unity PC 주소> python3 -m bench.unity_state_test [초]
 """
 import math
 import os
@@ -19,7 +19,7 @@ import socket
 import sys
 import time
 
-UNITY_IP = os.environ.get("HW_UNITY_IP", "192.168.50.244")
+UNITY_IP = os.environ.get("HW_UNITY_IP", "127.0.0.1")   # 현장 주소는 env 로 준다
 STATE_PORT = int(os.environ.get("HW_UNITY_STATE_PORT", 15101))
 MODE = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].replace(".","").isdigit() else "circle"
 DUR = float(sys.argv[2]) if len(sys.argv) > 2 else (float(sys.argv[1]) if len(sys.argv)>1 and sys.argv[1].replace(".","").isdigit() else 60.0)

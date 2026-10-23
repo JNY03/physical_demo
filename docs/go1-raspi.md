@@ -20,7 +20,7 @@ Go1 로봇 등에 올라가는 라즈베리파이(현재 `pi7`)의 **홈 디렉�
 | 경로 | 저장소에 포함 | 얻는 방법 |
 |---|---|---|
 | `README.md`, `.gitignore`, `requirements.txt` | ✅ | 이 브랜치 |
-| `fix_broker_host.sh`, 작업 메모 `*.md` 3개 | ✅ | 이 브랜치 |
+| 작업 메모 `*.md` | ✅ | `docs/history/` |
 | `hw/` (노드 코드 본체·유닛 파일·문서) | ✅ | 이 브랜치 (2절) |
 | `unitree_legged_sdk/` | ❌ | upstream 클론 (3절) |
 | `go1sdk/` (`go1_sdk_pc` 등 실행 파일) | ❌ | `hw/pi/robot/*.cpp` 를 빌드 (4절) |
@@ -111,7 +111,7 @@ ls -l ~/go1sdk
 | MQTT 브로커 | `pi7` 자체 (`127.0.0.1`) | **`pi8` 자체 (`127.0.0.1`)** | 5-1 절 |
 | MQTT 개체 ID (`HW_ENTITY_ID`) | `go1-001` | `go1-002` | `/etc/hw-robot.env` |
 | Unity/릴레이 로봇 ID (`--robot_id`) | `go1-1` | `go1-2` | `go1-sdk`, `robot-relay` 유닛 |
-| Unity 호스트 PC (`--unity_ip`) | `192.168.50.244` | 같은 PC (변경 없음) | — |
+| Unity 호스트 PC (`--unity_ip`) | `<브로커 주소>` | 같은 PC (변경 없음) | — |
 | Go1 내부망에서 Pi 주소 | `192.168.123.x` | 같아도 됨 (로봇마다 별도 망) | `pi_base_setup.sh --go1` |
 
 > Go1 쪽 주소(`192.168.123.161`, `.13`)는 로봇마다 같습니다. 각 Pi 가 자기 로봇에 유선으로 직결되므로 그대로 둡니다.
@@ -138,8 +138,8 @@ systemctl is-active mosquitto
 2호기를 보는 관제 웹·백엔드는 `pi8.local:1883` (웹은 `ws://pi8.local:9001`) 로 접속합니다.
 
 > `/etc/hw-node.env` 의 `HW_BROKER_HOST` 가 `127.0.0.1` 인지 꼭 확인하세요.
-> `pi7` 이나 `192.168.50.172` 같은 1호기 주소가 들어 있으면 두 시스템이 섞입니다.
-> `fix_broker_host.sh` 는 이 값을 `127.0.0.1` 로 되돌리는 스크립트라서 2호기에서도 그대로 쓸 수 있습니다.
+> `pi7` 이나 `<말단 주소>` 같은 1호기 주소가 들어 있으면 두 시스템이 섞입니다.
+> 섞였으면 `HW_BROKER_HOST=127.0.0.1` 로 되돌리고 `sudo systemctl restart robot-node sensor-node` 합니다.
 
 ### 5-2. 환경 파일
 
@@ -168,7 +168,7 @@ sudo sed -i -e 's/--node_id pi7/--node_id pi8/' -e 's/--default_robot_id go1-1/-
         /etc/systemd/system/robot-relay.service
 ```
 
-> **Unity 는 1·2호기가 같은 PC(`192.168.50.244`)를 씁니다.**
+> **Unity 는 1·2호기가 같은 PC(`<브로커 주소>`)를 씁니다.**
 > 다로봇 채널(`robot-relay` → Unity `15201`)은 `robot_id`(`go1-1`/`go1-2`)가 붙어 있어 두 대가 섞이지 않습니다.
 > 다만 `go1-sdk` 가 직접 보내는 기존 단일 로봇 포트(상태 `15101`, 명령 미러 `15102`, waypoint `15104`)에는
 > 로봇 구분이 없습니다. 두 대의 `go1-sdk` 를 **동시에** 켜면 Unity 의 이 단일 로봇 화면에 두 로봇 값이 번갈아 들어오고,

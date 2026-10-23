@@ -30,7 +30,7 @@ Type=simple
 User=physical
 WorkingDirectory=/home/physical/hw/pi
 ExecStart=/home/physical/venv/bin/python3 -u /home/physical/hw/pi/robot/robot_state_relay.py \
-  --node_id pi7 --unity_ip 192.168.50.244 --unity_port 15201 --ingress_port 15200 \
+  --node_id pi7 --unity_ip CHANGE-ME --unity_port 15201 --ingress_port 15200 \
   --default_type go1 --default_robot_id go1-1
 Restart=always
 RestartSec=3

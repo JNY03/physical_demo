@@ -299,7 +299,7 @@ if [ "${EDGE_VERIFY:-0}" = "1" ]; then
 
   echo "== Pi3 프레임 검증"
   curl -fsS --max-time 20 -o /tmp/pi3-frame \
-    "http://100.85.243.54:8890/api/frame?camera_id=0"
+    "http://${TERMINAL_HOST:?config.json 의 terminals[0].host 를 TERMINAL_HOST 로 넘긴다}:8890/api/frame?camera_id=0"
   test -s /tmp/pi3-frame || { echo "Pi3 프레임이 비어 있다" >&2; exit 1; }
 
   echo "== 실시간 게이트 활성화"

@@ -98,15 +98,15 @@ irm -Method Post -Uri $api -ContentType application/json -Body '{"command":"star
 기기에서 아래 주소로 바로 붙는다 — 서로 다른 네트워크여도 된다.
 
 ```
-http://100.114.96.78:8891/          # 현재 엣지 노드
-http://desktop-tcj72rt-1:8891/      # MagicDNS 이름도 같다
+http://<엣지 노드의 Tailscale IP>:8891/      # tailscale ip -4 로 확인한다
+http://<엣지 노드 MagicDNS 이름>:8891/      # MagicDNS 이름도 같다
 ```
 
 브라우저로 열면 화면이 그대로 나온다. 스트림 하나만 가져가려면 경로를 붙인다.
 
 ```bash
-curl http://100.114.96.78:8891/api/obstacles?camera=0            # 추론 결과(JSON)
-curl -o out.mjpg http://100.114.96.78:8891/original?camera=0     # 영상
+curl http://<엣지 노드 IP>:8891/api/obstacles?camera=0            # 추론 결과(JSON)
+curl -o out.mjpg http://<엣지 노드 IP>:8891/original?camera=0     # 영상
 ```
 
 ### 스트림

@@ -28,7 +28,7 @@ Unity `Go1ObstacleJsonReceiver.Go1ObstaclePacket` 의 필드가 서버 응답과
 timestamp 가 그대로면 보내지 않는다.
 
 사용:
-    cd ~/hw/pi && python3 -m robot.go1_detect_forward --unity-ip 192.168.50.244
+    cd ~/hw/pi && python3 -m robot.go1_detect_forward --unity-ip <Unity PC 주소>
 """
 import argparse
 import json
@@ -38,7 +38,7 @@ import sys
 import time
 import urllib.request
 
-DEFAULT_BASE = "http://210.110.250.33:7864"
+DEFAULT_BASE = os.environ.get("HW_DETECT_BASE_DEFAULT", "")  # 저장소에 서버 주소를 두지 않는다
 UNITY_OBSTACLE_PORT = 5009
 
 
@@ -92,9 +92,13 @@ def run(base, camera_id, unity_ip, unity_port, hz, verbose):
 
 def main():
     ap = argparse.ArgumentParser(description="인지 서버 탐지 결과 -> Unity 5009")
-    ap.add_argument("--base", default=os.environ.get("HW_DETECT_BASE", DEFAULT_BASE))
+    ap.add_argument("--base", default=os.environ.get("HW_DETECT_BASE", DEFAULT_BASE),
+                    required=not os.environ.get("HW_DETECT_BASE", DEFAULT_BASE),
+                    help="판정 서버 주소. 저장소에 기기 주소를 두지 않는다")
     ap.add_argument("--camera-id", default=os.environ.get("HW_UPLOAD_CAMERA_ID", "go1_front"))
-    ap.add_argument("--unity-ip", default=os.environ.get("HW_UNITY_IP", "192.168.50.244"))
+    ap.add_argument("--unity-ip", default=os.environ.get("HW_UNITY_IP", ""),
+                    required=not os.environ.get("HW_UNITY_IP"),
+                    help="Unity PC 주소. 저장소에 기기 주소를 두지 않는다")
     ap.add_argument("--unity-port", type=int, default=UNITY_OBSTACLE_PORT)
     ap.add_argument("--hz", type=float, default=float(os.environ.get("HW_DETECT_HZ", "10")))
     ap.add_argument("-q", "--quiet", action="store_true")

@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from robot.go1_camera import Go1CameraSource      # noqa: E402
 
-DEFAULT_URL = "http://210.110.250.33:7864/upload"
+DEFAULT_URL = os.environ.get("HW_UPLOAD_URL", "")  # 저장소에 서버 주소를 두지 않는다
 
 
 def _multipart(jpeg, camera_id):
@@ -164,7 +164,9 @@ def run(cam_id, url, camera_id, fps, quality, verbose):
 def main():
     ap = argparse.ArgumentParser(description="Go1 정면 영상 -> 인지 서버 업로드")
     ap.add_argument("--cam", type=int, default=1, help="Go1 카메라 번호 (1=정면)")
-    ap.add_argument("--url", default=os.environ.get("HW_UPLOAD_URL", DEFAULT_URL))
+    ap.add_argument("--url", default=os.environ.get("HW_UPLOAD_URL", DEFAULT_URL),
+                    required=not os.environ.get("HW_UPLOAD_URL", DEFAULT_URL),
+                    help="업로드 주소. 저장소에 기기 주소를 두지 않는다")
     ap.add_argument("--camera-id", default=os.environ.get("HW_UPLOAD_CAMERA_ID", "go1_front"))
     ap.add_argument("--fps", type=float, default=float(os.environ.get("HW_UPLOAD_FPS", "10")))
     ap.add_argument("--quality", type=int, default=int(os.environ.get("HW_UPLOAD_Q", "5")),

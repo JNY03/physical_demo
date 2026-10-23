@@ -17,7 +17,7 @@
 있고, k3s 에서도 같은 파드 안의 컨테이너 둘로 나뉜다.
 
 실행:
-    HW_ENTITY_ID=edge1 HW_BROKER_HOST=10.0.0.5 python3 mqtt_node.py
+    HW_ENTITY_ID=edge1 HW_BROKER_HOST=<브로커 주소> python3 mqtt_node.py
     EDGE_API=http://127.0.0.1:8891 도 환경변수로 받는다.
 """
 import json

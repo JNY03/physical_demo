@@ -14,9 +14,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
 
 포트 = 소스  (어느 경로로 들어오든 그 포트로 들어오면 그 소스다)
   10001 cam360  영상: 카메라 노트북의 stream_to_server.py 가 POST 로 보낸다 (/upload_pano)
-  10002 drone   영상: pi3 :8890/api/frame 을 계속 받아 온다   상태: pi3 MQTT :1883 전체 구독
-  10003 robot1  영상: pi7 :8090/stream/1 을 계속 읽는다        상태: pi7 MQTT :1883 전체 구독
-  10004 robot2  영상: pi1 :8090/stream/1 을 계속 읽는다        상태: pi1 MQTT :1883 전체 구독
+  10002 drone   영상: 드론 말단 :8890/api/frame 을 계속 받아 온다   상태: 드론 말단 MQTT :1883 전체 구독
+  10003 robot1  영상: 로봇1 말단 :8090/stream/1 을 계속 읽는다        상태: 로봇1 말단 MQTT :1883 전체 구독
+  10004 robot2  영상: 로봇2 말단 :8090/stream/1 을 계속 읽는다        상태: 로봇2 말단 MQTT :1883 전체 구독
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
@@ -69,7 +69,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
       dtype    "<f2" (float16)   shape  "H,W"   unit  "m"   header  vision_stream 과 같은 요약
 
   읽는 예 (파이썬)
-      r = redis.Redis(port=6380)      # 다른 기기: redis.Redis(host="100.114.96.78", port=6380)
+      r = redis.Redis(port=6380)      # 다른 기기: redis.Redis(host="<이 기기 주소>", port=6380)
       eid, f = r.xrevrange("vision_stream:drone:yoloe", count=1)[0]          # 최신 결과
       res = json.loads(f[b"result"])                                          # 검출 목록 등
       img = r.xrange("camera_stream:drone", res["source_id"], res["source_id"])  # 그 결과의 원본 프레임
@@ -106,7 +106,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
   말단 → 엣지(노트북)   python server_stream_multi_source.py
   말단 → 엣지 → 서버    노트북: ... --forward <서버 주소>      서버: ... --no-pull
   소스 골라 켜기       ... --on robot1 drone              (노트북 3대 폴백도 이걸로)
-  현장 IP 로 바꾸기     ... --robot1 192.168.0.11 --drone 192.168.0.13
+  현장 IP 로 바꾸기     ... --robot1 <로봇 주소> --drone <드론 주소>
   360 카메라 노트북     stream_to_server.py --upload http://<이 파일이 도는 기기>:10001/upload_pano
                        (같은 노트북이면 http://127.0.0.1:10001/upload_pano)
   실시간 비전 (GPU 서버, 다른 터미널)
@@ -116,7 +116,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
   pip install redis paho-mqtt        (파이썬 3.8 이상)
   Redis 5.0 이상 (Stream 기능). 기본으로 이 기기 127.0.0.1:6380 의 전용 Redis 에 넣는다 (--redis 로 바꿈).
   tailnet 의 다른 기기도 구독하려면 Redis 를 tailscale 주소에도 묶는다 (띄우는 명령은 vision/vision_infer.py 맨 위).
-    다른 기기에서: redis.Redis.from_url("redis://100.114.96.78:6380/0")   (100.114.96.78 = 이 PC tailscale 주소)
+    다른 기기에서: redis.Redis.from_url("redis://<이 기기 주소>:6380/0")   (<이 기기 주소> = 이 PC tailscale 주소)
   Redis 나 paho-mqtt 가 없어도 멈추지 않는다. 저장은 계속하고 경고만 낸다.
 
 주소 설정: 기기 주소(테일넷 IP)는 코드에 두지 않는다. hosts.example.json 을 hosts.local.json 으로
@@ -222,9 +222,9 @@ HOSTS_FILE = Path(__file__).resolve().parent / "hosts.local.json"   # 실제 주
 
 def load_default_hosts():
     """기본 주소: 환경변수 PD_HOST_<소스> > hosts.local.json > 없음. 명령행 --robot1 / --robot2 / --drone 이 가장 우선."""
-    hosts = {"robot1": None,         # pi7 (go1-camview 8090 · mosquitto 1883)
-             "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
-             "drone": None}          # pi3 (drone-agent 8890 · mosquitto 1883)
+    hosts = {"robot1": None,         # 로봇1 말단 (camview 8090 · mosquitto 1883)
+             "robot2": None,         # 로봇2 말단 (camview 8090 · mosquitto 1883)
+             "drone": None}          # 드론 말단 (drone-agent 8890 · mosquitto 1883)
     if HOSTS_FILE.is_file():
         try:
             data = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))
@@ -1460,9 +1460,9 @@ def main():
     ap.add_argument("--on", nargs="+", metavar="소스",
                     help="켤 소스만 고른다: cam360 drone robot1 robot2 (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
-                    help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
+                    help="로봇1 파이 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
-                    help="로봇2 파이(pi1) 주소. 기본 hosts.local.json / PD_HOST_* 값")
+                    help="로봇2 파이 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--drone", default=DEFAULT_HOST["drone"], metavar="주소",
                     help="드론 파이(pi3) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot-cam", type=int, default=1, choices=range(1, 6), metavar="번호",

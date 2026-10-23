@@ -1,10 +1,10 @@
 """demo/test/mqtt_stream_receiver.py
 
-implements: 로봇(라즈베리파이 pi7) ↔ 탐지 연동 -- `mock_stream_receiver.py`가 흉내 내던
+implements: 로봇(라즈베리파이) ↔ 탐지 연동 -- `mock_stream_receiver.py`가 흉내 내던
 프레임+회전각 스트림을 **실제 MQTT 수신**으로 바꾼 것이다.
 규약은 로봇 쪽에서 받은 `detection-protocol_0914.md`를 그대로 따른다(A안 확정).
 
-    브로커   ws://pi7.tailcb6bfb.ts.net:9001/mqtt  (또는 1883 생 TCP)
+    브로커   ws://<말단 주소>:9001/mqtt  (또는 1883 생 TCP)
     프레임   zoneA/robot/go1-001/frame   QoS 1, 방향마다 1건(기본 8건)
     판 경계  zoneA/robot/go1-001/scan    QoS 1, scan_start / scan_end 각 1건
 
@@ -30,7 +30,7 @@ detect_api_server.py로 가져간다.
 실행:
     python3 mqtt_stream_receiver.py                 # 수신 + 파이프라인
     python3 mqtt_stream_receiver.py --sniff         # 토픽 구경만(모델 로드 안 함)
-    python3 mqtt_stream_receiver.py --target door --broker ws://pi7...:9001/mqtt
+    python3 mqtt_stream_receiver.py --target door --broker ws://<말단 주소>:9001/mqtt
 
 필요 패키지: pip install "paho-mqtt>=2.0"
 """
@@ -42,6 +42,7 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import queue
 import re
 import shutil
@@ -55,7 +56,7 @@ from urllib.parse import urlparse
 import paho.mqtt.client as mqtt
 
 # ── 브로커·토픽 (detection-protocol_0914.md §1) ─────────────────────────────
-BROKER_WS_URL = "ws://pi7.tailcb6bfb.ts.net:9001/mqtt"
+BROKER_WS_URL = os.environ.get("MQTT_BROKER_WS", "")   # 저장소에 기기 주소를 두지 않는다
 ROBOT_DEVICE_ID = "go1-001"
 FRAME_TOPIC = f"zoneA/robot/{ROBOT_DEVICE_ID}/frame"
 SCAN_TOPIC = f"zoneA/robot/{ROBOT_DEVICE_ID}/scan"
@@ -458,8 +459,8 @@ def _connect_or_explain(client, host: str, port: int) -> None:
     except OSError as exc:
         raise SystemExit(
             f"[mqtt_stream] 브로커에 붙지 못했다: {host}:{port} -- {exc}\n"
-            f"  1) 이 PC가 로봇과 같은 테일넷인가:  tailscale status | grep pi7\n"
-            f"  2) 이름이 풀리는가:                 tailscale ping pi7\n"
+            f"  1) 이 PC가 로봇과 같은 테일넷인가:  tailscale status\n"
+            f"  2) 이름이 풀리는가:                 tailscale ping <말단 이름>\n"
             f"  3) 브로커 리스너가 열려 있는가:     ws :9001/mqtt, 생 TCP :1883")
 
 
@@ -507,7 +508,9 @@ def run_sniff(broker_url: str, topic: str, seconds: float) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="로봇 MQTT 프레임 수신 -> 탐지 파이프라인")
-    parser.add_argument("--broker", default=BROKER_WS_URL)
+    parser.add_argument("--broker", default=BROKER_WS_URL,
+                        required=not BROKER_WS_URL,
+                        help="브로커 주소. MQTT_BROKER_WS 로도 준다")
     parser.add_argument("--frame-topic", default=FRAME_TOPIC)
     parser.add_argument("--scan-topic", default=SCAN_TOPIC)
     parser.add_argument("--target", default="door", help="찾을 클래스(class_features.json에 있어야 한다)")

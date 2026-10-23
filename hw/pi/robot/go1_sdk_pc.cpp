@@ -10,7 +10,7 @@
  있어 양쪽을 중계할 수 있는 유일한 지점이다.
 
    기본 robot_ip = 192.168.123.161 (Go1, eth0 경유)
-   기본 unity_ip = 192.168.50.244  (Unity PC, wlan0 경유)
+   기본 unity_ip = 없음 — --unity_ip 로 준다 (Unity PC, wlan0 경유)
    --robot_ip / --unity_ip 인자로 덮어쓴다.
 
  상태(world_x/z)는 명령 dead-reckoning 으로 만든다(yaw 만 실 IMU).
@@ -125,7 +125,7 @@ class Custom
 {
 public:
   Custom(uint8_t level)
-    : Custom(level,"192.168.123.161","192.168.50.244")
+    : Custom(level,"192.168.123.161","CHANGE-ME")
   {}
 
   Custom(uint8_t level,const std::string& robot_host_in,const std::string& unity_host_in)
@@ -2064,7 +2064,7 @@ int main(int argc,char** argv)
   Custom custom=(!robot_ip.empty()||!unity_ip.empty())
     ? Custom(HIGHLEVEL,
              robot_ip.empty()?"192.168.123.161":robot_ip,
-             unity_ip.empty()?"192.168.50.244":unity_ip)
+             unity_ip.empty()?"CHANGE-ME":unity_ip)
     : Custom(HIGHLEVEL);
 
   custom.enable_relay(relay_ip,

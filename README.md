@@ -14,7 +14,18 @@
 | `edge/` | 엣지 노드 — 검출·거리·스트리밍. 말단에서 프레임을 당겨 판정을 되돌려 준다 | [docs/drone-edge.md](docs/drone-edge.md) |
 | `drone_rpi/` | 드론 말단 — 카메라와 KLT 플로우 정렬만. 신경망이 없다 | [docs/drone-edge.md](docs/drone-edge.md) |
 | `hw/` | 4족 로봇(Go1) 온디바이스 노드 — 구동·센서·MQTT 브로커 | [docs/go1-raspi.md](docs/go1-raspi.md) |
-| `data_stream/` | 다중 소스 스트림 수집과 GPS·자세 기반 객체 위치 추정 | `data_stream/` 내 문서 |
+| `data_stream/` | 통합 가시화·제어면 — 소스 넷을 한 화면에 모으고 같은 어휘로 명령한다 | `data_stream/` 내 문서 |
+| `deploy/k3s/` | 온디바이스 배포 — 역할 라벨만 붙이면 기기마다 노드가 뜬다 | [deploy/k3s/README.md](deploy/k3s/README.md) |
+
+## 읽을 것 둘
+
+| 문서 | 무엇을 답하나 |
+|---|---|
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | 무엇을 지켜야 하나 — 토픽·봉투·명령 4단계·어휘, HTTP 프레임 규약 |
+| [docs/EXTENDING.md](docs/EXTENDING.md) | 어디를 고치면 되나 — 기기·모델·카메라·노드를 갈아끼우는 이음새 |
+
+둘로 끝나도록 만들었다. 다른 기기와 다른 모델을 붙이는 데 이 저장소의 내부 구조를
+읽어야 한다면 그건 이음새가 잘못 잡힌 것이다.
 
 ## 설계
 
@@ -42,8 +53,4 @@ Windows에서는 `.\run.ps1`. 자세한 것은 [docs/drone-edge.md](docs/drone-e
 ## 라이선스
 
 **아직 정하지 않았습니다.** 그때까지 이 저장소의 코드에는 아무 사용 허가도 붙어
-있지 않습니다.
-
-의존성 중 ultralytics(YOLOE·YOLO-World)가 **AGPL-3.0**이라는 점이 선택에 영향을
-줍니다. 다만 검출기를 색 분할 provider로 두면 ultralytics 없이도 전체 파이프라인이
-돌기 때문에, 그 의존성을 선택 사항으로 두는 구성이 가능합니다.
+있지 않습니다 — 자세한 것과 서드파티 구성요소 목록은 [LICENSE](LICENSE)에 있습니다.

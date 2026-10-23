@@ -44,6 +44,7 @@ async def main(args):
 parser = argparse.ArgumentParser()
 parser.add_argument("--listen-host", default="0.0.0.0")
 parser.add_argument("--listen-port", type=int, default=18890)
-parser.add_argument("--target-host", default="100.85.243.54")
+parser.add_argument("--target-host", required=True,
+                    help="중계할 말단 주소. 저장소에 기기 주소를 두지 않는다")
 parser.add_argument("--target-port", type=int, default=8890)
 asyncio.run(main(parser.parse_args()))

@@ -15,7 +15,7 @@
 | `zoneA/robot/go1-001/frame` | 1 | 방향마다 1건 (기본 8건) |
 | `zoneA/robot/go1-001/scan` | 1 | 한 판의 시작·끝 각 1건 |
 
-브로커는 기존과 같다. `ws://pi7.tailcb6bfb.ts.net:9001/mqtt` (또는 1883 생 TCP).
+브로커는 기존과 같다. `ws://pi7.<tailnet>.ts.net:9001/mqtt` (또는 1883 생 TCP).
 
 **브로커에 메시지 크기 제한은 걸려 있지 않다**(`message_size_limit` 미설정 = 무제한).
 프레임 한 장이 약 25 KB, base64 로 34 KB 라 8장을 합쳐도 300 KB 이하다. B안으로 갈 이유가 없다.
@@ -155,7 +155,7 @@ c = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
                 protocol=mqtt.MQTTv5)
 c.on_connect = lambda cl, *a: cl.subscribe("zoneA/robot/go1-001/frame", qos=1)
 c.on_message = on_message
-c.connect("pi7.tailcb6bfb.ts.net", 1883, 30)
+c.connect("pi7.<tailnet>.ts.net", 1883, 30)
 c.loop_forever()
 ```
 
