@@ -23,6 +23,7 @@
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -113,32 +114,50 @@ class EdgeNode(BaseNode):
     # 잡으면 승인 절차가 의미를 잃는다.
     PHYSICAL_ACTIONS = frozenset({"publish_start"})
 
+    # 엣지 상태는 **따로 도는 스레드가 떠 온다.** on_sample 은 메인 루프에서
+    # 불리는데(common/node.py run), 거기서 HTTP 를 직접 때리면 그 시간만큼
+    # 루프가 멈춘다. SAMPLE_INTERVAL 기본값이 1초인데 타임아웃이 5초라, 느린
+    # 응답 하나에 하트비트가 밀리고 브로커가 keepalive 초과로 끊어 버린다
+    # (2026-10-23 실측: rc=141, 미전송 100건). 폴러는 자기 주기로 돌고
+    # on_sample 은 **마지막으로 본 값을 그대로 싣기만** 한다.
+    POLL_INTERVAL = float(os.environ.get("EDGE_POLL_INTERVAL", "2.0"))
+
+    def __init__(self):
+        super().__init__()
+        self._snap = {"edge": "starting"}
+        self._snap_at = 0.0
+        self._poller = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poller.start()
+
+    def _poll_loop(self):
+        while True:
+            try:
+                st = _api("/api/command", {"command": "terminal_status"})
+                c = st.get("counters") or {}
+                snap = {"gates": st.get("gates"), "terminal": st.get("terminal"),
+                        "pulled": c.get("pulled"), "inferred": c.get("inferred"),
+                        "pushed": c.get("pushed"), "failed": c.get("failed"),
+                        "dropped": c.get("inference_dropped")}
+            except CommandError as e:
+                snap = {"edge": "unreachable", "reason": str(e)[:120]}
+            self._snap, self._snap_at = snap, time.time()
+            time.sleep(self.POLL_INTERVAL)
+
     def device_status_extra(self):
-        """등록·상태 메시지에 싣는 엣지 고유 정보."""
-        try:
-            h = _api("/api/health")
-        except CommandError:
-            return {"edge": "unreachable"}
-        return {"ovd": h.get("ovd"), "ovd2": h.get("ovd2"),
-                "depth": h.get("depth"),
-                "vocabulary": h.get("ovd_vocabulary_size")}
+        """등록·상태 메시지에 싣는 엣지 고유 정보. 캐시만 본다."""
+        return dict(self._snap)
 
     def on_sample(self, now):
-        """주기 표본 — 게이트와 카운터를 uplink 로 올린다."""
-        try:
-            st = _api("/api/command", {"command": "terminal_status"})
-        except CommandError as e:
-            self.publish_status("degraded", {"reason": str(e)[:120]})
-            return
-        c = st.get("counters") or {}
+        """주기 표본 — 마지막으로 떠 온 상태를 uplink 로 올린다.
+
+        나이를 숨기지 않는다 — 폴러가 멈추면 age_s 가 계속 커지고, 그게 보이는
+        것이 '마지막 값이 영원히 신선해 보이는 것'보다 낫다.
+        """
         self.publish(f"{self.base}/uplink", {
             "kind": "edge_state",
-            "gates": st.get("gates"),
-            "pulled": c.get("pulled"), "inferred": c.get("inferred"),
-            "pushed": c.get("pushed"), "failed": c.get("failed"),
-            "dropped": c.get("inference_dropped"),
-            "terminal": st.get("terminal"),
-            "at": round(time.time(), 3),
+            **self._snap,
+            "age_s": round(now - self._snap_at, 1) if self._snap_at else None,
+            "at": round(now, 3),
         })
 
 

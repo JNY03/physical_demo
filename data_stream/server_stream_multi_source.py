@@ -177,6 +177,37 @@ SOURCE_KIND = {"cam360": "camera", "drone": "edge",
                "robot1": "robot", "robot2": "robot"}
 DEVICE_IDS = {}          # 소스 이름 → device_id. 기동 때 인자로 채운다
 
+# 명령 봉투는 **protobuf 가 정본이다**(hw/pi/common/physical_command.py).
+# JSON 경로는 폐기됐다 — 노드가 ParseFromString 으로만 읽는다. 여기서 JSON 을
+# 쏘면 downlink 에 도착은 하지만 노드가 봉투 파싱에 실패하고 조용히 버린다.
+# 그래서 같은 pb2 모듈을 그대로 쓴다. 규약을 두 번 구현하지 않는다.
+_HW_PI = Path(__file__).resolve().parent.parent / "hw" / "pi"
+if _HW_PI.is_dir() and str(_HW_PI) not in sys.path:
+    sys.path.insert(0, str(_HW_PI))
+try:
+    from common import physical_command_pb2 as pcmd_pb   # noqa: E402
+except Exception as _e:                                   # pragma: no cover
+    pcmd_pb = None
+    _PCMD_ERR = describe(_e) if "describe" in dir() else repr(_e)[:120]
+else:
+    _PCMD_ERR = None
+
+
+def _build_command(action, params, command_id, target):
+    """규약 봉투 하나를 만든다. parameters 는 map<string,double> 이다."""
+    env = pcmd_pb.PhysicalCommandEnvelope()
+    c = env.command
+    c.command_id = command_id
+    c.target = target
+    c.action = action
+    for k, v in (params or {}).items():
+        try:
+            c.parameters[str(k)] = float(v)
+        except (TypeError, ValueError):
+            # 숫자가 아닌 값은 규약이 담지 못한다. 조용히 버리지 않고 알린다.
+            raise ValueError("parameters 는 숫자만 담을 수 있다: %s=%r" % (k, v))
+    return env.SerializeToString()
+
 
 def _device_id(src):
     return DEVICE_IDS.get(src.name, src.name)
@@ -1015,12 +1046,20 @@ def make_handler(src, vision=None):
                     action = str(req.get("action", "")).strip()
                     if not action:
                         return self._json(400, {"status": "error", "detail": "action 이 비어 있음"})
-                    topic = "terminal/%s/downlink" % _device_id(src)
-                    msg = {"action": action, "params": req.get("params") or {},
-                           "command_id": req.get("command_id") or uuid.uuid4().hex[:12],
-                           "issued_at": round(time.time(), 3), "issued_by": "stream-ui"}
-                    info = src.mqtt.publish(topic, json.dumps(msg, ensure_ascii=False), qos=1)
+                    if pcmd_pb is None:
+                        return self._json(503, {"status": "error",
+                                                "detail": "규약 모듈을 못 읽음 (%s) — hw/pi/common 이 "
+                                                          "있어야 하고 protobuf 가 설치돼 있어야 함" % _PCMD_ERR})
+                    device = _device_id(src)
+                    topic = "terminal/%s/downlink" % device
+                    cid = req.get("command_id") or uuid.uuid4().hex[:12]
+                    try:
+                        body = _build_command(action, req.get("params"), cid, device)
+                    except ValueError as e:
+                        return self._json(400, {"status": "error", "detail": str(e)})
+                    info = src.mqtt.publish(topic, body, qos=1)
                     ok = getattr(info, "rc", 1) == 0
+                    msg = {"command_id": cid}
                     log("%s 명령 %s → %s (%s)" % (src.name, action, topic, "보냄" if ok else "실패"))
                     # 결과는 여기서 기다리지 않는다. 4단계 진행(ACK→수행중→
                     # 물리변화→완료)은 uplink 로 올라와 상태 스트림에 쌓이고,
