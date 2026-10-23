@@ -36,9 +36,12 @@
         321
       ]
     },
+    "$comment_camera_provider": "카메라마다 provider 를 고른다. **기기 종류를 코드가 아니라 설정이 정한다.**\n  rpicam  Raspberry Pi 카메라(libcamera). 기본값. index 로 고른다\n  v4l2    일반 USB/CSI 카메라. device(\"/dev/video0\")를 주거나 비우면 index 로 만든다. ffmpeg 필요\n  rtsp    IP 카메라·NVR. device 에 rtsp:// URL 을 준다. ffmpeg 필요. TCP 로 고정한다 — UDP 는 프레임이 깨져도 조용히 넘어가 카메라 문제인지 망 문제인지 못 가린다\n공통 전제는 하나다: MJPEG 를 stdout 으로 흘릴 것. 그래서 provider 를 늘려도 프레임 파싱(_run)은 그대로다.\n한 기기에 Pi 카메라와 USB 카메라를 섞어 달 수 있다 — 카메라마다 따로 적는다.",
     "cameras": [
       {
         "index": 0,
+        "provider": "rpicam",
+        "device": "",
         "width": 1280,
         "height": 720,
         "framerate": 8

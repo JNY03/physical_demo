@@ -83,10 +83,13 @@ class CameraStream:
     """
 
     def __init__(self, index: int, width: int, height: int, framerate: int,
-                 extra_args: list[str] | None = None):
+                 extra_args: list[str] | None = None,
+                 provider: str = "rpicam", device: str = ""):
         self.index, self.width, self.height = index, width, height
         self.framerate = framerate
         self.extra_args = list(extra_args or [])
+        self.provider = provider or "rpicam"
+        self.device = device or ""      # v4l2 의 /dev/videoN, rtsp 의 URL
         self._latest: bytes | None = None
         self._seq = self._dropped = 0
         self._lock = threading.Lock()
@@ -94,11 +97,48 @@ class CameraStream:
         self._stop = threading.Event()
         self._error: str | None = None
 
+    # ── 기종별 명령줄 ────────────────────────────────────────────────────────
+    # **여기만 기기를 안다.** 아래 _run 은 MJPEG 바이트에서 SOI/EOI 를 찾을 뿐이라
+    # 어느 프로그램이 뱉었는지 모른다 — 그래서 provider 를 늘려도 그쪽은 그대로다.
+    # 셋 다 공통 조건이 있다: **MJPEG 를 stdout 으로** 흘릴 것.
+    #
+    #   rpicam  Raspberry Pi 카메라(libcamera). 기존 경로
+    #   v4l2    일반 USB/CSI 카메라. ffmpeg 가 있으면 어디서나 된다
+    #   rtsp    IP 카메라·NVR. 네트워크 너머의 카메라를 그대로 받는다
+    #
+    # images(디렉터리 재현)는 카메라가 아니라 source 쪽 분기다(frames_from_dir).
+    def _argv(self) -> list[str]:
+        p = (self.provider or "rpicam").lower()
+        if p == "rpicam":
+            return ["rpicam-vid", "-n", "--camera", str(self.index), "-t", "0",
+                    "--codec", "mjpeg", "--width", str(self.width),
+                    "--height", str(self.height), "--framerate", str(self.framerate),
+                    *self.extra_args, "-o", "-"]
+        if p == "v4l2":
+            # device 가 비면 인덱스로 /dev/videoN 을 만든다 — 인덱스만 바꿔서
+            # 카메라를 고르던 기존 설정이 그대로 통한다.
+            dev = self.device or f"/dev/video{self.index}"
+            return ["ffmpeg", "-loglevel", "error", "-f", "v4l2",
+                    "-framerate", str(self.framerate),
+                    "-video_size", f"{self.width}x{self.height}",
+                    "-i", dev, *self.extra_args,
+                    "-f", "mjpeg", "-q:v", "5", "-"]
+        if p == "rtsp":
+            if not self.device:
+                raise ValueError("rtsp provider 는 pi.camera_url 이 필요하다")
+            # TCP 로 고정한다 — UDP 는 프레임이 깨져도 조용히 넘어가서,
+            # '가끔 이상한 그림'이 카메라 문제인지 망 문제인지 가릴 수 없다.
+            return ["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp",
+                    "-i", self.device, *self.extra_args,
+                    "-f", "mjpeg", "-q:v", "5", "-"]
+        raise ValueError(f"모르는 camera provider: {p} (rpicam | v4l2 | rtsp)")
+
     def start(self) -> None:
-        cmd = ["rpicam-vid", "-n", "--camera", str(self.index), "-t", "0",
-               "--codec", "mjpeg", "--width", str(self.width),
-               "--height", str(self.height), "--framerate", str(self.framerate),
-               *self.extra_args, "-o", "-"]
+        try:
+            cmd = self._argv()
+        except ValueError as exc:
+            self._error = str(exc)[:200]
+            return
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.DEVNULL, bufsize=0)
@@ -163,14 +203,22 @@ class CameraStream:
 
     def stats(self) -> dict:
         return {"camera": self.index, "seq": self._seq,
-                "dropped": self._dropped, "error": self._error}
+                "dropped": self._dropped, "error": self._error,
+                # 어느 경로로 받고 있는지 — 헬스에서 바로 보인다.
+                "provider": self.provider,
+                "device": self.device or None}
 
 
 def open_cameras(cfg_cams: list[dict]) -> list[CameraStream]:
     """설정에 적힌 카메라를 모두 연다. 하나가 실패해도 나머지로 간다(AI-C-05)."""
     out = [CameraStream(int(c.get("index", 0)), int(c.get("width", 1280)),
                         int(c.get("height", 720)), int(c.get("framerate", 8)),
-                        c.get("extra_args")) for c in cfg_cams]
+                        c.get("extra_args"),
+                        # 카메라마다 다른 기종을 쓸 수 있다 — 한 기기에 Pi 카메라와
+                        # USB 카메라가 같이 붙는 구성이 실제로 있다.
+                        provider=str(c.get("provider", "rpicam")),
+                        device=str(c.get("device", "") or c.get("url", "")))
+           for c in cfg_cams]
     for s in out:
         s.start()
     deadline = time.time() + 6.0
