@@ -9,7 +9,7 @@
 ### 1-1. 폴더 위치 (WSL Ubuntu 안)
 
 ```
-/home/ny/physical_demo/                     ← 저장소 루트 (명령은 여기서 실행)
+~/physical_demo/                            ← 저장소 루트 (명령은 여기서 실행)
 └── data_stream/
     ├── venv/                               ← 파이썬 가상환경 (redis · paho-mqtt · torch · ultralytics 설치됨)
     ├── server_stream_multi_source.py       ← 데이터 스트림 (받기 · Redis · 저장)
@@ -22,15 +22,15 @@
     └── stream_data/                        ← 저장된 데이터 (아래 3장)
 ```
 
-Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\ny\physical_demo\data_stream` 을 입력하면 열린다.
+Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\<WSL 사용자>\physical_demo\data_stream` 을 입력하면 열린다.
 
 ### 1-2. VS Code 로 WSL 접속
 
-1. Windows 에 VS Code 를 설치하고, 확장(Extensions, `Ctrl+Shift+X`)에서 **WSL** (Microsoft) 을 설치한다.
+1. Windows 에 VS Code 를 설치하고 (설치·초기 설정 전체는 `배포_가이드.md`), 확장(Extensions, `Ctrl+Shift+X`)에서 **WSL** (Microsoft) 을 설치한다.
 2. `F1` → **`WSL: Connect to WSL`** (또는 왼쪽 아래 `><` 초록 버튼 → *Connect to WSL*).
    배포판이 여러 개면 **`WSL: Connect to WSL using Distro...`** → `Ubuntu` 를 고른다.
 3. 새 창의 왼쪽 아래에 `WSL: Ubuntu` 가 보이면 접속된 것이다.
-4. **File → Open Folder** → `/home/ny/physical_demo` 를 연다.
+4. **File → Open Folder** → `~/physical_demo` (`/home/<WSL 사용자>/physical_demo`) 를 연다.
 5. 터미널은 `` Ctrl+` `` 로 연다 (WSL 의 bash 로 열린다).
 
 > 다른 방법: Ubuntu 터미널에서 `cd ~/physical_demo && code .` 를 실행해도 같은 창이 열린다.
@@ -51,7 +51,7 @@ source data_stream/venv/bin/activate        # 프롬프트 앞에 (venv) 가 붙
 ### 1) Redis 켜기 (WSL 을 켤 때마다 한 번)
 
 ```bash
-redis-server --port 6380 --bind "127.0.0.1 100.114.96.78" --protected-mode no \
+redis-server --port 6380 --bind "127.0.0.1 <데이터 스트림 노트북 tailscale IP>" --protected-mode no \
   --save "" --appendonly no --daemonize yes
 redis-cli -p 6380 ping                      # PONG 이면 정상
 ```
@@ -64,7 +64,7 @@ Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저�
 python data_stream/server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2)
 python data_stream/server_stream_multi_source.py --on drone         # 드론만
 python data_stream/server_stream_multi_source.py --on drone robot1  # 골라 켜기
-python data_stream/server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 지정 (기본은 hosts.local.json)
+python data_stream/server_stream_multi_source.py --drone <드론 pi tailscale IP>   # 주소를 직접 지정 (기본은 hosts.local.json)
 ```
 
 | 포트 | 소스 | 받는 곳 |
@@ -95,12 +95,12 @@ python data_stream/vision/vision_infer.py --list                               #
 
 ```bash
 python stream_to_server.py --dry-run --count 20       # 업로드 없이 카메라 스트림만 점검
-python stream_to_server.py --upload http://100.114.96.78:10001/upload_pano   # 이 PC 의 데이터 스트림으로 보내기
+python stream_to_server.py --upload http://<데이터 스트림 노트북 tailscale IP>:10001/upload_pano   # 데이터 스트림 노트북으로 보내기
 python stream_to_server.py --upload http://127.0.0.1:10001/upload_pano       # 데이터 스트림이 같은 노트북에서 돌 때
 python stream_to_server.py --fps 3                    # 기본 5fps → 3fps (인자 없이 실행하면 7866 · 10001 서버 두 곳으로 보낸다)
 ```
 
-- `100.114.96.78` 은 이 PC 의 tailscale 주소다. 노트북도 tailscale 에 로그인되어 있어야 한다.
+- `<데이터 스트림 노트북 tailscale IP>` 는 그 노트북에서 `tailscale ip -4` 로 확인한다. 360 노트북도 같은 tailnet 에 로그인되어 있어야 한다.
 - 카메라 IP 기본값은 `192.168.100.124` 이고, 다르면 `--ip` 로 바꾼다. 종료는 `Ctrl+C`.
 
 ---
