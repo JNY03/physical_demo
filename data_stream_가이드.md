@@ -10,19 +10,19 @@
 
 ```
 ~/physical_demo/                            ← 저장소 루트 (명령은 여기서 실행)
-└── data_stream/
-    ├── venv/                               ← 파이썬 가상환경 (redis · paho-mqtt · torch · ultralytics 설치됨)
-    ├── server_stream_multi_source.py       ← 데이터 스트림 (받기 · Redis · 저장)
-    ├── hosts.local.json                    ← 로봇·드론 주소 (tailscale IP)
-    ├── vision/
-    │   ├── vision_infer.py                 ← 비전 추론 (YOLOE · UniDepth · MoGe2)
-    │   └── vision_config.yaml              ← 비전 설정
-    ├── 360camera_work/
-    │   └── stream_to_server.py             ← 360 카메라 → 서버 업로드
-    └── stream_data/                        ← 저장된 데이터 (아래 3장)
+├── venv/                                   ← 파이썬 가상환경 (redis · paho-mqtt · torch · ultralytics 설치됨)
+├── server_stream_multi_source.py           ← 데이터 스트림 (받기 · Redis · 저장)
+├── hosts.local.json                        ← 로봇·드론 주소 (tailscale IP)
+├── vision/
+│   ├── vision_infer.py                     ← 비전 추론 (YOLOE · UniDepth · MoGe2)
+│   └── vision_config.yaml                  ← 비전 설정
+├── 360camera_work/
+│   └── stream_to_server.py                 ← 360 카메라 → 서버 업로드
+├── models/  external/                      ← 모델 가중치 · UniDepth · AerialMetric 코드 (깃에 없음)
+└── stream_data/                            ← 저장된 데이터 (아래 3장)
 ```
 
-Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\<WSL 사용자>\physical_demo\data_stream` 을 입력하면 열린다.
+Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\<WSL 사용자>\physical_demo` 을 입력하면 열린다.
 
 ### 1-2. VS Code 로 WSL 접속
 
@@ -45,15 +45,24 @@ Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\<WSL 사용자>\phys
 
 ```bash
 cd ~/physical_demo
-source data_stream/venv/bin/activate        # 프롬프트 앞에 (venv) 가 붙으면 성공
+source venv/bin/activate        # 프롬프트 앞에 (venv) 가 붙으면 성공
 ```
 
-### 1) Redis 켜기 (WSL 을 켤 때마다 한 번)
+### 1) Redis 확인
+
+`배포_가이드.md` 9장대로 `redis-datastream` 서비스를 등록했으면 **WSL 이 켜질 때 자동으로 시작**한다. 확인만 한다:
+
+```bash
+redis-cli -p 6380 ping                                        # PONG 이면 정상
+redis-cli -h <데이터 스트림 노트북 tailscale IP> -p 6380 ping    # 다른 기기가 구독하려면 이쪽도 PONG
+systemctl --user restart redis-datastream                     # 안 되면 다시 시작
+```
+
+서비스를 등록하지 않았으면 WSL 을 켤 때마다 직접 띄운다:
 
 ```bash
 redis-server --port 6380 --bind "127.0.0.1 <데이터 스트림 노트북 tailscale IP>" --protected-mode no \
   --save "" --appendonly no --daemonize yes
-redis-cli -p 6380 ping                      # PONG 이면 정상
 ```
 
 Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저장되고** 비전 live 가 동작하지 않는다.
@@ -61,10 +70,10 @@ Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저�
 ### 2) 데이터 스트림 — `server_stream_multi_source.py` (터미널 1)
 
 ```bash
-python data_stream/server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2)
-python data_stream/server_stream_multi_source.py --on drone         # 드론만
-python data_stream/server_stream_multi_source.py --on drone robot1  # 골라 켜기
-python data_stream/server_stream_multi_source.py --drone <드론 pi tailscale IP>   # 주소를 직접 지정 (기본은 hosts.local.json)
+python server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2)
+python server_stream_multi_source.py --on drone         # 드론만
+python server_stream_multi_source.py --on drone robot1  # 골라 켜기
+python server_stream_multi_source.py --drone <드론 pi tailscale IP>   # 주소를 직접 지정 (기본은 hosts.local.json)
 ```
 
 | 포트 | 소스 | 받는 곳 |
@@ -80,10 +89,10 @@ python data_stream/server_stream_multi_source.py --drone <드론 pi tailscale IP
 ### 3) 비전 추론 — `vision/vision_infer.py` (터미널 2, 선택)
 
 ```bash
-python data_stream/vision/vision_infer.py                                      # live · 전체 기기 · yoloe
-python data_stream/vision/vision_infer.py --devices drone --models yoloe unidepth   # 드론에 YOLOE + 거리
-python data_stream/vision/vision_infer.py --devices drone --models yoloe --runs latest   # 마지막 저장본에 나중에 적용
-python data_stream/vision/vision_infer.py --list                               # 기기·실행 폴더·프레임 수만 보기
+python vision/vision_infer.py                                      # live · 전체 기기 · yoloe
+python vision/vision_infer.py --devices drone --models yoloe unidepth   # 드론에 YOLOE + 거리
+python vision/vision_infer.py --devices drone --models yoloe --runs latest   # 마지막 저장본에 나중에 적용
+python vision/vision_infer.py --list                               # 기기·실행 폴더·프레임 수만 보기
 ```
 
 - live 모드는 2)와 Redis 가 켜져 있어야 한다. 결과는 브라우저 `http://localhost:<포트>/vision?model=yoloe` 에서 본다.
@@ -110,7 +119,7 @@ python stream_to_server.py --fps 3                    # 기본 5fps → 3fps (�
 ### 저장 구조
 
 ```
-data_stream/stream_data/<소스>/<실행 시작 YYYYMMDD_HHMMSS>/
+stream_data/<소스>/<실행 시작 YYYYMMDD_HHMMSS>/
 ├── frames/000000001.jpg …        받은 영상 (JPEG 그대로)
 ├── frames.jsonl                  영상 메타 — 한 장 = 한 줄 (frame_file · received_at · sender)
 ├── states.jsonl                  상태 — 한 건 = 한 줄 (topic · payload: GPS · 고도 · 자세 · 배터리 등)
@@ -122,7 +131,7 @@ data_stream/stream_data/<소스>/<실행 시작 YYYYMMDD_HHMMSS>/
 ### 빠르게 보는 명령
 
 ```bash
-cd ~/physical_demo/data_stream/stream_data
+cd ~/physical_demo/stream_data
 ls -t drone | head                                         # 최근 실행 폴더
 R=drone/$(ls -t drone | head -1)                           # 가장 최근 드론 실행
 ls $R/frames | wc -l; wc -l $R/states.jsonl                # 영상 장수 · 상태 건수
@@ -131,5 +140,5 @@ grep -m1 '/state"' $R/states.jsonl | python -m json.tool   # 드론 상태 한 �
 explorer.exe "$(wslpath -w $R/frames)"                     # Windows 탐색기로 이미지 열기
 ```
 
-- 비전 결과 목록: `python data_stream/vision/vision_infer.py --list` (루트에서, venv 상태)
+- 비전 결과 목록: `python vision/vision_infer.py --list` (루트에서, venv 상태)
 - Redis 최근 항목 수: `redis-cli -p 6380 XLEN camera_stream:drone`

@@ -72,21 +72,21 @@ results.jsonl 한 줄 (v2 비전 결과, 규약 §3-6)
   redis-server --port 6380 --bind "127.0.0.1 100.114.96.78" --protected-mode no --save "" --appendonly no --daemonize yes
   #    다른 기기에서 읽기: redis.Redis.from_url("redis://100.114.96.78:6380/0")
 
-  # 1) 터미널 1 — 스트림 서버 (로봇·드론 주소는 data_stream/hosts.local.json)
-  source data_stream/venv/bin/activate
-  python data_stream/server_stream_multi_source.py
+  # 1) 터미널 1 — 스트림 서버 (로봇·드론 주소는 hosts.local.json)
+  source venv/bin/activate
+  python server_stream_multi_source.py
 
   # 2) 터미널 2 — 실시간 비전
-  source data_stream/venv/bin/activate
-  python data_stream/vision/vision_infer.py
+  source venv/bin/activate
+  python vision/vision_infer.py
 
 모델·기기를 골라 실행 (venv 활성화 상태)
-  python data_stream/vision/vision_infer.py                                     live · 전 기기 · yoloe (config 기본)
-  python data_stream/vision/vision_infer.py --devices drone --models unidepth   live · 드론에 unidepth (다른 터미널에서 추가)
-  python data_stream/vision/vision_infer.py --devices drone robot1 --models yoloe unidepth moge2_aerial
-  python data_stream/vision/vision_infer.py --devices drone --models moge2_aerial --runs 20261001_062842   저장된 이미지
-  python data_stream/vision/vision_infer.py --devices all --models yoloe --runs latest --watch              저장되는 대로 계속
-  python data_stream/vision/vision_infer.py --list                              기기·실행·프레임 수만 본다
+  python vision/vision_infer.py                                     live · 전 기기 · yoloe (config 기본)
+  python vision/vision_infer.py --devices drone --models unidepth   live · 드론에 unidepth (다른 터미널에서 추가)
+  python vision/vision_infer.py --devices drone robot1 --models yoloe unidepth moge2_aerial
+  python vision/vision_infer.py --devices drone --models moge2_aerial --runs 20261001_062842   저장된 이미지
+  python vision/vision_infer.py --devices all --models yoloe --runs latest --watch              저장되는 대로 계속
+  python vision/vision_infer.py --list                              기기·실행·프레임 수만 본다
 
 준비
   YOLOE    가중치 경로만 맞으면 된다 (prompt-free 는 텍스트 인코더 불필요).
