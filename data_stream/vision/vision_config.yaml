@@ -67,11 +67,30 @@ models:
     max_det: 100
     half: true
     save_polygons: true           # 검출마다 마스크 외곽선(픽셀 좌표)을 results.jsonl 에 남긴다
+    max_area_ratio: null          # 예) 0.5 — 박스가 화면의 이 비율보다 크면 버린다 (장면·어둠 같은 전체 화면 검출). null = 끔
+    area_exempt: [person]         # 가까이 와서 화면을 덮어도 남길 클래스
     prompt:
       mode: free                  # free = prompt-free 내장 어휘 / text = 아래 classes 만 텍스트 프롬프트로 찾는다
       # free 모드 — 내장 어휘 이름(영어, 대소문자 무시). 어휘에 없는 이름은 시작할 때 알려 주고 무시한다
       include: []                 # 비우면 전부. 주면 이 클래스만
-      exclude: []                 # 뺄 클래스. 예) [keyboard, computer keyboard, laptop]
+      # 마지막 단어(중심 명사)가 이것이면 뺀다 — dance floor·night view·street light 는 빠지고 floor fan·room divider 는 남는다
+      exclude_heads: []            # 예시 목록은 아래 주석 (켜면 장면·조명·구조물 이름 389종이 빠진다)
+      # exclude_heads: [
+      #   floor, ceiling, wall, window, door, archway, arch, siding, skylight,                     # 구조물 (트윈 맵에 이미 있음)
+      #   light, lights, lighting, lamp, chandelier, flare, spotlight,                            # 조명
+      #   sky, night, darkness, evening, dusk, dawn, twilight, sunset, sunrise, morning, afternoon,
+      #   weather, fog, mist, rainbow, cloud, clouds, lightning,                                  # 하늘·시간·날씨
+      #   view, scenery, landscape, nature, countryside, panorama, horizon,                       # 풍경
+      #   room, playroom, office, kitchen, bathroom, bedroom, hall, lobby, corridor, hallway, studio, gym,
+      #   showroom, terminal, station, hangar, garage, warehouse, factory,                        # 실내 장소
+      #   site, yard, backyard, courtyard, court, park, garden, farm, plantation, orchard, field, snowfield,
+      #   meadow, forest, woodland, jungle, thicket, dock, harbor, port, pier, boardwalk, deck, beach, coast,
+      #   shore, sea, ocean, lake, river, waterway, pond, stream, waterfall, mountain, hill, valley, ravine,
+      #   canyon, cliff, desert, quarry, cave, city, town, village, street, road, highway, overpass, bridge,
+      #   tunnel, square, plaza, market, mall, store, shop, restaurant, cafe, bar, nightclub, club,  # 실외 장소
+      #   stage, arena, stadium, theater, concert, festival, performance, show, event, activity, stunt, course, rink,
+      #   surface, reflection, shadow, silhouette, close-up, composition, overlay, texture, pattern, background]
+      exclude: []                 # 뺄 클래스. 예) [darkness, water feature, ceiling fan, air conditioner]
       # text 모드 — 원하는 클래스를 자유 문구로. 시작할 때 MobileCLIP 으로 한 번 임베딩한다 (추론 속도는 같음)
       classes: [person, boat, life jacket, car]
       text_weight: /home/ny/physical_demo/data_stream/models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
@@ -100,6 +119,19 @@ models:
     use_fp16: true
     save_depth: true
     depth_dtype: float16
+
+# ── 검출 안정화 (yoloe 검출, 기기·실행 폴더마다) ───────────────────────────
+# 프레임 사이 같은 물체(IoU)를 이어 붙여 track_id 를 주고, 박스·이름·거리가 장마다 튀지 않게 한다.
+stabilize:
+  enabled: false                  # true 면 아래 값으로 안정화
+  iou_match: 0.3                  # 이전 장 물체와 이만큼 겹치면 같은 물체 (이름은 안 본다)
+  box_alpha: 0.5                  # 박스·신뢰도 EMA. 낮을수록 안정적, 반응은 느리다
+  label_decay: 0.8                # 이름 다수결: 장마다 이전 표를 이만큼 줄이고 이번 신뢰도를 더한다
+  min_hits: 2                     # 이만큼 연속 잡혀야 내보낸다 (한 장짜리 오검출 제거)
+  hold_missed: 2                  # 못 잡은 장이 이만큼까지는 마지막 박스로 유지 (held: true)
+  max_missed: 5                   # 이보다 오래 안 보이면 물체를 잊는다 (돌아오면 새 track_id)
+  depth_window: 5                 # 거리 = 최근 이만큼의 중앙값
+  reset_gap_s: 2.0                # 프레임 시각이 이보다 벌어지면 처음부터
 
 # ── depth 시각화 / YOLOE 결합 ──────────────────────────────────────────────
 depth_vis:
@@ -139,7 +171,7 @@ geo:
 
 # ── 오버레이 표시 (yoloe · depth 공통) ─────────────────────────────────────
 # label: 박스 위에 쓸 줄 목록. 한 줄 = 항목 목록. 값이 없는 항목은 빠진다
-#   name 클래스 이름 · conf 신뢰도 · cls 클래스 번호 · depth 광축 거리 Z · range 직선거리
+#   name 클래스 이름 · conf 신뢰도 · cls 클래스 번호 · id track_id · depth 광축 거리 Z · range 직선거리
 #   gps 위도,경도 · alt 해발고도 · ned 드론 기준 북·동·아래 오프셋(m)
 overlay:
   min_conf: 0.25                  # 그릴 최소 신뢰도. null = 다 그림. 그림에서만 거른다 (results 에는 전부 남음)

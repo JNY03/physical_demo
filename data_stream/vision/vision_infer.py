@@ -4,6 +4,10 @@
 vision_infer.py — 스트림 프레임에 비전 모델 추론 (YOLOE · UniDepth · MoGe2-Aerial)
 ================================================================================
 2026-10-01
+2026-10-14 · 통합데이터규약 v2 (DS-06) — 결과를 파일·Redis 로 낼 때만 v2 비전 결과(규약 §3-6)로 바꾼다(v2_record).
+  안쪽 계산(오버레이 · 거리 결합 · 지리 계산)은 옛 칸 이름(cls · name · conf · xyxy · image_wh · frame · source)을 그대로 쓴다.
+  그 장의 기록(frames.jsonl 한 줄 = Redis header, sender 포함)을 ModelOutput.write(…, header=) 로 넘겨
+  공통 머리 · frame_ref · timestamp 를 채운다. 읽는 쪽은 새 이름을 먼저, 없으면 옛 이름(frame_file → file, frame_file → frame).
 
 두 가지 모드 (--runs 로 고른다)
   live (기본)  server_stream_multi_source.py 가 흘리는 Redis camera_stream:<기기> 에서
@@ -24,9 +28,10 @@ vision_infer.py — 스트림 프레임에 비전 모델 추론 (YOLOE · UniDep
 
 Redis 출력 (live)
   vision_stream:<기기>:<모델>   (최근 live.maxlen 개)
-      result   JSON — results.jsonl 한 줄과 같음 + source_id(원본 camera_stream 항목 ID), recv_ms, done_ms, lag_ms
+      result   JSON — results.jsonl 한 줄과 같음 (v2 비전 결과)
       overlay  오버레이 JPEG 바이트
-      header   {"source","model","n","run","file","source_id"}
+      header   {"stream","model","n","run","frame_file","stream_entry_id","lag_ms"}
+               stream_entry_id = 원본 camera_stream 항목 ID · lag_ms = 결과가 나온 순간 - 원본이 Redis 에 들어간 순간 (ms)
   vision_depth:<기기>:<모델>    depth 모델만 (최근 live.depth_maxlen 개)
       depth    depth 원본 바이트 (미터, 0 = 무효)   dtype ("<f2" 등) · shape ("H,W") · unit ("m") · header
       읽기: np.frombuffer(f[b"depth"], f[b"dtype"].decode()).reshape(map(int, f[b"shape"].split(b",")))
@@ -43,15 +48,21 @@ Redis 출력 (live)
     같은 모델은 한 프로세스만 디스크에 쓰고, 다른 모델은 각자 처리한다.
     live 가 쓰는 중인 실행 폴더·모델은 저장된 이미지 처리에서 건너뛴다 (live 를 끈 뒤 돌리면 채워진다).
 
-results.jsonl 한 줄
-  공통   n, frame, source, run, model, image_wh, infer_ms, (header: frames.jsonl 의 그 장 정보)
-         live 면 live, source_id, recv_ms, done_ms, lag_ms 도
-  yoloe  prompt (free | text), detections: [{cls, name, conf, xyxy, polygon?}]
+results.jsonl 한 줄 (v2 비전 결과, 규약 §3-6)
+  머리   schema_version "2.0", source_id "ds-vision", node_id (이 기기 이름), zone_id, timestamp (원본 프레임 시각),
+         frame_ref {camera_id, sequence_id, timestamp} (보낸 쪽이 v2 일 때), emitted_at (결과가 나온 순간),
+         producer {tier "server", kind "precise"}
+  공통   n, frame_file ("frames/<번호>.jpg" — 실행 폴더 기준), stream, run, model, model_file, width, height,
+         infer_ms, overlay_file, live (live 일 때)
+  yoloe  prompt (free | text), detections: [{class_id, label, confidence, bbox:[x1,y1,x2,y2], polygon?,
+         track_id, held?, label_raw?}]   (config stabilize — 박스 EMA · 이름 다수결 · held = 못 잡은 장을 마지막 박스로 유지)
+         depth 결합 검출은 depth_m 이 최근 몇 장의 중앙값, depth_m_raw 가 그 장 값
   depth  depth_file, depth_stats{min,p5,median,p95,max,valid_ratio}, intrinsics(픽셀 K), fov_x_deg,
-         fov_x_given, detections?: [{cls, name, conf, xyxy, depth_m, uv}]
-         geo 기기면  frame_ts, pose{ts, lat, lon, fix_type, amsl_m, relative_m, roll/pitch/yaw_deg, dt_s ...},
+         fov_x_given, detections?: [{class_id, label, confidence, bbox, depth_m, uv}]
+         geo 기기면  pose{timestamp, lat, lon, fix_type, amsl_m, relative_m, roll/pitch/yaw_deg, dt_s ...},
                     geo_status (ok | no_fix | no_attitude | no_state | stale_state),
                     detections 마다 range_m, cam_xyz_m, ned_m[북,동,아래], lat, lon (도), alt_m (해발)
+  옛 결과 파일(frame · source · image_wh · cls/name/conf/xyxy …)도 이어 하기에서 읽는다 (frame_file 이 없으면 frame).
   오버레이에 쓸 항목은 config overlay (박스 라벨 줄 · 제목 · 드론 위치 줄)
 
 실행 순서 (저장소 루트에서. 2026-10-01 이 PC 에서 실측 확인)
@@ -90,8 +101,10 @@ import contextlib
 import fcntl
 import json
 import signal
+import socket
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -100,7 +113,7 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from geo import DiskStates, GeoLocator, frame_ts, redis_lookup  # noqa: E402
+from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
 DEVICES = ("cam360", "drone", "robot1", "robot2")
 MODELS = ("yoloe", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360"}
@@ -113,10 +126,78 @@ COLORMAPS = {"turbo": cv2.COLORMAP_TURBO, "jet": cv2.COLORMAP_JET, "inferno": cv
              "magma": cv2.COLORMAP_MAGMA, "viridis": cv2.COLORMAP_VIRIDIS, "plasma": cv2.COLORMAP_PLASMA}
 
 STOP = False
+HOSTNAME = socket.gethostname()
+KST = timezone(timedelta(hours=9))
 
 
 def log(msg):
     print(time.strftime("%H:%M:%S ") + msg, flush=True)
+
+
+# ---------------------------------------------------------------- v2 비전 결과 (규약 §3-6 · DS-06)
+def iso_ms(t=None):
+    """epoch 초 → '2026-10-12T14:10:31.086+09:00'. 밀리초 아래는 버린다 (규약 §2-2)."""
+    return datetime.fromtimestamp(time.time() if t is None else t, KST).isoformat(timespec="milliseconds")
+
+
+DET_RENAME = {"xyxy": "bbox", "name": "label", "cls": "class_id", "conf": "confidence", "name_raw": "label_raw"}
+V2_DROP = ("header", "source_id", "recv_ms", "done_ms", "lag_ms")   # 결과에서 뺀다 (P1 · R9 — lag_ms 는 Redis header 로)
+
+
+def frame_time(s):
+    """보낸 쪽 sender → 결과 머리 timestamp(ISO). v2 프레임 헤더면 그 글자 그대로(R12 — frame_ref.timestamp 와 같다).
+    옛 기록이면 같은 뜻의 옛 칸(360 폼 timestamp(epoch 글자) · 드론 meta ts · captured_at · observed_at)을 바꿔 쓴다(§3-8).
+    GO1 의 옛 X-Timestamp 는 「보낸 순간」이라 쓰지 않는다(D7-1)."""
+    v = s.get("timestamp")
+    if isinstance(v, str):
+        try:
+            datetime.fromisoformat(v)
+            return v
+        except ValueError:
+            pass
+    for k in ("timestamp", "ts", "captured_at", "observed_at"):
+        t = to_epoch(s.get(k))
+        if t is not None:
+            return iso_ms(t)
+    return None
+
+
+def v2_record(rec, header):
+    """안쪽 결과 사전 → v2 비전 결과 (§3-6). header = Redis/frames.jsonl 의 그 장 기록(sender 포함). rec 은 바꾸지 않는다."""
+    s = (header or {}).get("sender") or {}
+    if not isinstance(s, dict):
+        s = {}
+    ts = frame_time(s)
+    out = {"schema_version": "2.0", "source_id": "ds-vision", "node_id": HOSTNAME,
+           "zone_id": s.get("zone_id"), "timestamp": ts}
+    cam, seq = s.get("camera_id"), s.get("sequence_id")
+    if isinstance(cam, str) and cam and isinstance(seq, int) and not isinstance(seq, bool):
+        out["frame_ref"] = {"camera_id": cam, "sequence_id": seq, "timestamp": ts}
+    out["emitted_at"] = rec.get("_emitted_at")                 # 두 번 불려도 같게 — pop 하지 않는다
+    out["producer"] = {"tier": "server", "kind": "precise"}
+    for k, v in rec.items():
+        if k.startswith("_") or k in V2_DROP:
+            continue
+        if k == "image_wh":
+            out["width"], out["height"] = v
+        elif k in ("weight", "checkpoint"):
+            out["model_file"] = v
+        elif k == "source":
+            out["stream"] = v
+        elif k == "frame":
+            out["frame_file"] = v
+        elif k == "frame_ts":
+            continue                                           # = timestamp
+        elif k == "pose" and isinstance(v, dict):
+            p = dict(v)
+            t = p.pop("ts", None)
+            out["pose"] = dict({"timestamp": iso_ms(t) if isinstance(t, (int, float)) else t}, **p)
+        elif k == "detections":
+            out["detections"] = [{DET_RENAME.get(dk, dk): dv for dk, dv in d.items() if not str(dk).startswith("_")}
+                                 for d in (v or [])]
+        else:
+            out[k] = v
+    return out
 
 
 # ---------------------------------------------------------------- 입력 (저장 폴더)
@@ -153,9 +234,10 @@ def read_frame_list(run):
                     h = json.loads(line)
                 except ValueError:
                     continue
-                if not h.get("file"):
+                ff = h.get("frame_file") or h.get("file")      # v2 DS 기록 · 옛 DS 기록
+                if not ff:
                     continue
-                name = Path(h["file"]).name
+                name = Path(ff).name
                 p = run / "frames" / name
                 if name not in seen and p.exists():
                     seen.add(name)
@@ -203,16 +285,20 @@ class ModelOutput:
             with open(self.results, "rb") as f:
                 for line in f:
                     try:
-                        self.done.add(json.loads(line)["frame"])
-                    except (ValueError, KeyError):
-                        pass
+                        r = json.loads(line)
+                        k = r.get("frame_file") or r.get("frame")   # v2 결과 · 옛 결과
+                    except (ValueError, AttributeError):
+                        continue
+                    if k:
+                        self.done.add(k)
             if line and not line.endswith(b"\n"):
                 with open(self.results, "ab") as f:  # 강제 종료로 끊긴 마지막 줄 뒤에 이어 붙지 않게
                     f.write(b"\n")
         self.fh = open(self.results, "ab")
 
-    def write(self, rec, overlay=None, depth=None, depth_dtype="float16", overlay_jpg=None):
-        """overlay_jpg 를 주면 (live 에서 Redis 용으로 이미 인코딩한 JPEG) 그 바이트를 그대로 쓴다."""
+    def write(self, rec, overlay=None, depth=None, depth_dtype="float16", overlay_jpg=None, header=None):
+        """overlay_jpg 를 주면 (live 에서 Redis 용으로 이미 인코딩한 JPEG) 그 바이트를 그대로 쓴다.
+        header = 그 장의 기록(frames.jsonl 한 줄 = Redis header). 파일에는 v2_record(rec, header) 를 쓴다."""
         stem = Path(rec["frame"]).stem
         if overlay_jpg is not None:
             (self.overlay_dir / (stem + ".jpg")).write_bytes(overlay_jpg)
@@ -223,7 +309,7 @@ class ModelOutput:
         if depth is not None:
             np.save(self.depth_dir / (stem + ".npy"), depth.astype(depth_dtype))
             rec["depth_file"] = "depth/%s.npy" % stem
-        self.fh.write((json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.fh.write((json.dumps(v2_record(rec, header), ensure_ascii=False) + "\n").encode("utf-8"))
         self.fh.flush()
         self.done.add(rec["frame"])
 
@@ -278,16 +364,24 @@ class YoloeRunner:
                         log("  yoloe prompt.%s: 내장 어휘에 없는 이름 '%s' — 무시" % (key, n))
                 return set(out)
             include, exclude = ids("include"), ids("exclude")
+            heads = {str(h).strip().lower() for h in pr.get("exclude_heads") or []}
+            n_head = 0
+            if heads:                                    # 마지막 단어(중심 명사)로 뺀다: dance floor·night view 는 빠지고 floor fan 은 남는다
+                by_head = {int(i) for i, n in names.items() if str(n).split()[-1].lower() in heads}
+                n_head = len(by_head - exclude)
+                exclude |= by_head
             if include or exclude:
                 self.keep = sorted((include or set(int(i) for i in names)) - exclude)
                 if not self.keep:
                     raise SystemExit("models.yoloe.prompt: include/exclude 로 남는 클래스가 없습니다")
             log("  yoloe prompt-free %d종%s%s" % (len(self.keep) if self.keep else len(names),
                                                  " · include %d" % len(include) if include else "",
-                                                 " · exclude %d" % len(exclude) if exclude else ""))
+                                                 " · exclude %d (중심 명사 %d)" % (len(exclude), n_head) if exclude else ""))
         else:
             raise SystemExit("models.yoloe.prompt.mode 는 free 또는 text: %s" % self.mode)
         self.half = bool(cfg.get("half", True)) and device.startswith("cuda")
+        self.max_area = cfg.get("max_area_ratio")       # 박스가 화면의 이 비율보다 크면 버린다 (전체 화면 검출)
+        self.area_exempt = {str(n).lower() for n in cfg.get("area_exempt") or []}
         self(np.zeros((480, 640, 3), np.uint8))  # 첫 장 지연을 미리 치른다
 
     def __call__(self, bgr):
@@ -303,7 +397,11 @@ class YoloeRunner:
             conf = r.boxes.conf.cpu().numpy()
             cls = r.boxes.cls.cpu().numpy().astype(int)
             polys = r.masks.xy if r.masks is not None else [None] * len(cls)
+            img_area = float(bgr.shape[0] * bgr.shape[1])
             for b, s, k, poly in zip(xyxy, conf, cls, polys):
+                if (self.max_area and (b[2] - b[0]) * (b[3] - b[1]) > float(self.max_area) * img_area
+                        and str(r.names[int(k)]).lower() not in self.area_exempt):
+                    continue
                 d = {"cls": int(k), "name": r.names[int(k)], "conf": round(float(s), 4),
                      "xyxy": [round(float(v), 1) for v in b]}
                 if poly is not None and len(poly):
@@ -312,6 +410,105 @@ class YoloeRunner:
                         d["polygon"] = np.round(poly, 1).tolist()
                 dets.append(d)
         return {"infer_ms": round(ms, 1), "weight": Path(self.weight).name, "prompt": self.mode}, dets
+
+
+# ---------------------------------------------------------------- 검출 안정화 (config stabilize)
+def box_iou(a, b):
+    """a (N,4) · b (M,4) xyxy → (N,M)"""
+    a, b = np.asarray(a, np.float64).reshape(-1, 4), np.asarray(b, np.float64).reshape(-1, 4)
+    lt = np.maximum(a[:, None, :2], b[None, :, :2])
+    rb = np.minimum(a[:, None, 2:], b[None, :, 2:])
+    inter = np.prod(np.clip(rb - lt, 0, None), axis=2)
+    area = lambda x: (x[:, 2] - x[:, 0]) * (x[:, 3] - x[:, 1])
+    return inter / np.maximum(area(a)[:, None] + area(b)[None, :] - inter, 1e-9)
+
+
+class Stabilizer:
+    """기기·실행 폴더마다 하나. 프레임 사이 같은 물체(IoU, 이름 무관)를 이어 붙여 흔들림을 줄인다.
+      track_id   같은 물체는 같은 번호 (Unity 등 받는 쪽이 물체를 이어 갈 수 있게)
+      박스       EMA (box_alpha)                  이름  감쇠 누적 신뢰도로 다수결 (매 장 바뀌지 않게)
+      등장       min_hits 장 연속 잡혀야 내보낸다      소멸  hold_missed 장까지는 마지막 박스로 유지 (held)
+      거리       depth 모델마다 최근 depth_window 개의 중앙값 (depth_m, 원래 값은 depth_m_raw)
+      reset_gap_s 보다 프레임 시각이 벌어지거나 거꾸로 가면 처음부터"""
+
+    def __init__(self, sc):
+        self.iou = float(sc.get("iou_match", 0.3))
+        self.alpha = float(sc.get("box_alpha", 0.5))
+        self.min_hits = int(sc.get("min_hits", 2))
+        self.hold = int(sc.get("hold_missed", 2))
+        self.max_missed = max(self.hold, int(sc.get("max_missed", 5)))
+        self.decay = float(sc.get("label_decay", 0.8))
+        self.window = int(sc.get("depth_window", 5))
+        self.reset_gap = float(sc.get("reset_gap_s", 2.0))
+        self.tracks, self.next_id, self.last_ts = [], 1, None
+
+    def update(self, dets, ts):
+        if ts is not None and self.last_ts is not None and not (0 <= ts - self.last_ts <= self.reset_gap):
+            self.tracks = []
+        self.last_ts = ts if ts is not None else self.last_ts
+        pairs = []
+        if self.tracks and dets:
+            iou = box_iou([t["box"] for t in self.tracks], [d["xyxy"] for d in dets])
+            pairs = sorted(((iou[i, j], i, j) for i in range(len(self.tracks)) for j in range(len(dets))
+                            if iou[i, j] >= self.iou), reverse=True)
+        used_t, used_d = set(), set()
+        for _, i, j in pairs:                                  # IoU 큰 쌍부터 하나씩
+            if i in used_t or j in used_d:
+                continue
+            used_t.add(i)
+            used_d.add(j)
+            t, d = self.tracks[i], dets[j]
+            t["box"] = [self.alpha * n + (1 - self.alpha) * o for n, o in zip(d["xyxy"], t["box"])]
+            t["conf"] = self.alpha * d["conf"] + (1 - self.alpha) * t["conf"]
+            self._vote(t, d)
+            t["hits"] += 1
+            t["missed"] = 0
+            t["det"] = d
+        for i, t in enumerate(self.tracks):
+            if i not in used_t:
+                t["missed"] += 1
+                t["det"] = None
+        for j, d in enumerate(dets):
+            if j not in used_d:
+                t = {"id": self.next_id, "box": list(d["xyxy"]), "conf": d["conf"], "votes": {}, "cls": {},
+                     "hits": 1, "missed": 0, "det": d, "depth": {}}
+                self.next_id += 1
+                self._vote(t, d)
+                self.tracks.append(t)
+        self.tracks = [t for t in self.tracks if t["missed"] <= self.max_missed]
+        out = []
+        for t in self.tracks:
+            if t["hits"] < self.min_hits or t["missed"] > self.hold:
+                continue
+            name = max(t["votes"], key=t["votes"].get)
+            d = dict(t["det"]) if t["det"] is not None else {}
+            if t["det"] is None:                               # 이번 장에 못 잡음 — 마지막 박스로 유지 (마스크 없음)
+                d["held"] = True
+            if d.get("name") != name:                          # 다수결 이름과 다른 마스크·외곽선은 그대로 둔다
+                d["name_raw"] = d.get("name")
+            d.update(cls=t["cls"][name], name=name, conf=round(t["conf"], 4), track_id=t["id"],
+                     xyxy=[round(float(v), 1) for v in t["box"]])
+            out.append(d)
+        return out
+
+    def _vote(self, t, d):
+        for k in t["votes"]:
+            t["votes"][k] *= self.decay
+        t["votes"][d["name"]] = t["votes"].get(d["name"], 0.0) + d["conf"]
+        t["cls"][d["name"]] = d["cls"]
+
+    def smooth_depth(self, dets, model):
+        by_id = {t["id"]: t for t in self.tracks}
+        for d in dets:
+            t = by_id.get(d.get("track_id"))
+            if t is None or d.get("depth_m") is None:
+                continue
+            h = t["depth"].setdefault(model, [])
+            h.append(d["depth_m"])
+            del h[:-self.window]
+            d["depth_m_raw"] = d["depth_m"]
+            d["depth_m"] = round(float(np.median(h)), 3)
+        return dets
 
 
 # ---------------------------------------------------------------- 모델: depth 공통
@@ -332,6 +529,17 @@ def fov_from_k(K, w):
     return float(np.degrees(2 * np.arctan(0.5 * w / K[0, 0]))) if K is not None and K[0, 0] > 0 else None
 
 
+def _unidepth_get_paddings(original_shape, aspect_ratio_range):
+    """UniDepth get_paddings 와 같지만 int() 대신 round().
+    원본은 464×400 처럼 int(400 * 1.16) = 463 이 되면 pad = -1 이 되어 depth 폭이 1 로 잘린다."""
+    H_ori, W_ori = original_shape
+    min_ratio, max_ratio = aspect_ratio_range
+    target = min(max_ratio, max(min_ratio, W_ori / H_ori))
+    H_new, W_new = max(H_ori, round(W_ori / target)), max(W_ori, round(H_ori * target))
+    pad_t, pad_l = (H_new - H_ori) // 2, (W_new - W_ori) // 2
+    return (pad_l, W_new - W_ori - pad_l, pad_t, H_new - H_ori - pad_t), (H_new, W_new)
+
+
 class UniDepthRunner:
     name = "unidepth"
 
@@ -340,6 +548,8 @@ class UniDepthRunner:
         if cfg.get("repo_path") and cfg["repo_path"] not in sys.path:
             sys.path.insert(0, cfg["repo_path"])
         from unidepth.models import UniDepthV2
+        import unidepth.models.unidepthv2.unidepthv2 as udv2
+        udv2.get_paddings = _unidepth_get_paddings
         self.torch = torch
         self.cfg = cfg
         self.device = device
@@ -502,7 +712,7 @@ def colorbar(width, lo, hi, vis):
 
 
 # ---------------------------------------------------------------- 오버레이 (config overlay)
-LABEL_TOKENS = ("name", "conf", "cls", "depth", "range", "gps", "alt", "ned")
+LABEL_TOKENS = ("name", "conf", "cls", "id", "depth", "range", "gps", "alt", "ned")
 
 
 def check_overlay_cfg(cfg):
@@ -531,6 +741,8 @@ def label_token(tok, d, dec):
         return "%.2f" % d["conf"]
     if tok == "cls":
         return "#%d" % d["cls"]
+    if tok == "id":
+        return "id%d" % d["track_id"] if d.get("track_id") is not None else None
     if tok == "depth":
         return "Z%.2fm" % d["depth_m"] if d.get("depth_m") is not None else None
     if tok == "range":
@@ -702,38 +914,57 @@ def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cf
     w = bgr.shape[1]
     out = []
     dets = None
+    stab = None
     if "yoloe" in runners and (save_yoloe or (depth_models and fusion.get("enabled", True))):
         info, dets = runners["yoloe"](bgr)
+        sc = cfg.get("stabilize") or {}
+        if sc.get("enabled", True):
+            key = (device, base.get("run"))
+            stab = cfg.setdefault("_stab", {}).get(key)
+            if stab is None:
+                stab = cfg["_stab"][key] = Stabilizer(sc)
+            ts = frame_ts(header)
+            dets = stab.update(dets, ts if ts is not None else time.time())
         if save_yoloe:
             rec = dict(base, model="yoloe", **info)
             rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]
             title = "yoloe  %s/%s #%s" % (device, base.get("run") or "live", base.get("n"))
             out.append(("yoloe", rec, yoloe_overlay(bgr, rec["detections"], title, ocfg), None))
     fov = fov_hint(dev_cfg, header)
-    pose = None                                         # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
-    for m in depth_models:
-        info, depth, K = runners[m](bgr, fov_x=fov)
-        rec = dict(base, model=m, **info)
+    pose = []                                           # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
+
+    def add_depth_fields(rec, depth, K, w):
         rec["depth_stats"] = depth_stats(depth)
         rec["intrinsics"] = np.round(K.astype(np.float64), 3).tolist()
         fx = fov_from_k(K, w)
         rec["fov_x_deg"] = round(fx, 2) if fx else None
         rec["fov_x_given"] = fov
+
+    def add_geo(rec, dets_, K):
+        if locator is None:
+            return
+        if not pose:
+            ts = frame_ts(header)
+            p, dt = pose_fn(ts) if pose_fn else (None, None)
+            max_dt = float((cfg.get("geo") or {}).get("max_state_dt_s", 0.5))
+            stale = p is not None and dt is not None and abs(dt) > max_dt
+            pose.append((ts, None if p is None else dict(p, dt_s=None if dt is None else round(dt, 3)), stale))
+        ts, p, stale = pose[0]
+        st = locator.locate(dets_, K, None if stale else p)
+        rec["frame_ts"] = ts
+        rec["pose"] = p
+        rec["geo_status"] = "stale_state" if stale else st
+
+    for m in depth_models:
+        info, depth, K = runners[m](bgr, fov_x=fov)
+        rec = dict(base, model=m, **info)
+        add_depth_fields(rec, depth, K, w)
         fused = None
         if dets is not None and fusion.get("enabled", True):
             fused = attach_depth(dets, depth, fusion)
-            if locator is not None:
-                if pose is None:
-                    ts = frame_ts(header)
-                    p, dt = pose_fn(ts) if pose_fn else (None, None)
-                    max_dt = float((cfg.get("geo") or {}).get("max_state_dt_s", 0.5))
-                    stale = p is not None and dt is not None and abs(dt) > max_dt
-                    pose = (ts, None if p is None else dict(p, dt_s=None if dt is None else round(dt, 3)), stale)
-                ts, p, stale = pose
-                st = locator.locate(fused, K, None if stale else p)
-                rec["frame_ts"] = ts
-                rec["pose"] = p
-                rec["geo_status"] = "stale_state" if stale else st
+            if stab is not None:
+                stab.smooth_depth(fused, m)
+            add_geo(rec, fused, K)
             rec["detections"] = fused
         title = "%s  %s/%s #%s" % (m, device, base.get("run") or "live", base.get("n"))
         out.append((m, rec, depth_overlay(bgr, depth, fused, title, vis, ocfg, rec), depth))
@@ -809,23 +1040,23 @@ def _process_run(device, run, own, runners, cfg, args, frames):
         rel = path.relative_to(run).as_posix()
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
         base = {"n": frame_number(path), "frame": rel, "source": device, "run": run.name}
-        if header is not None:
-            base["header"] = {k: header[k] for k in ("n", "file", "via") if k in header}
         if bgr is None:
             for m in own:
                 if rel not in outs[m].done:
-                    outs[m].write(dict(base, model=m, error="이미지를 읽지 못함"))
+                    outs[m].write(dict(base, model=m, error="이미지를 읽지 못함", _emitted_at=iso_ms()), header=header)
             continue
         h, w = bgr.shape[:2]
         base["image_wh"] = [w, h]
         need_depth = [m for m in own if m in DEPTH_MODELS and rel not in outs[m].done]
         save_yoloe = "yoloe" in outs and rel not in outs["yoloe"].done
         # yoloe 를 다른 프로세스가 맡고 있어도 결합용 검출은 여기서 돌린다 (저장은 안 함)
-        for m, rec, overlay, depth in infer_frame(bgr, base, header, device, save_yoloe, need_depth, runners, cfg,
-                                                  pose_fn):
+        results = infer_frame(bgr, base, header, device, save_yoloe, need_depth, runners, cfg, pose_fn)
+        emitted_at = iso_ms()                               # 저장본도 결과가 나온 순간을 적는다 (live 는 done_ms 자리)
+        for m, rec, overlay, depth in results:
             mcfg = cfg["models"][m]
+            rec["_emitted_at"] = emitted_at
             outs[m].write(rec, overlay, depth if mcfg.get("save_depth", True) else None,
-                          mcfg.get("depth_dtype", "float16"))
+                          mcfg.get("depth_dtype", "float16"), header=header)
         done += 1
         if done % 20 == 0 or i == len(todo) - 1:
             el = time.time() - t_start
@@ -926,8 +1157,9 @@ class LiveRunner:
             return
         recv_ms = int(eid.split(b"-")[0])
         run_dir = rel = None
-        if header.get("file"):
-            p = self.data_root / header["file"]
+        ff = header.get("frame_file") or header.get("file")    # v2 DS 기록 · 옛 DS 기록
+        if ff:
+            p = self.data_root / ff
             if p.parent.parent.is_dir():
                 run_dir, rel = p.parent.parent, "frames/" + p.name
             else:
@@ -936,16 +1168,16 @@ class LiveRunner:
         outs = self.outputs(dv, run_dir)
         h, w = bgr.shape[:2]
         base = {"n": header.get("n"), "frame": rel, "source": dv, "run": run_dir.name if run_dir else None,
-                "image_wh": [w, h], "live": True, "source_id": eid.decode(), "recv_ms": recv_ms}
-        base["header"] = {k: header[k] for k in ("n", "file", "via") if k in header}
+                "image_wh": [w, h], "live": True}
         results = infer_frame(bgr, base, header, dv, "yoloe" in self.models,
                               [m for m in self.models if m in DEPTH_MODELS], self.runners, self.cfg,
                               lambda ts: self.pose(dv, ts))
         done_ms = int(time.time() * 1000)
         pipe = self.r.pipeline(transaction=False)
         infer_ms = 0.0
+        emitted_at = iso_ms(done_ms / 1000.0)
         for m, rec, overlay, depth in results:
-            rec["done_ms"], rec["lag_ms"] = done_ms, done_ms - recv_ms
+            rec["_emitted_at"] = emitted_at
             infer_ms += rec.get("infer_ms") or 0
             jpg = cv2.imencode(".jpg", overlay, self.jpeg)[1].tobytes()
             mcfg = self.cfg["models"][m]
@@ -953,11 +1185,12 @@ class LiveRunner:
             o = outs.get(m)
             if o is not None and rel is not None and rel not in o.done:
                 o.write(rec, depth=depth if (depth is not None and mcfg.get("save_depth", True)) else None,
-                        depth_dtype=dtype, overlay_jpg=jpg)
-            short = json.dumps({"source": dv, "model": m, "n": base["n"], "run": base["run"],
-                                "file": header.get("file"), "source_id": base["source_id"]}, ensure_ascii=False)
+                        depth_dtype=dtype, overlay_jpg=jpg, header=header)
+            short = json.dumps({"stream": dv, "model": m, "n": base["n"], "run": base["run"],
+                                "frame_file": ff, "stream_entry_id": eid.decode(),
+                                "lag_ms": done_ms - recv_ms}, ensure_ascii=False)       # N6 — lag_ms 는 결과가 아니라 여기
             pipe.xadd("vision_stream:%s:%s" % (dv, m),
-                      {"result": json.dumps(rec, ensure_ascii=False), "overlay": jpg, "header": short},
+                      {"result": json.dumps(v2_record(rec, header), ensure_ascii=False), "overlay": jpg, "header": short},
                       maxlen=self.maxlen, approximate=True)
             if depth is not None:                       # depth 원본 (미터, 0 = 무효). 디스크 depth/*.npy 와 같은 값
                 d = np.ascontiguousarray(depth.astype(dtype))

@@ -1,0 +1,323 @@
+redis:
+  host: localhost
+  port: 7860
+  db: 0
+  password: ""        # 실제 값은 환경변수 REDIS_PASSWORD 로 준다 (공개 저장소에 두지 않는다)
+
+streams:
+  camera_id: go1_front
+  input: camera_stream:go1_front
+  output: control_stream:go1_front
+  yolo_vis: processed_stream:go1_front
+  depth_vis: depth_stream:go1_front
+  # 로봇 속도 수신 스트림 (동적 threshold 계산용)
+  velocity: velocity_stream:go1_front
+
+runtime:
+  use_fp16: true
+  num_workers: 1
+  vis_fps_limit: 5
+
+image:
+  w_half: 464
+  h_total: 400
+  jpeg_quality: 70
+
+risk:
+  # 속도 스트림 수신 실패 시 fallback 값
+  near_threshold: 2.0
+  mid_threshold: 2.4
+  # 동적 threshold 파라미터
+  dynamic_threshold:
+    enabled: true
+    reaction_time: 0.10      # 시스템 반응시간 (초)
+    brake_factor: 0.30       # 제동거리 계수 (속도 × 계수 = 제동거리)
+    safety_margin: 0.50      # 고정 안전 여유거리 (m)
+    min_threshold: 1.0       # 최소 near threshold (m)
+    max_threshold: 2.5       # 최대 near threshold (m)
+
+# [최적화 2] Redis Hash 설정
+# Stream에는 ref(hash key)만 발행, 실제 데이터는 Hash에 저장
+result_hash:
+  ttl: 5                     # Hash TTL (초) — stale 데이터 자동 삭제
+
+# Go1 어안 카메라 내부 파라미터 (캘리브레이션 결과)
+# UniDepth에 camera=K 전달용 — 실제 캘리브레이션 값으로 교체 필요
+camera_intrinsics:
+  enabled: true
+  # 3×3 K 행렬 (fx, fy, cx, cy)
+  fx: 285.0
+  fy: 285.0
+  cx: 232.0   # w_half / 2
+  cy: 200.0   # h_total / 2
+
+models:
+  unidepth:
+    model_name: /home/dg/capstone-db/image_server/checkpoints/unidepth-v2-vitb14
+    infer_imgsz: [320, 240]
+
+  finetune_detector:
+    weight: /home/dg/capstone-db/image_server/best_finetune_train3.pt
+    conf: 0.25
+    imgsz: 320
+
+  zeroshot_detector:
+    weight: /home/dg/capstone-db/image_server/yolov8s-world.pt
+    conf: 0.12
+    imgsz: 320
+
+fusion:
+  iou: 0.45
+  near_bonus: 0.15
+
+classes:
+  finetune:
+    - person
+    - box
+    - power strip
+    - bottle
+    - robot
+    - chair
+    - backpack
+    - laptop
+    - umbrella
+    - fire extinguisher
+    - tissue box
+    - toilet paper roll
+    - trash bin
+    - card
+    - paper bag
+
+  zeroshot:
+    - person
+    - pedestrian
+    - child
+    - dog
+    - cat
+    - car
+    - truck
+    - bus
+    - motorcycle
+    - bicycle
+    - scooter
+
+    - traffic cone
+    - bollard
+    - pole
+    - barrier
+    - fence
+    - guardrail
+    - curb
+    - stairs
+    - ramp
+    - speed bump
+    - puddle
+    - rock
+    - branch
+
+    - trash
+    - plastic bag
+    - cardboard box
+    - carton
+    - package
+    - parcel
+    - shipping box
+    - open box
+    - storage box
+
+    - wire
+    - cable
+    - hose
+    - cord
+    - rope
+
+    - chair
+    - table
+    - bench
+    - door
+    - wall
+    - pillar
+    - trash bin
+    - fire extinguisher
+    - backpack
+    - bag
+    - black bag
+    - pouch
+    - tote bag
+    - luggage
+    - box
+    - bottle
+    - plastic bottle
+    - umbrella
+    - robot
+    - quadruped robot
+    - robot dog
+
+group_mapping:
+  person: AGENT
+  pedestrian: AGENT
+  child: AGENT
+  dog: AGENT
+  cat: AGENT
+  robot: AGENT
+  quadruped robot: AGENT
+  robot dog: AGENT
+
+  car: VEHICLE
+  truck: VEHICLE
+  bus: VEHICLE
+  motorcycle: VEHICLE
+  bicycle: VEHICLE
+  scooter: VEHICLE
+
+  box: HARD_OBSTACLE
+  cardboard box: HARD_OBSTACLE
+  carton: HARD_OBSTACLE
+  package: HARD_OBSTACLE
+  parcel: HARD_OBSTACLE
+  shipping box: HARD_OBSTACLE
+  open box: HARD_OBSTACLE
+  storage box: HARD_OBSTACLE
+  chair: HARD_OBSTACLE
+  table: HARD_OBSTACLE
+  bench: HARD_OBSTACLE
+  barrier: HARD_OBSTACLE
+  fence: HARD_OBSTACLE
+  guardrail: HARD_OBSTACLE
+  wall: HARD_OBSTACLE
+  pillar: HARD_OBSTACLE
+  door: HARD_OBSTACLE
+  pole: HARD_OBSTACLE
+  bollard: HARD_OBSTACLE
+  traffic cone: HARD_OBSTACLE
+  trash bin: HARD_OBSTACLE
+  fire extinguisher: HARD_OBSTACLE
+  umbrella: HARD_OBSTACLE
+  rock: HARD_OBSTACLE
+
+  backpack: SOFT_PUSHABLE
+  bag: SOFT_PUSHABLE
+  black bag: SOFT_PUSHABLE
+  pouch: SOFT_PUSHABLE
+  tote bag: SOFT_PUSHABLE
+  luggage: SOFT_PUSHABLE
+  paper bag: SOFT_PUSHABLE
+  trash: SOFT_PUSHABLE
+  plastic bag: SOFT_PUSHABLE
+  bottle: SOFT_PUSHABLE
+  plastic bottle: SOFT_PUSHABLE
+  tissue box: SOFT_PUSHABLE
+  toilet paper roll: SOFT_PUSHABLE
+
+  laptop: LOW_OBSTACLE
+  power strip: LOW_OBSTACLE
+  card: LOW_OBSTACLE
+  small_object: LOW_OBSTACLE
+  movable_object: LOW_OBSTACLE
+
+  wire: THIN_OBSTACLE
+  cable: THIN_OBSTACLE
+  hose: THIN_OBSTACLE
+  cord: THIN_OBSTACLE
+  rope: THIN_OBSTACLE
+  branch: THIN_OBSTACLE
+
+  curb: GROUND_HAZARD
+  stairs: GROUND_HAZARD
+  ramp: GROUND_HAZARD
+  speed bump: GROUND_HAZARD
+  puddle: GROUND_HAZARD
+
+group_priority:
+  AGENT: 10
+  THIN_OBSTACLE: 9
+  VEHICLE: 8
+  HARD_OBSTACLE: 7
+  GROUND_HAZARD: 6
+  SOFT_PUSHABLE: 5
+  LOW_OBSTACLE: 4
+  UNKNOWN_OBSTACLE: 3
+
+class_conf:
+  finetune:
+    default: 0.36
+
+    person: 0.50
+
+    box: 0.28
+    backpack: 0.25
+
+    power strip: 0.36
+    bottle: 0.36
+    robot: 0.36
+    chair: 0.36
+    laptop: 0.36
+    umbrella: 0.36
+    fire extinguisher: 0.36
+    tissue box: 0.36
+    toilet paper roll: 0.36
+    trash bin: 0.36
+    card: 0.36
+    paper bag: 0.36
+
+  zeroshot:
+    default: 0.25
+
+    person: 0.35
+    pedestrian: 0.35
+    child: 0.35
+    dog: 0.30
+    cat: 0.30
+
+    box: 0.12
+    cardboard box: 0.15
+    carton: 0.15
+    package: 0.15
+    parcel: 0.15
+    shipping box: 0.15
+    open box: 0.15
+    storage box: 0.15
+
+    backpack: 0.15
+    bag: 0.15
+    black bag: 0.12
+    pouch: 0.12
+    tote bag: 0.15
+    luggage: 0.15
+
+    wire: 0.18
+    cable: 0.18
+    hose: 0.20
+    cord: 0.18
+    rope: 0.18
+
+    traffic cone: 0.22
+    bollard: 0.22
+    pole: 0.22
+    barrier: 0.22
+    fence: 0.25
+    guardrail: 0.25
+    chair: 0.22
+    table: 0.22
+    bench: 0.22
+    door: 0.25
+    wall: 0.25
+    pillar: 0.25
+    trash bin: 0.22
+    fire extinguisher: 0.12
+    umbrella: 0.22
+    rock: 0.20
+
+    curb: 0.22
+    stairs: 0.22
+    ramp: 0.22
+    speed bump: 0.22
+    puddle: 0.22
+
+    trash: 0.20
+    plastic bag: 0.18
+    bottle: 0.22
+    plastic bottle: 0.20
+    robot: 0.25
+    quadruped robot: 0.25
+    robot dog: 0.25

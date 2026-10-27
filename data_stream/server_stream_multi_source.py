@@ -4,6 +4,12 @@
 server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트림 (서버·엣지 공통)
 ================================================================================
 2026-10-01 · 하천 실측 대비
+2026-10-14 · 통합데이터규약 v2 (데이터 규약 v2) — DS-01 ~ DS-05 · DS-08
+  기록(frames.jsonl · states.jsonl · Redis header) 이름: source → stream · file → frame_file · host → received_by,
+  받은 시각 received_at(ISO 밀리초 +09:00) 추가, JSON 상태는 payload 를 객체 그대로(enc "json"),
+  업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
+  드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
+  /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
 
 하는 일
   소스(로봇 2대 · 드론 · 360 카메라)가 주는 영상과 상태를 받아서
@@ -14,7 +20,7 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
 
 포트 = 소스  (어느 경로로 들어오든 그 포트로 들어오면 그 소스다)
   10001 cam360  영상: 카메라 노트북의 stream_to_server.py 가 POST 로 보낸다 (/upload_pano)
-  10002 drone   영상: pi3 :8890/api/frame 을 계속 받아 온다   상태: pi3 MQTT :1883 전체 구독
+  10002 drone   영상: pi3 :8890/api/frame?cam=0 (Arducam) 롱폴   상태: pi3 MQTT :1883 전체 구독
   10003 robot1  영상: pi7 :8090/stream/1 을 계속 읽는다        상태: pi7 MQTT :1883 전체 구독
   10004 robot2  영상: pi1 :8090/stream/1 을 계속 읽는다        상태: pi1 MQTT :1883 전체 구독
 
@@ -30,9 +36,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
 Redis Stream (최근 --maxlen 개만 유지, 기본 300)
   camera_stream:<소스>  image   = 받은 이미지 바이트 그대로
                         header  = 헤더 JSON (아래)
-                        그 밖에  보내는 쪽이 준 정보 한 칸씩 (예: 360 의 capture_id · camera_id ·
-                                seq · timestamp, 드론 meta 의 frame_seq 등)
-  state_stream:<소스>   topic, payload = 받은 바이트 그대로, header = 헤더 JSON
+                        그 밖에  보내는 쪽이 준 정보 한 칸씩 (v2 장비는 프레임 헤더 칸 — camera_id ·
+                                sequence_id · timestamp(ISO) 등, 옛 장비는 360 의 seq · 드론 meta 의 frame_seq 등)
+  state_stream:<소스>   topic, payload = 받은 바이트 그대로, header = 헤더 JSON (states.jsonl 한 줄에서 payload · enc 를 뺀 것)
   AI 기존 코드(unidepth_dual_yolo.py)는 Redis 주소와 스트림 이름만 바꾸면 읽는다 (image · timestamp 칸.
   timestamp 는 보내는 쪽이 붙여 줄 때만 있다).
   vision_stream:<소스>:<모델> · vision_depth:<소스>:<모델>   추론 결과 (아래 "추론 결과 스트림")
@@ -51,19 +57,21 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
              비전이 안 돌거나 못 읽어도 받기·저장·흘리기에는 영향이 없다. --no-vision 이면 읽지도 않는다.
 
   vision_stream:<소스>:<모델>   한 장 = 한 항목 (최근 300개, vision_config.yaml live.maxlen)
-      result   JSON — 디스크 <실행>/vision/<모델>/results.jsonl 한 줄과 같은 내용
-                 공통   n · frame("frames/<번호>.jpg") · source · run · model · image_wh · infer_ms
-                        header (camera_stream 헤더의 n · file · via)
-                 live   source_id = 원본 camera_stream:<소스> 항목 ID (이 값으로 원본 이미지를 찾는다)
-                        recv_ms   = 원본이 Redis 에 들어간 시각 (ms, 항목 ID 의 앞부분)
-                        done_ms   = 추론을 마친 시각 (ms)      lag_ms = done_ms - recv_ms
-                 yoloe  detections: [{cls, name, conf, xyxy:[x1,y1,x2,y2], polygon:[[x,y],...]}]
+      result   JSON — 디스크 <실행>/vision/<모델>/results.jsonl 한 줄과 같은 내용 (v2 비전 결과, 규약 §3-6)
+                 공통 머리  schema_version "2.0" · source_id "ds-vision" · node_id(돌린 기기) · zone_id ·
+                            timestamp = 원본 프레임 시각 · frame_ref{camera_id, sequence_id, timestamp}(보낸 쪽이 v2 일 때)
+                 공통   emitted_at(결과가 나온 순간) · producer{tier, kind} · n · frame_file("frames/<번호>.jpg") ·
+                        stream · run · model · model_file · width · height · infer_ms · live
+                 yoloe  detections: [{class_id, label, confidence, bbox:[x1,y1,x2,y2], polygon:[[x,y],...]}]
                  depth  depth_stats {min, p5, median, p95, max, valid_ratio} (m) · intrinsics (픽셀 K 3x3)
-                        fov_x_deg · fov_x_given · detections: [{cls, name, conf, xyxy, depth_m, uv}]
-                        드론은 검출별 GPS 도: range_m · ned_m · lat · lon · alt_m, 프레임 pose · geo_status
+                        fov_x_deg · fov_x_given · detections: [{class_id, label, confidence, bbox, depth_m, uv}]
+                        드론은 검출별 GPS 도: range_m · ned_m · lat · lon · alt_m, 프레임 pose{timestamp, …} · geo_status
                         (vision/geo.py, vision_config.yaml geo)
+                 (옛 이름 source_id(Redis 항목 번호) · recv_ms · done_ms · lag_ms · header 복사본은 결과에서 뺐다)
       overlay  오버레이 JPEG 바이트 (yoloe: 박스·라벨, min_conf 이상만 / depth: 컬러맵 + 검출별 거리 + 색 막대)
-      header   {"source", "model", "n", "run", "file", "source_id"}
+      header   {"stream", "model", "n", "run", "frame_file", "stream_entry_id", "lag_ms"}
+               stream_entry_id = 원본 camera_stream:<소스> 항목 ID (이 값으로 원본 이미지를 찾는다)
+               lag_ms = 결과가 나온 순간 - 원본이 Redis 에 들어간 순간 (ms) — /health 와 10초 보고가 읽는다
   vision_depth:<소스>:<모델>    depth 모델만, 한 장 = 한 항목 (최근 30개, live.depth_maxlen — 한 장 약 1.8MB)
       depth    depth 원본 바이트 (미터, 0 = 무효 픽셀). 디스크 vision/<모델>/depth/<번호>.npy 와 같은 값
       dtype    "<f2" (float16)   shape  "H,W"   unit  "m"   header  vision_stream 과 같은 요약
@@ -72,7 +80,8 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
       r = redis.Redis(port=6380)      # 다른 기기: redis.Redis(host="100.114.96.78", port=6380)
       eid, f = r.xrevrange("vision_stream:drone:yoloe", count=1)[0]          # 최신 결과
       res = json.loads(f[b"result"])                                          # 검출 목록 등
-      img = r.xrange("camera_stream:drone", res["source_id"], res["source_id"])  # 그 결과의 원본 프레임
+      h = json.loads(f[b"header"])
+      img = r.xrange("camera_stream:drone", h["stream_entry_id"], h["stream_entry_id"])  # 그 결과의 원본 프레임
       eid, f = r.xrevrange("vision_depth:drone:unidepth", count=1)[0]
       depth = np.frombuffer(f[b"depth"], f[b"dtype"].decode()).reshape(
           [int(x) for x in f[b"shape"].split(b",")])                         # (H, W) 미터
@@ -84,11 +93,18 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
                      "vision_error": 결과 스트림을 못 읽을 때 이유
         10초 보고    "비전 yoloe 6.4장/초 지연 0.07s" (30초 넘게 결과가 없는 모델은 안 찍는다)
 
-헤더 (영상 한 장마다)
-  {"source": "robot1", "n": 15, "file": "robot1/20261001_123152/frames/000000015.jpg",
-   "via": "pull:http://.../stream/1", "host": "<받은 기기 이름>",
-   "sender": { 보내는 쪽이 준 정보 그대로 },
-   "edge": { 엣지에서 넘어온 경우 엣지 쪽 번호·파일 } }
+헤더 (영상 한 장마다 — frames.jsonl 한 줄 = Redis camera_stream 의 header, 규약 §3-7)
+  {"stream": "robot1", "n": 15, "frame_file": "robot1/20261001_123152/frames/000000015.jpg",
+   "via": "pull:http://.../stream/1", "received_by": "<받은 기기 이름>",
+   "received_at": "2026-10-14T12:00:00.190+09:00",
+   "sender": { 보내는 쪽이 준 정보 그대로 (v2 장비는 프레임 헤더 §3-5) },
+   "edge": { 다른 기기의 이 파일이 넘겨 준 경우 그쪽의 n · frame_file · via · received_by · received_at } }
+  frame_file 은 저장 폴더(--save) 기준 경로다 (비전 결과의 frame_file 은 실행 폴더 기준).
+
+상태 (한 건마다 — states.jsonl 한 줄)
+  {"stream": "drone", "n": 1, "topic": "zoneA/drone/x500-001/state", "qos": 1, "retain": false,
+   "via": "mqtt:<드론 브로커>", "received_by": "<받은 기기 이름>", "received_at": "…+09:00",
+   "payload": { JSON 이면 객체 그대로 }, "enc": "json"}       (JSON 이 아니면 글자 "utf8" 또는 "base64")
 
 저장 (전부, 지우지 않는다)
   <--save>/<소스>/<실행 시작 YYYYMMDD_HHMMSS>/
@@ -98,7 +114,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
       states.jsonl                           상태 한 건 = 한 줄
   - 실행할 때마다 새 폴더를 만든다. 같은 이름이 있으면 _2, _3 을 붙인다.
     파일은 새로 만들기만 하고 덮어쓰지 않는다.
-  - frames.jsonl 의 file 필드는 같은 실행 폴더 아래 frames/<번호>.jpg 를 가리킨다.
+  - frames.jsonl 의 frame_file 필드는 같은 실행 폴더 아래 frames/<번호>.jpg 를 가리킨다 (저장 폴더 기준 경로).
   - --unpack 은 예전 .frm 저장본을 변환할 때만 남겨 둔 호환 기능이다.
 
 실행 (같은 파일, 값만 다르게)
@@ -135,6 +151,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -178,8 +195,11 @@ def load_default_hosts():
 DEFAULT_HOST = load_default_hosts()
 ROBOT_VIDEO_PORT = 8090      # go1_cam_view.py — GET /stream/<카메라 번호> (MJPEG, VZ 카드가 쓰는 주소)
 DRONE_VIDEO_PORT = 8890      # 드론 agent    — GET /api/frame?cam=&since=&wait= (meta JSON + JPEG)
+DRONE_MJPEG_PORT = 8080      # pi3 cam-stream.service (~/cam_stream.py 0 1) — GET /cam<번호>.mjpg (MJPEG)
 MQTT_PORT = 1883             # 파이 mosquitto (프로그램용 입구. 9001 은 같은 브로커의 브라우저용 입구)
-DRONE_CAM = 0
+DRONE_CAM = 0                # drone agent 카메라 번호: 0 = Arducam(AR0234, CAM0) · 1 = imx708 wide
+DRONE_ARDUCAM = False        # True: drone agent 대신 cam-stream.service :8080/cam<DRONE_ARDUCAM_CAM>.mjpg 에서 받는다
+DRONE_ARDUCAM_CAM = 0        #       (둘은 Conflicts 라 한쪽만 돈다. MJPEG 에는 hfov 등 메타가 없다)
 DRONE_WAIT_S = 2             # 드론 롱폴: 새 장이 없으면 이만큼 기다렸다가 204 로 답한다
 MAX_BODY = 64 * 1024 * 1024  # POST 한 번에 받는 최대 크기
 FORWARD_QUEUE = 300          # 넘기기 대기열. 넘치면 오래된 것부터 버린다 (이 기기 디스크에는 남아 있다)
@@ -188,6 +208,12 @@ RESERVED = ("image", "header")
 
 HOSTNAME = socket.gethostname()
 STOP = threading.Event()
+KST = timezone(timedelta(hours=9))
+
+
+def received_now():
+    """이 기기가 받은 순간 — ISO 밀리초 +09:00 (규약 §2-2 iso_ms 와 같은 꼴, 밀리초 아래는 버린다)."""
+    return datetime.fromtimestamp(time.time(), KST).isoformat(timespec="milliseconds")
 
 
 # ---------------------------------------------------------------- 출력
@@ -306,7 +332,10 @@ def split_multipart(body, boundary):
 
 
 def form_to_frame(parts):
-    """multipart 칸들 → (보내는 쪽 정보, 이미지 바이트). 이미지는 첫 파일 칸(또는 image/* 칸)."""
+    """multipart 칸들 → (보내는 쪽 정보, 이미지 바이트). 이미지는 첫 파일 칸(또는 image/* 칸).
+
+    JSON 칸(드론 meta · 360 meta)의 항목이 같은 이름의 글자 칸을 이긴다 — 타입이 있는 쪽이 맞다(DS-04).
+    이미지 칸의 파일 정보(_file)는 붙이지 않는다 — 늘 같은 값이었다(P2)."""
     sender, image = {}, None
     for headers, content in parts:
         disp = disposition(header_value(headers, "content-disposition"))
@@ -314,7 +343,6 @@ def form_to_frame(parts):
         ctype = header_value(headers, "content-type") or ""
         if image is None and ("filename" in disp or ctype.lower().startswith("image/")):
             image = content
-            sender["_file"] = {"field": name, "filename": disp.get("filename"), "content_type": ctype or None}
             continue
         try:
             text = content.decode("utf-8")
@@ -327,12 +355,12 @@ def form_to_frame(parts):
             except ValueError:
                 value = text
             if isinstance(value, dict):
-                for k, v in value.items():       # 드론 meta 처럼 JSON 칸이면 안의 항목을 그대로 펼친다
-                    sender.setdefault(str(k), v)
+                for k, v in value.items():       # 드론 meta 처럼 JSON 칸이면 안의 항목을 그대로 펼친다 — 글자 칸을 이긴다
+                    sender[str(k)] = v
                 continue
             sender[name] = value
         else:
-            sender[name] = text
+            sender.setdefault(name, text)        # 같은 이름의 JSON 항목이 이미 있으면 그것을 둔다
     return sender, image
 
 
@@ -447,10 +475,16 @@ class VisionView:
             res = json.loads(f.get(b"result") or b"{}")
         except ValueError:
             res = {}
+        try:
+            h = json.loads(f.get(b"header") or b"{}")     # v2: lag_ms 는 결과가 아니라 항목 header 에 있다(DS-06 · DS-08)
+        except ValueError:
+            h = {}
+        if not isinstance(h, dict):
+            h = {}
         with self.cv:
             i = self.info.setdefault((src, model), {"results": 0})
             i["results"] += len(entries)
-            i.update(n=res.get("n"), run=res.get("run"), lag_ms=res.get("lag_ms"), infer_ms=res.get("infer_ms"),
+            i.update(n=res.get("n"), run=res.get("run"), lag_ms=h.get("lag_ms", res.get("lag_ms")), infer_ms=res.get("infer_ms"),
                      detections=len(res.get("detections") or []), at=time.time())
             jpg = f.get(b"overlay")
             if jpg:
@@ -663,12 +697,14 @@ class Source:
                 return None, fname, e
 
     def add_frame(self, image, sender, via, edge=None):
+        received_at = received_now()                    # 잠금·디스크 쓰기 전에 잰다
         with self.lock:
             fh, fname, err = self._open_new()
             n = self.n_frame
-            header = {"source": self.name, "n": n,
-                      "file": self.rel + "/frames/" + fname,
-                      "via": via, "host": HOSTNAME, "sender": sender}
+            header = {"stream": self.name, "n": n,
+                      "frame_file": self.rel + "/frames/" + fname,
+                      "via": via, "received_by": HOSTNAME, "received_at": received_at,
+                      "sender": sender}
             if edge:
                 header["edge"] = edge
 
@@ -708,7 +744,7 @@ class Source:
                 self.save_fail += 1
                 warn("save-" + self.name, "%s 영상 저장 실패 (%s) — 스트림은 계속합니다" % (self.name, describe(err)))
                 if not image_saved:
-                    header["file"] = None
+                    header["frame_file"] = None
 
             # 엣지→서버 전송 형식은 기존 .frm 패킹을 그대로 사용하되, 디스크에는 저장하지 않는다.
             packed = pack_frame(header, image)
@@ -723,13 +759,23 @@ class Source:
         return {"status": "saved" if saved else "not_saved", "source": self.name, "n": n}
 
     def add_state(self, topic, payload, qos, retain, via, edge=None):
+        received_at = received_now()
         with self.lock:
             self.n_state += 1
-            rec = {"n": self.n_state, "topic": topic, "qos": qos, "retain": retain, "via": via, "host": HOSTNAME}
+            rec = {"stream": self.name, "n": self.n_state, "topic": topic, "qos": qos, "retain": retain,
+                   "via": via, "received_by": HOSTNAME, "received_at": received_at}
             if edge:
                 rec["edge"] = edge
             try:
-                rec["payload"], rec["enc"] = payload.decode("utf-8"), "utf8"
+                text = payload.decode("utf-8")
+                try:
+                    obj = json.loads(text)
+                except ValueError:
+                    obj = None
+                if isinstance(obj, (dict, list)):
+                    rec["payload"], rec["enc"] = obj, "json"          # JSON 은 객체 그대로 — 후처리가 한 번 더 풀지 않게
+                else:
+                    rec["payload"], rec["enc"] = text, "utf8"
             except UnicodeDecodeError:
                 rec["payload"], rec["enc"] = base64.b64encode(payload).decode("ascii"), "base64"
             line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
@@ -749,8 +795,7 @@ class Source:
                 except Exception:
                     pass
                 self.state_fh = None
-            header = {"source": self.name}
-            header.update((k, v) for k, v in rec.items() if k not in ("payload", "enc"))
+            header = dict((k, v) for k, v in rec.items() if k not in ("payload", "enc"))   # stream 이 맨 앞(옛 source)
             if not self.sink.add("state_stream:" + self.name,
                                  {"topic": topic, "payload": payload,
                                   "header": json.dumps(header, ensure_ascii=False)}):
@@ -949,14 +994,25 @@ def make_handler(src, vision=None):
                         try:
                             if kind == b"F":
                                 header, image = unpack_frame(data)
-                                edge = dict((k, header.get(k)) for k in ("n", "file", "via", "host"))
+                                edge = {"n": header.get("n"),            # 넘겨준 기기의 기록 (옛 판이 넘긴 것도 읽는다)
+                                        "frame_file": header.get("frame_file", header.get("file")),
+                                        "via": header.get("via"),
+                                        "received_by": header.get("received_by", header.get("host")),
+                                        "received_at": header.get("received_at")}   # 넘겨준 기기가 처음 받은 시각
                                 src.add_frame(image, header.get("sender") or {}, "push", edge=edge)
                                 res["frames"] += 1
                             elif kind == b"S":
                                 rec = json.loads(data.decode("utf-8"))
-                                raw = rec.get("payload") or ""
-                                payload = base64.b64decode(raw) if rec.get("enc") == "base64" else raw.encode("utf-8")
-                                edge = dict((k, rec.get(k)) for k in ("n", "via", "host"))
+                                raw = rec.get("payload")
+                                if rec.get("enc") == "base64":
+                                    payload = base64.b64decode(raw or "")
+                                elif rec.get("enc") == "json" or isinstance(raw, (dict, list)):
+                                    payload = json.dumps(raw, ensure_ascii=False).encode("utf-8")
+                                else:
+                                    payload = (raw or "").encode("utf-8")
+                                edge = {"n": rec.get("n"), "via": rec.get("via"),
+                                        "received_by": rec.get("received_by", rec.get("host")),
+                                        "received_at": rec.get("received_at")}
                                 src.add_state(rec.get("topic", ""), payload, rec.get("qos"), rec.get("retain"),
                                               "push", edge=edge)
                                 res["states"] += 1
@@ -1033,15 +1089,15 @@ def read_mjpeg(resp, boundary):
             yield headers, data
 
 
-def robot_video_loop(src, host, cam):
-    path = "/stream/%d" % cam
-    url = "http://%s:%d%s" % (host, ROBOT_VIDEO_PORT, path)
+def robot_video_loop(src, host, cam, port=ROBOT_VIDEO_PORT, path=None):
+    path = path or "/stream/%d" % cam              # 드론 Arducam 도 같은 MJPEG 라 port·path 만 바꿔 쓴다
+    url = "http://%s:%d%s" % (host, port, path)
     fails, receiving = 0, False
     src.set_status("video", "붙는 중 " + url)
     while not STOP.is_set():
         conn = None
         try:
-            conn = http.client.HTTPConnection(host, ROBOT_VIDEO_PORT, timeout=10)
+            conn = http.client.HTTPConnection(host, port, timeout=10)
             conn.request("GET", path)
             resp = conn.getresponse()
             if resp.status != 200:
@@ -1057,7 +1113,14 @@ def robot_video_loop(src, host, cam):
                     receiving, fails = True, 0
                     src.set_status("video", "받는 중 " + url)
                     log("%s 영상 받는 중 — %s" % (src.name, url))
-                src.add_frame(data, part_headers, "pull:" + url)
+                meta = header_value(part_headers, "frame-meta")      # v2 pi7 은 프레임 헤더를 이 한 줄에 싣는다(DS-03)
+                sender = part_headers                                  # 없으면 옛 pi7 — 칸 머리 사전 그대로
+                if meta:
+                    try:
+                        sender = json.loads(meta)
+                    except ValueError:
+                        warn(src.name + "-meta", "%s Frame-Meta 를 못 풀었음 — 칸 머리 그대로 저장" % src.name)
+                src.add_frame(data, sender, "pull:" + url)
             if not STOP.is_set():
                 raise RuntimeError("영상 스트림이 끝남")
         except Exception as e:
@@ -1103,7 +1166,7 @@ def drone_video_loop(src, host, cam):
                 raise RuntimeError("응답에 이미지 칸이 없음")
             fails = 0
             try:
-                seq = int(sender.get("frame_seq"))
+                seq = int(sender.get("sequence_id", sender.get("frame_seq")))   # v2 먼저, 옛 드론은 frame_seq
             except (TypeError, ValueError):
                 seq = None
             if seq is not None:
@@ -1424,7 +1487,11 @@ def main():
             print("  %-6s :%d  받기만 (--no-pull)" % (s.name, s.port))
         else:
             host = hosts[s.name]
-            if s.name == "drone":
+            if s.name == "drone" and DRONE_ARDUCAM:
+                path = "/cam%d.mjpg" % DRONE_ARDUCAM_CAM
+                video = "http://%s:%d%s" % (host, DRONE_MJPEG_PORT, path)
+                pulls.append((robot_video_loop, (s, host, DRONE_ARDUCAM_CAM, DRONE_MJPEG_PORT, path), s, host))
+            elif s.name == "drone":
                 video = "http://%s:%d/api/frame?cam=%d" % (host, DRONE_VIDEO_PORT, DRONE_CAM)
                 pulls.append((drone_video_loop, (s, host, DRONE_CAM), s, host))
             else:

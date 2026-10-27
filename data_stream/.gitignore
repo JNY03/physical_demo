@@ -22,3 +22,7 @@ venv/
 # 외부 코드(UniDepth·AerialMetric)와 받은 가중치 — 설치 때 받는다
 external/
 models/
+
+# 실험 출력 · 옛 압축본
+e2p/e2p_sweep_out/
+*.zip

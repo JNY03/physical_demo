@@ -25,13 +25,18 @@ geo.py — 검출 픽셀 + depth + 드론 위치·자세 → 검출 객체의 GP
     R_M = a(1-e²)/(1-e² sin² lat0)^1.5,  R_N = a/√(1-e² sin² lat0)   (WGS84, 수 km 이내 cm 수준)
 
 위치·자세 찾기
-  드론 브리지는 프레임마다 state 를 한 건 낸다 (reason "frame", ts = 그 프레임 sender.ts).
-  프레임 sender.ts 와 ts 가 가장 가까운 state 를 쓴다 (둘 다 Pi 시계라 PC 시계와 어긋나도 상관없다).
+  드론 브리지는 프레임마다 state 를 한 건 낸다 (reason "frame").
+  프레임 시각과 state 의 짝 프레임 시각이 가장 가까운 state 를 쓴다 (둘 다 Pi 시계라 PC 시계와 어긋나도 상관없다).
+    프레임 시각       v2: sender.timestamp (ISO)       옛: sender.ts · captured_at · observed_at (epoch 초)
+    state 짝 시각     v2: payload.frame_ref.timestamp   옛: payload.ts (epoch 초)
+  (2026-10-14 통합데이터규약 v2 DS-07 — 새 이름을 먼저 읽고 없으면 옛 이름. 읽은 값은 epoch 초로 바꿔 계산한다.
+   states.jsonl 의 payload 가 객체(v2 DS, enc "json")여도 글자(옛 DS)여도 읽는다.)
   live            Redis state_stream:<기기> 의 최근 항목
   저장된 이미지    <실행>/states.jsonl
 """
 import json
 import math
+from datetime import datetime
 
 import numpy as np
 
@@ -83,13 +88,38 @@ def ned_to_geodetic(lat0, lon0, h0, n, e, d):
     return lat, lon, (None if h0 is None else h0 - d)
 
 
+# ---------------------------------------------------------------- 시각 읽기 (규약 §2-2)
+def to_epoch(v):
+    """ISO 글자 또는 옛 epoch 숫자 → epoch 초(float). 모르면 None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) / 1000.0 if v > 1e11 else float(v)     # 옛 기록의 epoch 밀리초도 받는다
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v).timestamp()
+        except ValueError:
+            try:
+                return float(v)                                    # 옛 360 폼의 "1790918106.071032"
+            except ValueError:
+                return None
+    return None
+
+
+def state_time(p):
+    """state 의 짝 프레임 시각(epoch 초) — v2 frame_ref.timestamp, 없으면 옛 ts."""
+    fr = p.get("frame_ref") if isinstance(p.get("frame_ref"), dict) else {}
+    t = to_epoch(fr.get("timestamp"))
+    return t if t is not None else to_epoch(p.get("ts"))
+
+
 # ---------------------------------------------------------------- 위치·자세 (MQTT state)
 def pose_from_state(p):
     """브리지 MQTT state payload → 계산에 쓰는 값만. 없는 값은 None"""
     g = p.get("gps") or {}
     a = p.get("attitude") or {}
     al = p.get("altitude") or {}
-    return {"ts": p.get("ts"),
+    return {"ts": state_time(p),            # 안쪽 이름은 ts(epoch 초). 결과로 쓸 때 vision_infer 가 pose.timestamp(ISO)로 바꾼다
             "lat": g.get("lat"), "lon": g.get("lon"), "fix_type": g.get("fix_type"),
             "satellites": g.get("satellites"),
             "amsl_m": al.get("amsl_m"), "relative_m": al.get("relative_m"),
@@ -98,16 +128,20 @@ def pose_from_state(p):
 
 
 def state_payload(topic, payload):
-    """state 채널이고 ts 가 있는 payload 만 dict 로. 아니면 None"""
+    """state 채널이고 짝 프레임 시각(state_time)이 있는 payload 만 dict 로. 아니면 None.
+    payload: Redis 의 받은 바이트 · 옛 states.jsonl 의 글자 · v2 states.jsonl 의 객체(enc "json") 모두 받는다."""
     if isinstance(topic, bytes):
         topic = topic.decode("utf-8", "replace")
     if not topic.endswith("/state"):
         return None
-    try:
-        p = json.loads(payload)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(p, dict) or not isinstance(p.get("ts"), (int, float)):
+    if isinstance(payload, dict):
+        p = payload
+    else:
+        try:
+            p = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(p, dict) or state_time(p) is None:
         return None
     return p
 
@@ -147,7 +181,7 @@ class DiskStates:
                     continue
                 p = state_payload(d.get("topic") or "", d.get("payload"))
                 if p is not None:
-                    self.ts.append(float(p["ts"]))
+                    self.ts.append(state_time(p))
                     self.poses.append(pose_from_state(p))
         order = np.argsort(self.ts, kind="stable")
         if len(order) and np.any(order != np.arange(len(order))):
@@ -172,15 +206,19 @@ def redis_lookup(r, key, ts, scan=64):
     for _, f in r.xrevrange(key, "+", "-", count=scan):
         p = state_payload(f.get(b"topic") or b"", f.get(b"payload"))
         if p is not None:
-            states.append((float(p["ts"]), pose_from_state(p)))
+            states.append((state_time(p), pose_from_state(p)))
     return nearest(states, ts)
 
 
 def frame_ts(header):
+    """프레임 시각(epoch 초) — v2 sender.timestamp, 없으면 옛 드론 meta 의 ts · captured_at · observed_at."""
     s = (header or {}).get("sender") or {}
-    for k in ("ts", "captured_at", "observed_at"):
-        if isinstance(s.get(k), (int, float)):
-            return float(s[k])
+    if not isinstance(s, dict):
+        return None
+    for k in ("timestamp", "ts", "captured_at", "observed_at"):
+        t = to_epoch(s.get(k))
+        if t is not None:
+            return t
     return None
 
 
