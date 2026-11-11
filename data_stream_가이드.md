@@ -9,7 +9,7 @@
 ### 1-1. 폴더 위치 (WSL Ubuntu 안)
 
 ```
-~/physical_demo/                            ← 저장소 루트 (명령은 여기서 실행)
+~/data_stream/                              ← 저장소 루트 (명령은 여기서 실행) = /home/khw67/data_stream
 ├── venv/                                   ← 파이썬 가상환경 (redis · paho-mqtt · torch · ultralytics 설치됨)
 ├── server_stream_multi_source.py           ← 데이터 스트림 (받기 · Redis · 저장)
 ├── hosts.local.json                        ← 로봇·드론 주소 (tailscale IP)
@@ -18,11 +18,11 @@
 │   └── vision_config.yaml                  ← 비전 설정
 ├── 360camera_work/
 │   └── stream_to_server.py                 ← 360 카메라 → 서버 업로드
-├── models/  external/                      ← 모델 가중치 · UniDepth · AerialMetric 코드 (깃에 없음)
+├── models/  external/                      ← 모델 가중치 · UniDepth · AerialMetric 코드
 └── stream_data/                            ← 저장된 데이터 (아래 3장)
 ```
 
-Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\<WSL 사용자>\physical_demo` 을 입력하면 열린다.
+Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\khw67\data_stream` 을 입력하면 열린다.
 
 ### 1-2. VS Code 로 WSL 접속
 
@@ -30,39 +30,32 @@ Windows 탐색기에서는 주소창에 `\\wsl$\Ubuntu\home\<WSL 사용자>\phys
 2. `F1` → **`WSL: Connect to WSL`** (또는 왼쪽 아래 `><` 초록 버튼 → *Connect to WSL*).
    배포판이 여러 개면 **`WSL: Connect to WSL using Distro...`** → `Ubuntu` 를 고른다.
 3. 새 창의 왼쪽 아래에 `WSL: Ubuntu` 가 보이면 접속된 것이다.
-4. **File → Open Folder** → `~/physical_demo` (`/home/<WSL 사용자>/physical_demo`) 를 연다.
+4. **File → Open Folder** → `~/data_stream` (`/home/khw67/data_stream`) 를 연다.
 5. 터미널은 `` Ctrl+` `` 로 연다 (WSL 의 bash 로 열린다).
 
-> 다른 방법: Ubuntu 터미널에서 `cd ~/physical_demo && code .` 를 실행해도 같은 창이 열린다.
+> 다른 방법: Ubuntu 터미널에서 `cd ~/data_stream && code .` 를 실행해도 같은 창이 열린다.
 
 ---
 
 ## 2. 실행 순서
 
-모든 명령은 저장소 루트(`~/physical_demo`)에서 실행한다. 터미널을 새로 열 때마다 **0) venv 활성화**부터 한다.
+모든 명령은 저장소 루트(`~/data_stream`)에서 실행한다. 터미널을 새로 열 때마다 **0) venv 활성화**부터 한다.
 
 ### 0) venv 활성화
 
 ```bash
-cd ~/physical_demo
+cd ~/data_stream
 source venv/bin/activate        # 프롬프트 앞에 (venv) 가 붙으면 성공
 ```
 
-### 1) Redis 확인
+### 1) Redis 확인 (자동으로 켜진다)
 
-`배포_가이드.md` 9장대로 `redis-datastream` 서비스를 등록했으면 **WSL 이 켜질 때 자동으로 시작**한다. 확인만 한다:
-
-```bash
-redis-cli -p 6380 ping                                        # PONG 이면 정상
-redis-cli -h <데이터 스트림 노트북 tailscale IP> -p 6380 ping    # 다른 기기가 구독하려면 이쪽도 PONG
-systemctl --user restart redis-datastream                     # 안 되면 다시 시작
-```
-
-서비스를 등록하지 않았으면 WSL 을 켤 때마다 직접 띄운다:
+Redis(6380)는 사용자 systemd 서비스 `redis-datastream` 으로 **WSL 이 켜질 때 자동으로 시작**한다 (등록 방법은 `배포_가이드.md` 9장).
 
 ```bash
-redis-server --port 6380 --bind "127.0.0.1 <데이터 스트림 노트북 tailscale IP>" --protected-mode no \
-  --save "" --appendonly no --daemonize yes
+redis-cli -p 6380 ping                      # PONG 이면 정상
+redis-cli -h 100.125.104.23 -p 6380 ping    # tailscale 쪽도 PONG 이어야 다른 기기가 구독할 수 있다
+systemctl --user restart redis-datastream   # 둘 중 하나라도 안 되면 다시 시작
 ```
 
 Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저장되고** 비전 live 가 동작하지 않는다.
@@ -73,7 +66,7 @@ Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저�
 python server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2)
 python server_stream_multi_source.py --on drone         # 드론만
 python server_stream_multi_source.py --on drone robot1  # 골라 켜기
-python server_stream_multi_source.py --drone <드론 pi tailscale IP>   # 주소를 직접 지정 (기본은 hosts.local.json)
+python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 지정 (기본은 hosts.local.json)
 ```
 
 | 포트 | 소스 | 받는 곳 |
@@ -104,12 +97,12 @@ python vision/vision_infer.py --list                               # 기기·실
 
 ```bash
 python stream_to_server.py --dry-run --count 20       # 업로드 없이 카메라 스트림만 점검
-python stream_to_server.py --upload http://<데이터 스트림 노트북 tailscale IP>:10001/upload_pano   # 데이터 스트림 노트북으로 보내기
+python stream_to_server.py --upload http://100.125.104.23:10001/upload_pano   # 데이터 스트림 노트북으로 보내기
 python stream_to_server.py --upload http://127.0.0.1:10001/upload_pano       # 데이터 스트림이 같은 노트북에서 돌 때
 python stream_to_server.py --fps 3                    # 기본 5fps → 3fps (인자 없이 실행하면 7866 · 10001 서버 두 곳으로 보낸다)
 ```
 
-- `<데이터 스트림 노트북 tailscale IP>` 는 그 노트북에서 `tailscale ip -4` 로 확인한다. 360 노트북도 같은 tailnet 에 로그인되어 있어야 한다.
+- `100.125.104.23` 은 이 노트북의 tailscale IP 다 (바뀌면 `tailscale ip -4` 로 확인). 360 노트북도 같은 tailnet 에 로그인되어 있어야 한다.
 - 카메라 IP 기본값은 `192.168.100.124` 이고, 다르면 `--ip` 로 바꾼다. 종료는 `Ctrl+C`.
 
 ---
@@ -131,7 +124,7 @@ stream_data/<소스>/<실행 시작 YYYYMMDD_HHMMSS>/
 ### 빠르게 보는 명령
 
 ```bash
-cd ~/physical_demo/stream_data
+cd ~/data_stream/stream_data
 ls -t drone | head                                         # 최근 실행 폴더
 R=drone/$(ls -t drone | head -1)                           # 가장 최근 드론 실행
 ls $R/frames | wc -l; wc -l $R/states.jsonl                # 영상 장수 · 상태 건수
