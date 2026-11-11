@@ -436,6 +436,9 @@ def box_iou(a, b):
     return inter / np.maximum(area(a)[:, None] + area(b)[None, :] - inter, 1e-9)
 
 
+#: `LabelStabilizer` 가 받는 값. 어느 트래커의 것도 아니다.
+LABEL_KEYS = ("label_policy", "label_margin", "label_max_missed", "label_iou_match")
+
 #: `Stabilizer` 가 받는 값. 기성 트래커 설정에 섞여 있어도 거절하지 않기 위해 둔다.
 BUILTIN_KEYS = ("iou_match", "center_dist", "box_alpha", "min_hits", "hold_missed",
                 "max_missed", "label_decay", "depth_window")
@@ -491,7 +494,10 @@ class VendorTracker:
         # 값**은 거절하지 않는다 — 한 설정 블록에 builtin 용 값과 기성 트래커 용 값이
         # 같이 적혀 있고, backend 를 바꿔 가며 쓸 수 있어야 한다. 쓰이지 않는다는 것만
         # 알린다.
-        shared = ("backend", "enabled", "keep_boxes", "reset_gap_s", "on_untracked")
+        # 이름 안정화(LabelStabilizer)의 값은 트래커의 것이 아니다 — 같은 블록에 적히므로
+        # 거절하지 않는다. backend 를 바꿔도 이름 정책은 그대로 돈다.
+        shared = (("backend", "enabled", "keep_boxes", "reset_gap_s", "on_untracked")
+                  + LABEL_KEYS)
         ignored = sorted(k for k in sc if k in BUILTIN_KEYS and k not in args and k not in shared)
         unknown = [k for k in sc if k not in args and k not in shared and k not in BUILTIN_KEYS]
         if unknown:
@@ -575,6 +581,115 @@ class VendorTracker:
 
     def smooth_depth(self, dets, model):               # 거리 평활은 하지 않는다
         return dets
+
+
+class LabelStabilizer:
+    """같은 물체의 **이름이 장마다 뒤집히는 것**을 줄인다. 박스는 건드리지 않는다.
+
+    왜 따로 있나: 기성 트래커는 `new_track_thresh`(0.25) 위의 **잘 잡힌** 검출만 잇는다.
+    그런데 이름이 뒤집히는 것은 바로 **신뢰도가 낮은** 검출들이다 — 그것들은 번호를
+    못 받으므로 그 쪽으로는 손댈 수 없다. 그래서 이름 안정화는 모든 검출을 보는
+    자기 짝짓기(IoU)를 따로 쓴다.
+
+    쟀더니 지금 나가는 것은 **장 사이 전이의 29.4%** 에서 이름이 바뀐다(연속 촬영
+    drone+dji, track 2947). 가장 잦은 쌍은 styrofoam_box↔water_jug(302)이고
+    styrofoam_box↔wooden_box 는 70 이다.
+
+    `policy`
+      raw      그대로 둔다 (아무것도 하지 않음)
+      hyst-k   지금 이름을 유지하고 **다른 이름이 k 장 연속** 이겨야 바꾼다
+               (측정: k=2 면 깜빡임 81% 감소 · k=3 이면 95% 감소)
+
+    **대가를 숨기지 않는다.** 이름을 붙들면 바뀌어야 할 때도 늦는다 — 라벨 150장에서
+    hyst-2 는 macro F1 -0.046 · 재현율 -0.110 이다. 그래서 **버리는 것이 없게** 한다:
+    이 장의 원래 이름은 `label_raw` 로, 흔들린다는 사실은 `label_stable: false` 로,
+    후보는 `label_candidates` 로 함께 낸다. 프레임별 진실이 필요한 소비자는 `label_raw`
+    를 보면 된다(AI-S-03 — 확신과 근거 충분도는 다른 축이다).
+    """
+
+    def __init__(self, sc):
+        policy = str(sc.get("label_policy", "raw")).lower()
+        self.k = 0
+        if policy != "raw":
+            if not policy.startswith("hyst-") or not policy[5:].isdigit():
+                raise SystemExit("stabilize.label_policy 는 raw 또는 hyst-<수>: %s" % policy)
+            self.k = int(policy[5:])
+            if self.k < 1:
+                raise SystemExit("stabilize.label_policy 의 수는 1 이상입니다: %s" % policy)
+        self.policy = policy
+        self.iou = float(sc.get("label_iou_match", sc.get("iou_match", 0.3)))
+        self.margin = float(sc.get("label_margin", 0.6))
+        self.decay = float(sc.get("label_decay", 0.8))
+        self.reset_gap = float(sc.get("reset_gap_s", 2.0))
+        self.max_gap = int(sc.get("label_max_missed", sc.get("max_missed", 5)))
+        self.tracks, self.last_ts = [], None
+
+    def update(self, dets, ts):
+        if self.policy == "raw":
+            return dets
+        # **검출이 없는 장에서도 나이를 먹인다.** 건너뛰면 사라진 물체가 영원히 남아
+        # 한참 뒤에 그 자리에 들어온 다른 물체에 옛 이름을 얹는다.
+        if ts is not None and self.last_ts is not None and not (0 <= ts - self.last_ts <= self.reset_gap):
+            self.tracks = []
+        self.last_ts = ts if ts is not None else self.last_ts
+        used = set()
+        if self.tracks and dets:
+            iou = box_iou([t["box"] for t in self.tracks], [d["xyxy"] for d in dets])
+            pairs = sorted(((float(iou[i, j]), i, j) for i in range(len(self.tracks))
+                            for j in range(len(dets)) if iou[i, j] >= self.iou), reverse=True)
+        else:
+            pairs = []
+        taken_t, taken_d = set(), set()
+        for _v, i, j in pairs:
+            if i in taken_t or j in taken_d:
+                continue
+            taken_t.add(i)
+            taken_d.add(j)
+            self._carry(self.tracks[i], dets[j])
+            used.add(j)
+        # 이번 장에 짝이 없던 것은 나이를 먹고, 너무 오래된 것은 잊는다. 잊지 않으면
+        # 사라진 물체의 이름이 뒤에 들어온 다른 물체에 그대로 얹힌다.
+        alive = []
+        for i, trk in enumerate(self.tracks):
+            if i in taken_t:
+                alive.append(trk)                      # _carry 가 age 를 0 으로 되돌렸다
+            else:
+                trk["age"] += 1
+                if trk["age"] <= self.max_gap:
+                    alive.append(trk)
+        for j, d in enumerate(dets):
+            if j not in used:
+                trk = {"box": list(d["xyxy"]), "name": d["name"], "votes": {}, "cls": {},
+                       "streak": 0, "last": None, "age": 0}
+                self._carry(trk, d)
+                alive.append(trk)
+        self.tracks = alive
+        return dets
+
+    def _carry(self, t, d):
+        t["box"] = list(d["xyxy"])
+        t["age"] = 0
+        for k in t["votes"]:
+            t["votes"][k] *= self.decay
+        t["votes"][d["name"]] = t["votes"].get(d["name"], 0.0) + d["conf"]
+        t["cls"][d["name"]] = d["cls"]
+        raw = d["name"]
+        if raw == t["name"]:
+            t["streak"], t["last"] = 0, None
+        else:
+            t["streak"] = t["streak"] + 1 if raw == t["last"] else 1
+            t["last"] = raw
+            if t["streak"] >= self.k:                  # k 장 연속 이겨야 바꾼다
+                t["name"], t["streak"], t["last"] = raw, 0, None
+        total = sum(t["votes"].values()) or 1.0
+        top = max(t["votes"], key=t["votes"].get)
+        d["label_stable"] = bool(t["votes"][top] / total >= self.margin and t["name"] == top)
+        if not d["label_stable"]:
+            d["label_candidates"] = sorted(t["votes"], key=t["votes"].get, reverse=True)[:3]
+        if t["name"] != raw:
+            d["label_raw"] = raw                       # 이 장의 원래 이름 — 버리지 않는다
+            d["name"] = t["name"]
+            d["cls"] = t["cls"].get(t["name"], d["cls"])
 
 
 def stabilize_cfg(cfg, model):
@@ -868,8 +983,16 @@ class MogeAerialRunner:
 
 
 # ---------------------------------------------------------------- 모델: river (하천 떠내려가는 물체, 제로샷)
-def _expand_vocab(classes, spec):
+#: 미끼 문구의 주인. 어휘에는 들어가지만 결과로 나가지 않는다.
+DECOY = "__decoy__"
+
+def _expand_vocab(classes, spec, decoys=None):
     """클래스 → 찾을 문구들. 평면 목록(클래스당 문구 1개)도 그대로 받는다.
+
+    `decoys` 는 **어휘에만 넣고 출력에서는 버리는** 문구다. 열린어휘 탐지기는 어휘
+    전체에 대한 argmax 로 한 박스에 이름 하나를 붙인다 — 배경에 실제로 있는 것
+    (유목·판자·돌)을 어휘에 넣어 두면 둔치의 판자가 `wooden_box` 가 아니라
+    `wooden plank` 로 불려 **사라진다**. 모델을 바꾸지 않고 어휘만 바꾸는 수다.
 
     문구가 여럿이어도 **나가는 이름은 그 클래스 하나**다 — `polystyrene foam block`
     으로 잡혀도 결과에는 `styrofoam_box` 가 적힌다. 상위 계약의 클래스는 늘지 않는다.
@@ -908,6 +1031,14 @@ def _expand_vocab(classes, spec):
             seen[key] = cls
             prompts.append(word)
             owners.append(cls)
+    for word in (decoys or []):
+        key = str(word).strip().lower()
+        if key in seen:
+            raise SystemExit("models.river.decoys: 클래스가 이미 쓰는 문구입니다 — %r (%s)"
+                             % (word, seen[key]))
+        seen[key] = DECOY
+        prompts.append(str(word))
+        owners.append(DECOY)
     return prompts, owners
 
 
@@ -1094,7 +1225,8 @@ class RiverRunner:
         self.cfg = cfg
         self.device = device
         self.classes = [str(c) for c in cfg.get("classes") or []]
-        self.prompts, self.owners = _expand_vocab(self.classes, cfg.get("prompts"))
+        self.decoys = [str(d) for d in (cfg.get("decoys") or [])]
+        self.prompts, self.owners = _expand_vocab(self.classes, cfg.get("prompts"), self.decoys)
         self.conf = float(cfg.get("conf", 0.25))
         self.merge_iou = float(cfg.get("merge_iou", 0.5))
         self.max_area = cfg.get("max_area_ratio")
@@ -1166,8 +1298,9 @@ class RiverRunner:
         self.arms_declared = len(specs)
         self.min_arms = min(want, len(self.arms))
         self.arm_names = [label for label, _ in self.arms]
-        log("  river %d종 · 문구 %d · arm %d/%d (%s) · 동의 %d/%d"
-            % (len(self.classes), len(self.prompts), len(self.arms), self.arms_declared,
+        log("  river %d종 · 문구 %d(미끼 %d) · arm %d/%d (%s) · 동의 %d/%d"
+            % (len(self.classes), len(self.prompts) - len(self.decoys), len(self.decoys),
+               len(self.arms), self.arms_declared,
                "+".join(self.arm_names), self.min_arms, len(self.arms)))
         if self.merge_classes:
             log("  river 클래스 합침: "
@@ -1275,7 +1408,7 @@ class RiverRunner:
 
     def __call__(self, bgr):
         t0 = time.perf_counter()
-        raw, per_arm_ms, dropped, folded = [], {}, 0, 0
+        raw, per_arm_ms, dropped, folded, decoyed = [], {}, 0, 0, 0
         for label, arm in self.arms:
             a0 = time.perf_counter()
             try:
@@ -1292,6 +1425,10 @@ class RiverRunner:
                 bar = self.prompt_conf.get(det.get("prompt"))
                 if bar is not None and det["conf"] < bar:
                     dropped += 1
+                    continue
+                if det["cls_name"] == DECOY:
+                    # 배경이 가져간 것 — 어휘에 둔 이유가 이것이다. 세기만 하고 버린다
+                    decoyed += 1
                     continue
                 merged_to = self.merge_classes.get(det["cls_name"])
                 if merged_to:
@@ -1326,6 +1463,7 @@ class RiverRunner:
                 "class_conf": dict(self.class_conf), "prompt_conf": dict(self.prompt_conf),
                 "min_prompts": self.min_prompts, "prompts_declared": len(self.prompts),
                 "prompt_dropped": dropped, "merge_classes": dict(self.merge_classes),
+                "decoys": list(self.decoys), "decoy_dropped": decoyed,
                 "merged_dets": folded,
                 "prompt": "text"}, dets
 
@@ -1612,6 +1750,10 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
                     stab = False
                 cfg["_stab"][key] = stab
             ts = frame_ts(header)
+            lab = cfg.setdefault("_lab", {}).get(key)
+            if lab is None:
+                lab = cfg["_lab"][key] = LabelStabilizer(sc)
+            dets = lab.update(dets, ts if ts is not None else time.time())
             if stab:
                 dets = (stab.update(dets, ts if ts is not None else time.time(), bgr)
                         if isinstance(stab, VendorTracker)

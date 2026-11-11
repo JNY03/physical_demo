@@ -680,3 +680,105 @@ def test_the_shipped_config_tracks_without_filtering():
     assert sc["enabled"] is True
     assert sc["on_untracked"] == "keep" and sc["keep_boxes"] == "detection"
     assert sc["backend"] in ("builtin",) + vi.VendorTracker.BACKENDS
+
+
+# ---------------------------------------------------------------- 미끼 문구
+def test_decoy_prompts_enter_the_vocabulary_but_never_leave_as_detections():
+    """열린어휘 탐지기는 어휘 전체의 argmax 로 이름 하나를 붙인다. 배경에 실제로 있는
+    것을 어휘에 넣어 두면 둔치의 판자가 `wooden_box` 가 아니라 `wooden plank` 로 불려
+    **사라진다**. 넣은 것이 어휘에 들어갔는지, 결과에서 빠지는지 둘 다 본다."""
+    prompts, owners = vi._expand_vocab(CLASSES, PROMPTS, ["driftwood", "rock"])
+    assert prompts[-2:] == ["driftwood", "rock"]
+    assert owners[-2:] == [vi.DECOY, vi.DECOY]
+
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [det("styrofoam_box", 0.8, (10, 10, 20, 20)),
+                      {"cls_name": vi.DECOY, "conf": 0.9, "xyxy": [40, 40, 50, 50],
+                       "prompt": "driftwood"}]}]
+    meta, dets = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1,
+                                    decoys=["driftwood", "rock"]), "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["styrofoam_box"]
+    assert meta["decoy_dropped"] == 1 and meta["decoys"] == ["driftwood", "rock"]
+
+
+def test_a_decoy_that_a_class_already_uses_is_refused():
+    with pytest.raises(SystemExit) as e:
+        vi._expand_vocab(CLASSES, PROMPTS, ["styrofoam box"])
+    assert "이미 쓰는 문구" in str(e.value)
+
+
+def test_no_decoys_means_nothing_changes():
+    arms = [{"kind": "fake", "name": "a", "dets": [det("styrofoam_box", 0.8, (10, 10, 20, 20))]}]
+    meta, dets = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1), "cpu")(IMG)
+    assert meta["decoys"] == [] and meta["decoy_dropped"] == 0 and len(dets) == 1
+
+
+# ---------------------------------------------------------------- 이름 깜빡임
+def lsdet(name, conf, xyxy, cls=0):
+    return {"cls": cls, "name": name, "conf": conf, "xyxy": list(xyxy)}
+
+
+def names_over(policy, seq, **over):
+    """한 자리에 머무는 물체에 seq 의 이름을 차례로 주고, 나가는 이름을 모은다."""
+    ls = vi.LabelStabilizer({"label_policy": policy, "iou_match": 0.3, **over})
+    out = []
+    for i, nm in enumerate(seq):
+        d = lsdet(nm, 0.5, (10, 10, 30, 30), cls=CLASSES.index(nm))
+        out.append(ls.update([d], i * 0.066)[0]["name"])
+    return out
+
+
+def test_raw_policy_changes_nothing():
+    seq = ["styrofoam_box", "wooden_box", "styrofoam_box"]
+    assert names_over("raw", seq) == seq
+
+
+def test_hysteresis_needs_k_consecutive_disagreements_to_switch():
+    """한 장짜리 반대는 이름을 바꾸지 못한다 — 그것이 깜빡임의 정체다."""
+    seq = ["styrofoam_box", "wooden_box", "styrofoam_box", "styrofoam_box"]
+    assert names_over("hyst-2", seq) == ["styrofoam_box"] * 4
+    # 두 장 연속이면 바뀐다
+    seq = ["styrofoam_box", "wooden_box", "wooden_box", "wooden_box"]
+    assert names_over("hyst-2", seq) == ["styrofoam_box", "styrofoam_box",
+                                         "wooden_box", "wooden_box"]
+
+
+def test_the_frame_s_own_name_is_never_thrown_away():
+    """이름을 붙들면 바뀌어야 할 때도 늦는다. 그래서 이 장의 원래 이름을 함께 낸다 —
+    프레임별 진실이 필요한 소비자는 label_raw 를 본다."""
+    ls = vi.LabelStabilizer({"label_policy": "hyst-2", "iou_match": 0.3})
+    ls.update([lsdet("styrofoam_box", 0.5, (10, 10, 30, 30))], 0.0)
+    out = ls.update([lsdet("wooden_box", 0.5, (10, 10, 30, 30), cls=4)], 0.066)[0]
+    assert out["name"] == "styrofoam_box" and out["label_raw"] == "wooden_box"
+    assert out["cls"] == CLASSES.index("styrofoam_box")
+
+
+def test_an_unsettled_name_is_marked_and_carries_its_candidates():
+    ls = vi.LabelStabilizer({"label_policy": "hyst-2", "iou_match": 0.3, "label_margin": 0.9})
+    ls.update([lsdet("styrofoam_box", 0.5, (10, 10, 30, 30))], 0.0)
+    out = ls.update([lsdet("wooden_box", 0.5, (10, 10, 30, 30), cls=4)], 0.066)[0]
+    assert out["label_stable"] is False
+    assert set(out["label_candidates"]) == {"styrofoam_box", "wooden_box"}
+
+
+def test_a_forgotten_track_does_not_lend_its_name_to_a_later_object():
+    """사라진 물체를 잊지 않으면 그 이름이 뒤에 들어온 다른 물체에 얹힌다."""
+    ls = vi.LabelStabilizer({"label_policy": "hyst-3", "iou_match": 0.3, "label_max_missed": 2})
+    ls.update([lsdet("styrofoam_box", 0.9, (10, 10, 30, 30))], 0.0)
+    for i in range(1, 5):
+        ls.update([], i * 0.066)                        # 한참 안 보인다
+    out = ls.update([lsdet("wooden_box", 0.9, (10, 10, 30, 30), cls=4)], 0.4)[0]
+    assert out["name"] == "wooden_box"
+
+
+def test_an_unknown_label_policy_is_refused():
+    for bad in ("hyst", "hyst-0", "smooth"):
+        with pytest.raises(SystemExit):
+            vi.LabelStabilizer({"label_policy": bad})
+
+
+def test_label_policy_keys_are_not_rejected_by_a_vendor_tracker():
+    """이름 안정화 값은 트래커의 것이 아니다. 같은 블록에 적히므로 거절하면
+    설정이 아예 안 선다 — 실제로 전체 추론이 그렇게 멈췄다."""
+    tr = _vendor(label_policy="hyst-2", label_margin=0.6, label_max_missed=5)
+    assert tr.backend == "bytetrack"
