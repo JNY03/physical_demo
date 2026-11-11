@@ -17,8 +17,8 @@ data_root: ../stream_data        # 상대 경로면 이 config 파일 위치 기
 
 # 명령행에서 안 고르면 쓰는 기본값
 defaults:
-  devices: [cam360, drone, robot1, robot2]
-  models: [yoloe]
+  devices: [cam360, drone, robot1, robot2, realsense]
+  models: [yoloe]                 # yoloe | river | unidepth | moge2_aerial
   runs: live                      # live = 실시간 스트림 최신 프레임 / 저장된 이미지: all | latest | 실행 폴더 이름 목록
 
 runtime:
@@ -52,6 +52,10 @@ output:
 # 파노라마에서는 거리값을 그대로 믿지 않는다.
 devices:
   cam360: {fov_x_deg: null}
+  # pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림(1280x720). 깊이가 아니다 —
+  # D455 는 UVC 라 컬러만 /dev/video* 로 나온다. hfov 90 은 **제원값**이고 관측이 아니다:
+  # 보정 전에는 거리·좌표의 확정 근거로 쓰지 않는다(선언된 사전정보와 측정값을 구분한다).
+  realsense: {fov_x_deg: 90.0}
   drone:  {fov_x_deg: meta}
   robot1: {fov_x_deg: null}
   robot2: {fov_x_deg: null}
@@ -96,6 +100,108 @@ models:
       text_weight: /home/ny/physical_demo/models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
       text_encoder_dir: /home/ny/physical_demo/models               # mobileclip_blt.ts 가 있는 폴더 (없으면 여기로 받는다)
 
+  # ── river — 하천 떠내려가는 물체, **학습 없이** 제로샷 ──────────────────────
+  # 안동 자료는 현장 1곳·날짜 1일·촬영 1회다(인접 프레임 평균차가 go1 50프레임 간격에도
+  # 0.30). 가중치를 학습하면 그 한 장면을 외운다. 그래서 가중치는 건드리지 않고
+  # 제로샷 모델의 어휘와 임계값만 쓴다.
+  #
+  # **어휘와 출력 이름은 다르다.** prompts 는 클래스당 문구를 여럿 받고, 어느 문구로
+  # 잡혀도 결과에 적히는 이름은 클래스 하나다. 검출마다 어느 문구가 말했는지가
+  # prompts 로 남는다.
+  #
+  # 아래 값은 `local/consensus/dataset.json` 의 **tune 쪽에서만** 고른 것이다
+  # (split_id 0b525ed3e68a · seed andong-2026119 · 카메라 층화).
+  # 사전 등록 local/consensus/prereg_yoloe_prompts.md · 측정 eval_prompts_{tune,test}.json.
+  #
+  #   안동 1현장·1일 · tune 117장/267박스 · test 102장/216박스 (IoU 0.5)
+  #   주지표는 **macro F1**(클래스 5개 F1 평균) — micro 는 물통+스티로폼(483 중 407)이
+  #   결정해 소수 클래스가 0 이 되어도 안 보인다
+  #
+  #   yoloe 단독 전역 conf 0.05      test macro 0.440 · micro 0.523 · 오검출/장 1.57
+  #   yoloe 단독 + 클래스별 임계(이 설정)  test macro 0.441 · micro 0.543 · 오검출/장 1.17
+  #   (참조) 4모델 동의 k=3 conf 0.25   test macro 0.458 · micro 0.599 · 오검출/장 0.45
+  #
+  # **클래스별 임계값은 주지표를 올리지 못했다** (macro +0.001). 올린 것은 micro
+  # (+0.020)와 오검출(1.57 → 1.17 장당)이고, 내린 것은 재현율(0.616 → 0.579)이다.
+  # 정밀도와 재현율을 맞바꾼 것이며 정확도가 올라간 것이 아니다. 사전 등록한 선정
+  # 규칙이 tune 에서 이 칸을 골랐기 때문에 기본값으로 둔다. 전역 하나로 돌리려면
+  # class_conf 를 지운다 — 그러면 위 첫 줄 숫자가 된다.
+  #
+  # **문구를 늘린 것은 졌다.** 클래스당 문구 4개(19문구)로 늘린 어휘는 tune macro 가
+  # 모든 전역 conf 에서 더 낮았고(최고 0.230 vs 0.262) 오검출이 장당 7.31 까지
+  # 늘었다. YOLOE 는 어휘 전체에 대한 argmax 로 **한 박스에 이름 하나**를 붙이므로
+  # 문구들이 서로 표를 빼앗는다("styrofoam box" 가 3건으로 줄고 "white insulated
+  # box" 가 439건을 가져갔다). 그래서 기본 어휘는 클래스당 1개다. 졌다는 기록은
+  # 지우지 않는다 — 어휘를 늘리면 나아진다는 추측을 다시 하지 않기 위해서다.
+  #
+  # 속도: 어휘를 5 → 19 문구로 늘려도 한 장 164.6 → 166.2 ms (1%)다. 비싼 것은
+  # 문구가 아니라 **모델 수**다 — 4 arm 동의는 한 장 3.33 s (48배).
+  #
+  # **클래스가 고르지 않다.** 이 설정의 test 클래스별 recall: water_jug 0.644 ·
+  # styrofoam_box 0.606 · beverage_can 0.500 · wooden_box 0.474 ·
+  # butane_canister 0.286. 부탄은 위험물인데 일곱 중 둘이다 — 이 작동점을 위험물
+  # 경보의 **유일한** 근거로 쓰면 안 된다.
+  river:
+    classes: [styrofoam_box, water_jug, butane_canister, beverage_can, wooden_box]
+    # 클래스 → 찾을 문구들. 평면 목록(클래스당 1개)도 받는다. 같은 문구를 두 클래스가
+    # 쓰면 거절한다 — 돌아온 문구로 클래스를 되짚을 수 없다.
+    prompts:
+      styrofoam_box:   ["styrofoam box"]
+      water_jug:       ["plastic water jug"]
+      butane_canister: ["butane gas canister"]
+      beverage_can:    ["beverage can"]
+      wooden_box:      ["wooden block"]
+    # 캔 종류는 전부 부탄으로 본다. **병합 전**에 이름을 바꾸므로 한 물체에 캔과 부탄이
+    # 따로 붙은 자리가 하나로 접힌다(`sample` 프레임이 그 모양이었다). 근거: tune 에서
+    # 부탄 정답 8 중 1 이 `beverage_can` 으로 잡혔고 test 21 중 2 가 그랬다 —
+    # **이름을 고쳐 되찾는 것은 그만큼**이고, 나머지(tune 4/8 · test 11/21)는 아예
+    # 못 본 것이라 합쳐도 돌아오지 않는다. 합침은 재현율을 올리지 못하고(tune 0.125 →
+    # 0.125, 같은 임계) 정밀도를 올린다(0.143 → 0.222). 자세한 것은
+    # local/consensus/prereg_merge_cans.md · eval_merge_cans.json.
+    # 되돌리려면 이 두 줄을 지운다 — 그러면 beverage_can 이 다시 따로 나온다.
+    merge_classes:
+      beverage_can: butane_canister
+    conf: 0.05                    # **전역 하한 하나.** 운영자가 정하는 값이고 자료에서 고른
+                                  # 값이 아니다 — 라벨 219장은 전부 test 라 거기서 고르면
+                                  # 그 다섯 기기의 값이 된다(아래 머리글). 기본은 재현율
+                                  # 우선(위험물을 놓치지 않는 쪽)으로 arm 하한과 같게 둔다
+    class_conf: {}                # 클래스별 하한 — **쓰지 않는다.** 앞서 tune 에서 고른 값
+                                  # (butane .10 · wooden .15)이 있었으나 ① 주지표를 올리지
+                                  # 못했고(macro +0.001) ② 부탄 재현율을 오히려 내렸으며
+                                  # (0.333 → 0.286, 정답 8개로 고른 값이다) ③ 라벨 전체가
+                                  # test 가 된 뒤로는 고를 자료가 없다. 비워 둔다
+    prompt_conf: {}               # 문구별 하한 — **병합 전**에 쓴다. 같은 이유로 비어 있다
+    arm_conf: 0.05                # arm 각자의 하한. 어떤 임계값도 이보다 낮으면 거절한다
+    min_arms: 1                   # arm 이 하나다 — 동의를 요구하지 않는다
+    min_prompts: 1                # 한 물체를 서로 다른 문구 이만큼이 가리켜야 받는다.
+                                  # arm 이 하나면 1 만 쓸 수 있다 (한 모델은 한 박스에
+                                  # 이름 하나를 붙여서 tune 에서 검출이 0 이었다)
+    merge_iou: 0.5                # 같은 클래스가 이만큼 겹치면 같은 물체. 다른 클래스는 합치지 않는다
+    max_area_ratio: 0.08          # 화면의 이 비율보다 큰 박스는 장면 검출로 버린다. null = 끔
+    max_det: 100
+    imgsz: 1920                   # arm 마다 imgsz 로 덮을 수 있다
+    on_missing_arm: refuse        # arm 이 하나다 — 빠지면 검출이 없다. 조용히 넘기지 않는다
+    # 런타임에 받지 않는다 (AI-C-16 폐쇄망)
+    arms:
+      - kind: yoloe               # YOLOE-11l-seg · O365+GoldG+LVIS · MobileCLIP 텍스트 타워
+        weight: /home/ny/physical_demo/models/yoloe-11l-seg.pt
+        text_encoder_dir: /home/ny/physical_demo/models    # mobileclip_blt.ts 가 있는 폴더
+    #
+    # 4모델 동의 구성 — test micro 0.599 · 오검출/장 0.45 지만 한 장 3.33 s (48배).
+    # 속도를 포기할 수 있을 때(요청 기반 조회, 사후 분석) 아래로 바꾼다.
+    # min_arms: 3 · conf: 0.25 · class_conf 는 지운다(그 작동점에서 재지 않았다).
+    #   arms:
+    #     - kind: yoloe
+    #       weight: /home/ny/physical_demo/models/yoloe-11l-seg.pt
+    #       text_encoder_dir: /home/ny/physical_demo/models
+    #     - kind: yoloworld       # YOLOv8s-worldv2 · O365+GoldG+CC3M · CLIP
+    #       weight: /home/ny/physical_demo/models/yolov8s-worldv2.pt
+    #     - kind: gdino           # Grounding DINO tiny · COCO+O365+GoldG+Cap4M · BERT
+    #       model: IDEA-Research/grounding-dino-tiny
+    #       text_threshold: 0.2
+    #     - kind: owlv2           # OWLv2-large-patch14-ensemble · WebLI self-training
+    #       model: google/owlv2-large-patch14-ensemble
+
   # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
   unidepth:
     repo_path: /home/ny/physical_demo/external/UniDepth
@@ -124,6 +230,56 @@ models:
 # 프레임 사이 같은 물체(IoU)를 이어 붙여 track_id 를 주고, 박스·이름·거리가 장마다 튀지 않게 한다.
 stabilize:
   enabled: false                  # true 면 아래 값으로 안정화
+  # 모델마다 흔들리는 모양이 다르다 — stabilize.<model> 로 바탕값 위에 얹는다.
+  # river: 수십 px 짜리가 장마다 들락거린다. 값은 **자료가 아니라 프레임율과 물체
+  # 크기**에서 정했다(local/consensus/prereg_tracking.md §2) — 라벨 219장이 전부
+  # test 라 거기서 고르면 그 다섯 기기의 값이 된다.
+  river:
+    # **켠다. 다만 거르는 층이 아니라 번호를 붙이는 층이다.**
+    #
+    # 처음에는 우리 Stabilizer 를 모든 검출에 걸었고 55칸이 전부 off 보다 나빴다
+    # (연속 150장 macro: off 0.290 · 최악 0.082). conf 0.05 짜리 하나하나가 track 을
+    # 시작해 쓰레기를 이어 붙인 뒤 hold 로 더 오래 띄운 설계였다.
+    #
+    # 기성 트래커(ultralytics 8.4.155 에 여섯이 **이미 들어 있다**)는 이 축이 설계에
+    # 있다: new_track_thresh(0.25) 위의 **잘 잡힌** 검출로만 track 을 시작하고, 약한
+    # 검출은 이미 있는 track 을 되찾는 데만 쓴다. 재 보니 그렇게 이어진 것은 정확하다
+    # — bytetrack precision 0.778 (off 는 0.393). 그런데 우리 작동점에서 그 문턱을
+    # 넘는 검출이 **1/8 뿐**이라, 넘지 못한 것을 버리면 재현율이 0.640 → 0.024 다.
+    #
+    # 그래서 on_untracked: keep 이다. 잘 잡힌 것은 번호를 받고 나머지는 번호 없이
+    # 그대로 나간다. 이 모드의 탐지 점수는 off 와 **수치까지 같다**(0.290/0.487/
+    # 0.393/0.640 — 쟀다). 잃는 것 없이 번호가 붙는다.
+    #
+    # 측정 local/consensus/eval_vendor_tracker.json · 사전 등록 prereg_vendor_tracker.md
+    enabled: true
+    backend: bytetrack            # bytetrack | botsort | ocsort | deepocsort | fasttrack | builtin
+                                  # botsort 는 카메라 움직임 보정이 붙어 번호를 더 많이
+                                  # 단다(17.7% vs 12.7%). 다만 보정이 **그림 크기가 장마다
+                                  # 같아야** 돌아간다 — 우리 sample 묶음처럼 크기가 섞이면
+                                  # 조용히 항등으로 떨어진다. 영상 스트림에서는 쓸 만하다
+    on_untracked: keep            # keep = 번호 못 받은 검출도 그대로 낸다 (**기본**)
+                                  # drop = 이어진 것만 낸다. 재현율 0.640 → 0.024 다
+    keep_boxes: detection         # detection = 탐지기 박스 그대로 (칼만 박스는 수십 px
+                                  # 짜리를 늦춰 IoU 0.5 를 못 넘는 것을 쟀다)
+    reset_gap_s: 2.0              # 프레임 시각이 이보다 벌어지면 트래커를 새로 세운다
+    # 트래커 자체 값(track_high_thresh 등)은 **패키지 기본값 그대로** 쓴다. 여기서
+    # 고치면 그 값은 이 현장 다섯 기기의 값이 된다 — 라벨 219장이 전부 test 인 이유다.
+    #
+    # 폐쇄망: 연관에 `lap` 이 필요하다. 없으면 ultralytics 가 **런타임에 받으려 한다** —
+    # 코드가 먼저 거절하고 트래킹만 끈다. 미리 `pip install 'lap>=0.5.12'` 한다.
+    # ReID(with_reid)는 외모 인코더 조달이 선행이라 켜지 않았다.
+    #
+    # 우리 Stabilizer 를 쓰려면 backend: builtin (아래 값이 그때 쓰인다).
+    # 재 보니 번호만 붙이는 구성(box_alpha 1.0·min_hits 1·hold 0)도 0.290 → 0.266 이었다.
+    iou_match: 0.2
+    center_dist: 1.0              # **고정 카메라·느린 프레임용**(backend: builtin 에서만).
+                                  # IoU 만으로는 상자가 겹칠 때만 이어진다 — 물체가 자기
+                                  # 폭보다 멀리 움직이면 겹침이 0 이고 track 이 끊긴다
+    min_hits: 2
+    hold_missed: 2
+  # 1 fps 로 찍는 카메라에서는 min_hits 2 가 **1초 지연**이다. 그런 배치는
+  # min_hits 1 · reset_gap_s 를 프레임 간격보다 크게 둔다
   iou_match: 0.3                  # 이전 장 물체와 이만큼 겹치면 같은 물체 (이름은 안 본다)
   box_alpha: 0.5                  # 박스·신뢰도 EMA. 낮을수록 안정적, 반응은 느리다
   label_decay: 0.8                # 이름 다수결: 장마다 이전 표를 이만큼 줄이고 이번 신뢰도를 더한다
@@ -146,6 +302,7 @@ depth_vis:
 # --models 에 yoloe 가 없어도 결합용으로 yoloe 를 적재한다 (그때 yoloe 결과 자체는 저장하지 않음).
 fusion:
   enabled: true
+  detector: yoloe                 # 검출 모델을 안 골랐는데 depth 를 골랐을 때 결합용으로 적재할 것 (yoloe | river)
   depth_percentile: 40            # 마스크 안 depth 의 이 백분위를 물체 거리로 본다
   mask_erode_px: 3                # 경계 배경 혼입을 줄이려고 마스크를 깎는다
   min_valid_ratio: 0.2            # 마스크 안 유효 depth 비율이 이보다 낮으면 거리 null
@@ -173,6 +330,7 @@ geo:
 # label: 박스 위에 쓸 줄 목록. 한 줄 = 항목 목록. 값이 없는 항목은 빠진다
 #   name 클래스 이름 · conf 신뢰도 · cls 클래스 번호 · id track_id · depth 광축 거리 Z · range 직선거리
 #   gps 위도,경도 · alt 해발고도 · ned 드론 기준 북·동·아래 오프셋(m)
+# river 는 overlay.river 가 없으면 overlay.yoloe 설정을 같이 쓴다.
 overlay:
   min_conf: 0.25                  # 그릴 최소 신뢰도. null = 다 그림. 그림에서만 거른다 (results 에는 전부 남음)
   line_width: null                # null = 이미지 크기에 맞춰 자동
@@ -181,6 +339,8 @@ overlay:
   gps_decimals: 6                 # 위도·경도 표시 자리수 (6 ≈ 0.1 m). 저장값은 8자리
   yoloe:
     label: [[name, conf]]
+  river:
+    label: [[name, conf]]         # agree 를 보려면 [[name, conf], [agree]] — results.jsonl 에는 항상 있다
   depth:
     label: [[name, conf, range], [gps]]
     pose: true                    # 영상 위 띠에 드론 GPS·고도·자세·state 시각 차이 한 줄

@@ -1,0 +1,682 @@
+"""river 옵션 — 동의 판정 · 없는 arm · 검출 모델 경계.
+
+가짜 arm 을 끼워 넣어 가중치 없이 돈다. 실행:
+  cd vision && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv/bin/python -m pytest test_vision_river.py -q
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+_spec = importlib.util.spec_from_file_location(
+    "vision_infer_under_test", Path(__file__).with_name("vision_infer.py"))
+vi = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(vi)
+
+IMG = np.zeros((100, 100, 3), np.uint8)
+CLASSES = ["styrofoam_box", "water_jug", "butane_canister", "beverage_can", "wooden_box"]
+PROMPTS = ["styrofoam box", "plastic water jug", "butane gas canister",
+           "beverage can", "wooden block"]
+
+
+class FakeArm:
+    """설정에 적어 둔 검출을 그대로 돌려준다."""
+
+    def __init__(self, spec, prompts, classes, device, shared):
+        if spec.get("absent"):
+            raise vi._ArmMissing("없다 (시험)")
+        if spec.get("explodes"):
+            self.boom = True
+        else:
+            self.boom = False
+        self.dets = [dict(d) for d in spec.get("dets") or []]
+        self.name = spec.get("name") or spec["kind"]
+
+    def __call__(self, bgr):
+        if self.boom:
+            raise RuntimeError("arm 이 터졌다 (시험)")
+        return self.dets
+
+
+@pytest.fixture(autouse=True)
+def fake_arms(monkeypatch):
+    monkeypatch.setitem(vi.ARM_KINDS, "fake", FakeArm)
+    monkeypatch.setattr(vi, "log", lambda *a, **k: None)
+
+
+def cfg(arms, **over):
+    base = {"classes": CLASSES, "prompts": PROMPTS, "conf": 0.2, "min_arms": 2,
+            "arm_conf": 0.05, "merge_iou": 0.5, "max_area_ratio": 0.08,
+            "max_det": 100, "arms": arms}
+    base.update(over)
+    return base
+
+
+def det(cls, conf, xyxy):
+    return {"cls_name": cls, "conf": conf, "xyxy": list(xyxy)}
+
+
+BOX = (10.0, 10.0, 20.0, 20.0)          # 화면의 1% — 면적 상한에 걸리지 않는다
+
+
+def arm(name, dets, **extra):
+    return {"kind": "fake", "name": name, "dets": dets, **extra}
+
+
+# ---------------------------------------------------------------- 동의 판정
+def test_two_arms_agreeing_on_the_same_box_pass():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.6, BOX)]),
+                            arm("b", [det("water_jug", 0.5, BOX)])]), "cpu")
+    info, dets = r(IMG)
+    assert len(dets) == 1
+    assert dets[0]["name"] == "water_jug"
+    assert dets[0]["agree"] == 2 and dets[0]["arms"] == ["a", "b"]
+    assert dets[0]["conf"] == 0.6, "합의 신뢰도는 동의한 arm 중 최대값"
+    assert info["min_arms_applied"] == 2
+
+
+def test_one_arm_alone_is_dropped_when_two_are_required():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.9, BOX)]), arm("b", [])]), "cpu")
+    _info, dets = r(IMG)
+    assert dets == [], "한 arm 만 말한 것은 동의가 아니다"
+
+
+def test_min_arms_one_is_the_plain_union():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.9, BOX)]), arm("b", [])],
+                           min_arms=1), "cpu")
+    _info, dets = r(IMG)
+    assert [d["agree"] for d in dets] == [1]
+
+
+def test_different_classes_on_the_same_spot_are_not_merged():
+    """캔과 부탄은 서로 다른 조치를 부른다 — 한 칸에 합치면 그 구분이 사라진다."""
+    r = vi.RiverRunner(cfg([arm("a", [det("beverage_can", 0.6, BOX)]),
+                            arm("b", [det("butane_canister", 0.6, BOX)])],
+                           min_arms=1), "cpu")
+    _info, dets = r(IMG)
+    assert sorted(d["name"] for d in dets) == ["beverage_can", "butane_canister"]
+    assert all(d["agree"] == 1 for d in dets), "다른 클래스는 서로의 동의가 아니다"
+
+
+def test_boxes_below_merge_iou_stay_separate():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.6, (10, 10, 20, 20))]),
+                            arm("b", [det("water_jug", 0.6, (60, 60, 70, 70))])],
+                           min_arms=1), "cpu")
+    _info, dets = r(IMG)
+    assert len(dets) == 2
+
+
+def test_conf_floor_applies_after_merging():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.10, BOX)]),
+                            arm("b", [det("water_jug", 0.12, BOX)])], conf=0.2), "cpu")
+    _info, dets = r(IMG)
+    assert dets == [], "동의해도 conf 하한을 넘지 못하면 받지 않는다"
+
+
+def test_scene_sized_boxes_are_dropped():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.9, (0, 0, 100, 100))]),
+                            arm("b", [det("water_jug", 0.9, (0, 0, 100, 100))])]), "cpu")
+    _info, dets = r(IMG)
+    assert dets == [], "화면 전체를 가리킨 검출은 물체가 아니다"
+
+
+def test_results_are_sorted_by_agreement_then_conf():
+    r = vi.RiverRunner(cfg([
+        arm("a", [det("water_jug", 0.9, (10, 10, 20, 20)), det("styrofoam_box", 0.4, (60, 60, 70, 70))]),
+        arm("b", [det("styrofoam_box", 0.4, (60, 60, 70, 70))]),
+    ], min_arms=1), "cpu")
+    _info, dets = r(IMG)
+    assert [d["agree"] for d in dets] == [2, 1]
+
+
+def test_max_det_caps_the_output():
+    many = [det("water_jug", 0.5, (x, 10, x + 5, 15)) for x in range(0, 90, 10)]
+    r = vi.RiverRunner(cfg([arm("a", many), arm("b", many)], max_det=3), "cpu")
+    _info, dets = r(IMG)
+    assert len(dets) == 3
+
+
+# ---------------------------------------------------------------- 없는 arm · 터진 arm
+def test_a_missing_arm_is_dropped_and_min_arms_is_clamped_and_recorded():
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.6, BOX)]),
+                            arm("gone", [], absent=True)], min_arms=2), "cpu")
+    info, dets = r(IMG)
+    assert r.arm_names == ["a"]
+    assert info["missing_arms"] == ["gone"]
+    assert info["min_arms_declared"] == 2
+    assert info["min_arms_applied"] == 1, "남은 arm 수로 줄인다"
+    assert info["arms_declared"] == 2 and info["unanimous"] is True
+    assert len(dets) == 1, "줄인 작동점에서는 한 arm 으로도 통과한다"
+
+
+def test_dropping_an_arm_turns_three_of_four_into_unanimity_and_says_so(monkeypatch):
+    """3/4 와 3/3 은 다른 작동점이다 — 3/3 은 만장일치라 선언한 것보다 엄해진다."""
+    said = []
+    monkeypatch.setattr(vi, "log", lambda *a: said.append(a[0] % a[1:] if len(a) > 1 else a[0]))
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.6, BOX)]),
+                            arm("b", [det("water_jug", 0.6, BOX)]),
+                            arm("c", [det("water_jug", 0.6, BOX)]),
+                            arm("gone", [], absent=True)], min_arms=3), "cpu")
+    info, dets = r(IMG)
+    assert (info["arms_declared"], info["min_arms_declared"]) == (4, 3)
+    assert (len(info["arms"]), info["min_arms_applied"]) == (3, 3)
+    assert info["unanimous"] is True
+    assert any("작동점이 바뀌" in m and "만장일치" in m for m in said), \
+        "작동점이 바뀐 사실을 말해야 한다 — 조용히 지나가면 숫자가 어느 작동점의 것인지 알 수 없다"
+    assert len(dets) == 1
+
+
+def test_a_full_set_of_arms_is_not_reported_as_a_changed_operating_point(monkeypatch):
+    said = []
+    monkeypatch.setattr(vi, "log", lambda *a: said.append(a[0] % a[1:] if len(a) > 1 else a[0]))
+    r = vi.RiverRunner(cfg([arm("a", []), arm("b", []), arm("c", [])], min_arms=2), "cpu")
+    info, _dets = r(IMG)
+    assert info["unanimous"] is False
+    assert not any("작동점이 바뀌" in m for m in said)
+
+
+def test_refuse_mode_will_not_stand_up_with_a_missing_arm():
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([arm("a", []), arm("gone", [], absent=True)],
+                           on_missing_arm="refuse"), "cpu")
+
+
+def test_all_arms_missing_is_refused_even_in_degrade_mode():
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([arm("x", [], absent=True), arm("y", [], absent=True)]), "cpu")
+
+
+def test_one_arm_failing_at_runtime_does_not_stop_the_others():
+    """선택 구성요소의 장애가 관련 없는 기능을 막지 않는다 (AI-C-05)."""
+    r = vi.RiverRunner(cfg([arm("boom", [], explodes=True),
+                            arm("a", [det("water_jug", 0.6, BOX)]),
+                            arm("b", [det("water_jug", 0.6, BOX)])]), "cpu")
+    info, dets = r(IMG)
+    assert len(dets) == 1
+    assert info["arm_ms"]["boom"] is None, "터진 arm 은 시간이 아니라 None 으로 남는다"
+
+
+# ---------------------------------------------------------------- 설정 거절
+def test_classes_and_prompts_must_line_up():
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([arm("a", [])], prompts=PROMPTS[:2]), "cpu")
+
+
+def test_arm_conf_above_conf_is_refused():
+    """arm 이 먼저 버린 검출은 동의에 쓸 수 없다 — 조용히 동의 수가 깎인다."""
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([arm("a", [])], arm_conf=0.3, conf=0.2), "cpu")
+
+
+def test_empty_arms_is_refused():
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([]), "cpu")
+
+
+def test_unknown_arm_kind_is_refused():
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([{"kind": "no-such-model"}]), "cpu")
+
+
+def test_min_arms_below_one_is_refused():
+    with pytest.raises(SystemExit):
+        vi.RiverRunner(cfg([arm("a", [])], min_arms=0), "cpu")
+
+
+# ---------------------------------------------------------------- 검출 모델 경계
+def test_river_is_a_detection_model_and_yoloe_wins_the_fusion_slot():
+    assert vi.DETECT_MODELS == ("yoloe", "river")
+    assert "river" in vi.MODELS and "river" in vi.RUNNERS
+    assert vi.active_detector(["river", "unidepth"]) == "river"
+    assert vi.active_detector({"river": 1, "yoloe": 1}) == "yoloe"
+    assert vi.active_detector(["unidepth"]) is None
+
+
+def test_river_overlay_falls_back_to_the_yoloe_label_spec():
+    assert vi.label_spec({"yoloe": {"label": [["name"]]}}, "river") == [["name"]]
+    assert vi.label_spec({"river": {"label": [["name", "conf"]]}},
+                         "river") == [["name", "conf"]]
+    assert vi.label_spec({}, "river") == [["name", "conf"]]
+
+
+def test_the_shipped_config_tunes_nothing_on_the_labelled_data():
+    """**라벨 219장은 전부 test 다.** 거기서 고른 값이 설정에 있으면 그 설정은 그
+    다섯 기기의 것이 되고 촬영 기기에 상관없이 쓸 수 없다. 그래서 기본 설정에는
+    클래스별·문구별 임계값이 **없어야** 한다 — 전역 conf 하나다.
+
+    (이 시험은 글자를 고정하는 것이 아니라 *선언이 서로 어긋나지 않는지* 를 본다:
+    모든 임계값이 arm_conf 이상이고, 이름이 classes 안에 있고, arm 이 하나면
+    min_arms·min_prompts 가 1 이어야 한다.)
+    """
+    import yaml
+    cfg_path = Path(__file__).with_name("vision_config.yaml")
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    river = data["models"]["river"]
+    assert [a["kind"] for a in river["arms"]] == ["yoloe"]
+    assert len(river["classes"]) == 5
+    assert set(river["prompts"]) == set(river["classes"])
+    assert set(river["class_conf"]) <= set(river["classes"])
+    floor = river["arm_conf"]
+    for name, value in list(river["class_conf"].items()) + list((river["prompt_conf"] or {}).items()):
+        assert value >= floor, name
+    if len(river["arms"]) == 1:
+        assert river["min_arms"] == 1 and river["min_prompts"] == 1
+    vi.check_overlay_cfg(data)          # overlay 설정이 river 를 받아들인다
+    # 튜닝된 임계값이 없다 — 라벨이 전부 test 라 고를 자료가 없다
+    assert not river["class_conf"] and not river["prompt_conf"]
+    # 설정이 실제로 서는지 — 가짜 arm 으로 바꿔 끼워 세운다 (가중치 없이)
+    spun = vi.RiverRunner(dict(river, arms=[{"kind": "fake", "name": "yoloe", "dets": []}]), "cpu")
+    assert spun.min_prompts == 1
+    assert {spun.threshold(c) for c in river["classes"]} == {river["conf"]}
+    # 트래킹은 켜져 있되 **거르지 않아야** 한다 — 거르면 재현율이 0.640 → 0.024 다
+    river_track = data["stabilize"]["river"]
+    assert river_track["enabled"] is True
+    assert river_track["on_untracked"] == "keep"
+
+
+# ---------------------------------------------------------------- 어휘: 여러 문구 → 한 이름
+VOCAB = {"styrofoam_box": ["styrofoam box", "white foam box"],
+         "water_jug": ["plastic water jug", "water container"],
+         "butane_canister": ["butane gas canister"],
+         "beverage_can": ["beverage can"],
+         "wooden_box": ["wooden block"]}
+
+
+def pdet(cls, conf, xyxy, prompt):
+    return {"cls_name": cls, "conf": conf, "xyxy": list(xyxy), "prompt": prompt}
+
+
+def test_many_prompts_expand_to_one_vocabulary_but_keep_class_order():
+    prompts, owners = vi._expand_vocab(CLASSES, VOCAB)
+    assert prompts == ["styrofoam box", "white foam box", "plastic water jug",
+                       "water container", "butane gas canister", "beverage can",
+                       "wooden block"]
+    assert owners == ["styrofoam_box", "styrofoam_box", "water_jug", "water_jug",
+                      "butane_canister", "beverage_can", "wooden_box"]
+    # 평면 목록(옛 모양)도 그대로 받는다
+    assert vi._expand_vocab(CLASSES, PROMPTS) == (PROMPTS, CLASSES)
+
+
+def test_a_synonym_hit_reports_the_class_name_not_the_prompt():
+    """`white foam box` 로 잡혀도 나가는 이름은 `styrofoam_box` 다 — 상위 계약의
+    클래스는 어휘를 늘려도 늘지 않는다."""
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [pdet("styrofoam_box", 0.8, (10, 10, 20, 20), "white foam box")]}]
+    _meta, dets = vi.RiverRunner(cfg(arms, prompts=VOCAB, min_arms=1), "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["styrofoam_box"]
+    assert dets[0]["cls"] == CLASSES.index("styrofoam_box")
+    assert dets[0]["prompts"] == ["white foam box"]        # 어느 문구가 말했는지는 남는다
+
+
+def test_two_synonyms_on_one_object_fold_into_one_detection():
+    """같은 물체를 두 문구가 가리키면 **검출 하나**다. 접지 않으면 한 물체가 둘로
+    세어져 오검출이 부풀고 화면에 두 박스가 겹친다."""
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [pdet("styrofoam_box", 0.8, (10, 10, 20, 20), "styrofoam box"),
+                      pdet("styrofoam_box", 0.6, (11, 11, 21, 21), "white foam box")]}]
+    _meta, dets = vi.RiverRunner(cfg(arms, prompts=VOCAB, min_arms=1), "cpu")(IMG)
+    assert len(dets) == 1
+    assert dets[0]["conf"] == 0.8                          # 센 쪽이 남는다
+    assert dets[0]["prompts"] == ["styrofoam box", "white foam box"]
+
+
+def test_a_prompt_shared_by_two_classes_is_refused():
+    bad = dict(VOCAB, water_jug=["plastic water jug", "styrofoam box"])
+    with pytest.raises(SystemExit) as e:
+        vi._expand_vocab(CLASSES, bad)
+    assert "두 클래스가" in str(e.value)
+
+
+def test_prompts_for_an_unknown_class_or_an_empty_class_are_refused():
+    with pytest.raises(SystemExit) as e:
+        vi._expand_vocab(CLASSES, dict(VOCAB, driftwood=["driftwood"]))
+    assert "classes 에 없는" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        vi._expand_vocab(CLASSES, dict(VOCAB, beverage_can=[]))
+    assert "문구가 없는" in str(e.value)
+
+
+def test_a_flat_prompt_list_of_the_wrong_length_says_how_to_use_a_mapping():
+    with pytest.raises(SystemExit) as e:
+        vi._expand_vocab(CLASSES, PROMPTS[:3])
+    assert "prompts 를 클래스" in str(e.value)
+
+
+# ---------------------------------------------------------------- 임계값
+def test_class_conf_raises_the_bar_for_one_class_only():
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [det("butane_canister", 0.12, (10, 10, 20, 20)),
+                      det("water_jug", 0.12, (40, 40, 50, 50))]}]
+    runner = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1,
+                                class_conf={"butane_canister": 0.2}), "cpu")
+    assert runner.threshold("butane_canister") == 0.2
+    assert runner.threshold("water_jug") == 0.05
+    _meta, dets = runner(IMG)
+    assert [d["name"] for d in dets] == ["water_jug"]       # 부탄은 0.2 를 못 넘었다
+
+
+def test_class_conf_can_lower_the_bar_for_a_hazard_class():
+    """위험물은 재현율을 위해 **내린다**. 전역을 내리면 다른 클래스의 오검출까지 늘어난다."""
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [det("butane_canister", 0.12, (10, 10, 20, 20)),
+                      det("water_jug", 0.12, (40, 40, 50, 50))]}]
+    _meta, dets = vi.RiverRunner(cfg(arms, conf=0.2, min_arms=1, arm_conf=0.05,
+                                     class_conf={"butane_canister": 0.1}), "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["butane_canister"]
+
+
+def test_prompt_conf_is_applied_before_merging():
+    """문구별 하한은 병합 **전**이다. 병합 뒤에는 어느 문구의 conf 였는지가 최대값에
+    가려져, 센 쪽이 약한 문구의 것이면 약한 문구가 조용히 통과한다."""
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [pdet("styrofoam_box", 0.9, (10, 10, 20, 20), "white foam box"),
+                      pdet("styrofoam_box", 0.3, (11, 11, 21, 21), "styrofoam box")]}]
+    runner = vi.RiverRunner(cfg(arms, prompts=VOCAB, conf=0.05, min_arms=1,
+                                prompt_conf={"white foam box": 0.5}), "cpu")
+    meta, dets = runner(IMG)
+    assert len(dets) == 1
+    # 0.9 ≥ 0.5 — 센 쪽이 남고 하한 없는 문구도 함께 접힌다
+    assert dets[0]["prompts"] == ["styrofoam box", "white foam box"]
+    assert dets[0]["conf"] == 0.9
+    assert meta["prompt_dropped"] == 0
+
+    runner = vi.RiverRunner(cfg(arms, prompts=VOCAB, conf=0.05, min_arms=1,
+                                prompt_conf={"white foam box": 0.95}), "cpu")
+    meta, dets = runner(IMG)
+    assert len(dets) == 1
+    assert dets[0]["conf"] == 0.3                          # 센 쪽이 문구 하한에 걸려 빠졌다
+    assert dets[0]["prompts"] == ["styrofoam box"]
+    assert meta["prompt_dropped"] == 1
+
+
+def test_a_threshold_below_arm_conf_is_refused_because_it_does_nothing():
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([{"kind": "fake", "name": "a"}], arm_conf=0.1,
+                           class_conf={"water_jug": 0.02}), "cpu")
+    assert "아무 일도 하지" in str(e.value)
+
+
+def test_a_misspelled_threshold_name_is_refused():
+    for field, bad in (("class_conf", {"water_jar": 0.3}),
+                       ("prompt_conf", {"plastic water jar": 0.3})):
+        with pytest.raises(SystemExit) as e:
+            vi.RiverRunner(cfg([{"kind": "fake", "name": "a"}], **{field: bad}), "cpu")
+        assert field in str(e.value) and "없는 이름" in str(e.value)
+
+
+def test_threshold_names_are_matched_ignoring_case_and_space():
+    runner = vi.RiverRunner(cfg([{"kind": "fake", "name": "a"}], prompts=VOCAB, min_arms=1,
+                                class_conf={" Butane_Canister ": 0.3},
+                                prompt_conf={"WHITE FOAM BOX": 0.4}), "cpu")
+    assert runner.threshold("butane_canister") == 0.3
+    assert runner.prompt_conf == {"white foam box": 0.4}
+
+
+# ---------------------------------------------------------------- min_prompts
+def test_min_prompts_above_one_is_refused_for_a_single_arm():
+    """한 모델은 한 박스에 **이름 하나**를 붙인다(어휘 전체의 argmax). 그래서 문구 둘이
+    같은 자리를 가리키는 일이 사실상 없다 — tune 117장에서 TP 0 · FP 6 이었다.
+    세우면 아무것도 검출하지 않으므로 거절한다."""
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([{"kind": "fake", "name": "a"}], prompts=VOCAB,
+                           min_arms=1, min_prompts=2), "cpu")
+    assert "arm 이 하나일 때" in str(e.value) and "검출 0" in str(e.value)
+
+
+def test_min_prompts_counts_distinct_prompts_across_arms():
+    same = (10, 10, 20, 20)
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [pdet("styrofoam_box", 0.8, same, "styrofoam box")]},
+            {"kind": "fake", "name": "b",
+             "dets": [pdet("styrofoam_box", 0.7, same, "white foam box")]}]
+    _meta, dets = vi.RiverRunner(cfg(arms, prompts=VOCAB, min_arms=1, min_prompts=2), "cpu")(IMG)
+    assert len(dets) == 1 and dets[0]["prompts"] == ["styrofoam box", "white foam box"]
+
+    # 두 arm 이 **같은 문구**를 말하면 문구 동의는 1 이다 — arm 동의와 다른 축이다
+    arms[1]["dets"] = [pdet("styrofoam_box", 0.7, same, "styrofoam box")]
+    _meta, dets = vi.RiverRunner(cfg(arms, prompts=VOCAB, min_arms=1, min_prompts=2), "cpu")(IMG)
+    assert dets == []
+
+
+def test_min_prompts_below_one_is_refused():
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([{"kind": "fake", "name": "a"}], min_arms=1, min_prompts=0), "cpu")
+    assert "min_prompts" in str(e.value)
+
+
+def test_an_arm_that_reports_no_prompt_still_counts_as_one():
+    """문구를 돌려주지 않는 arm 의 검출을 빈 집합으로 두면 min_prompts 1 이 그것을
+    말없이 버린다. 클래스 이름 자체로 센다."""
+    arms = [{"kind": "fake", "name": "a", "dets": [det("water_jug", 0.8, (10, 10, 20, 20))]}]
+    _meta, dets = vi.RiverRunner(cfg(arms, min_arms=1), "cpu")(IMG)
+    assert len(dets) == 1 and dets[0]["prompts"] == ["water_jug"]
+
+
+def test_the_record_carries_the_vocabulary_and_threshold_shape():
+    arms = [{"kind": "fake", "name": "a", "dets": []}]
+    meta, _dets = vi.RiverRunner(cfg(arms, prompts=VOCAB, min_arms=1, conf=0.05,
+                                     class_conf={"wooden_box": 0.15}), "cpu")(IMG)
+    assert meta["prompts_declared"] == 7 and meta["min_prompts"] == 1
+    assert meta["class_conf"] == {"wooden_box": 0.15} and meta["prompt_conf"] == {}
+    assert meta["conf"] == 0.05 and meta["prompt"] == "text"
+
+
+# ---------------------------------------------------------------- 클래스 합침
+def test_merged_class_reports_the_target_name_and_keeps_the_source():
+    """캔으로 잡혀도 나가는 이름은 부탄이다. **어느 이름으로 잡혔는지는 남긴다** —
+    남기지 않으면 부탄이 부탄으로 잡힌 것인지 캔이 넘어온 것인지 모른다."""
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [det("beverage_can", 0.8, (10, 10, 20, 20))]}]
+    meta, dets = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1,
+                                    merge_classes={"beverage_can": "butane_canister"}), "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["butane_canister"]
+    assert dets[0]["cls"] == CLASSES.index("butane_canister")
+    assert dets[0]["merged_from"] == ["beverage_can"]
+    assert meta["merge_classes"] == {"beverage_can": "butane_canister"}
+    assert meta["merged_dets"] == 1
+
+
+def test_merging_happens_before_folding_so_one_object_becomes_one_box():
+    """같은 물체에 캔과 부탄이 따로 붙은 자리(실제 `sample` 프레임이 그랬다)가
+    **하나로 접혀야** 한다. 합침이 병합 뒤면 클래스가 달라 둘 다 남는다."""
+    arms = [{"kind": "fake", "name": "a",
+             "dets": [det("butane_canister", 0.6, (10, 10, 20, 20)),
+                      det("beverage_can", 0.8, (11, 11, 21, 21))]}]
+    merged = {"beverage_can": "butane_canister"}
+    _m, dets = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1, merge_classes=merged), "cpu")(IMG)
+    assert len(dets) == 1 and dets[0]["conf"] == 0.8
+    assert dets[0]["merged_from"] == ["beverage_can"]
+    # 합치지 않으면 둘 다 남는다 — 이것이 합치기 전 모양이다
+    _m, two = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1), "cpu")(IMG)
+    assert sorted(d["name"] for d in two) == ["beverage_can", "butane_canister"]
+
+
+def test_class_conf_of_a_merged_class_uses_the_target_name():
+    arms = [{"kind": "fake", "name": "a", "dets": [det("beverage_can", 0.08, (10, 10, 20, 20))]}]
+    merged = {"beverage_can": "butane_canister"}
+    _m, dets = vi.RiverRunner(cfg(arms, conf=0.05, min_arms=1, merge_classes=merged,
+                                  class_conf={"butane_canister": 0.2}), "cpu")(IMG)
+    assert dets == []                                  # 합친 뒤 이름의 하한이 걸린다
+
+
+def test_a_merge_chain_or_self_merge_or_unknown_name_is_refused():
+    for bad, msg in (({"beverage_can": "butane_canister", "butane_canister": "wooden_box"}, "사슬"),
+                     ({"beverage_can": "beverage_can"}, "자기 자신"),
+                     ({"soda": "butane_canister"}, "classes 에 없는")):
+        with pytest.raises(SystemExit) as e:
+            vi.RiverRunner(cfg([{"kind": "fake", "name": "a"}], merge_classes=bad), "cpu")
+        assert msg in str(e.value)
+
+
+# ---------------------------------------------------------------- 트래킹: 고정 카메라
+def tdet(name, conf, xyxy):
+    return {"cls": 0, "name": name, "conf": conf, "xyxy": list(xyxy)}
+
+
+def test_center_distance_links_boxes_that_do_not_overlap():
+    """고정 카메라·느린 프레임에서는 물체가 자기 폭보다 멀리 움직여 **겹침이 0** 이다.
+    IoU 만 보면 track 이 끊기고 매 장 새 번호가 붙는다."""
+    far = [(0, 0, 10, 10), (14, 0, 24, 10)]            # IoU 0, 중심거리 14px (대각선 14.1)
+    plain = vi.Stabilizer({"iou_match": 0.3, "min_hits": 1, "hold_missed": 0})
+    ids = [plain.update([tdet("water_jug", 0.9, b)], i)[0]["track_id"] for i, b in enumerate(far)]
+    assert ids[0] != ids[1]                            # 끊긴다
+
+    near = vi.Stabilizer({"iou_match": 0.3, "center_dist": 1.0, "min_hits": 1, "hold_missed": 0})
+    ids = [near.update([tdet("water_jug", 0.9, b)], i)[0]["track_id"] for i, b in enumerate(far)]
+    assert ids[0] == ids[1]                            # 이어진다
+
+
+def test_center_distance_does_not_link_across_the_gate():
+    far = [(0, 0, 10, 10), (60, 0, 70, 10)]            # 중심거리 60px > 1.0 × 14.1
+    stab = vi.Stabilizer({"iou_match": 0.3, "center_dist": 1.0, "min_hits": 1, "hold_missed": 0})
+    ids = [stab.update([tdet("water_jug", 0.9, b)], i)[0]["track_id"] for i, b in enumerate(far)]
+    assert ids[0] != ids[1]
+
+
+def test_iou_pairs_win_over_merely_near_pairs():
+    """겹친 쌍이 먼저 짝지어져야 한다 — 가까운 쌍이 먼저 가져가면 track 이 뒤바뀐다."""
+    stab = vi.Stabilizer({"iou_match": 0.3, "center_dist": 2.0, "min_hits": 1, "hold_missed": 0})
+    first = stab.update([tdet("water_jug", 0.9, (0, 0, 10, 10)),
+                         tdet("water_jug", 0.9, (20, 0, 30, 10))], 0)
+    left = next(d["track_id"] for d in first if d["xyxy"][0] < 5)
+    second = stab.update([tdet("water_jug", 0.9, (1, 0, 11, 10)),
+                          tdet("water_jug", 0.9, (21, 0, 31, 10))], 1)
+    assert next(d["track_id"] for d in second if d["xyxy"][0] < 5) == left
+
+
+def test_center_distance_is_off_by_default():
+    assert vi.Stabilizer({}).center == 0.0
+
+
+def test_held_detection_keeps_its_evidence_but_drops_the_mask():
+    """못 잡은 장을 마지막 박스로 유지할 때 근거를 비우면 '근거 없이 나타난 박스' 가
+    되어 읽는 쪽이 설명할 수 없다. 마스크는 이 장의 픽셀이 아니므로 버린다."""
+    stab = vi.Stabilizer({"iou_match": 0.3, "min_hits": 1, "hold_missed": 2})
+    d = dict(tdet("water_jug", 0.9, (0, 0, 10, 10)), arms=["yoloe"], agree=1,
+             prompts=["plastic water jug"], polygon=[[0, 0]])
+    stab.update([d], 0)
+    out = stab.update([], 1)
+    assert len(out) == 1 and out[0]["held"] is True
+    assert out[0]["arms"] == ["yoloe"] and out[0]["prompts"] == ["plastic water jug"]
+    assert "polygon" not in out[0]
+
+
+def test_per_model_stabilize_overrides_the_base():
+    cfg_all = {"stabilize": {"enabled": False, "iou_match": 0.3,
+                             "river": {"enabled": True, "center_dist": 1.0}}}
+    assert vi.stabilize_cfg(cfg_all, "river") == {"enabled": True, "iou_match": 0.3,
+                                                 "center_dist": 1.0}
+    assert vi.stabilize_cfg(cfg_all, "yoloe") == {"enabled": False, "iou_match": 0.3}
+    assert vi.stabilize_cfg({}, "river") == {}
+
+
+# ---------------------------------------------------------------- 기성 트래커
+def _vendor(**over):
+    sc = {"backend": "bytetrack", "on_untracked": "keep", "keep_boxes": "detection",
+          "reset_gap_s": 2.0}
+    sc.update(over)
+    try:
+        return vi.VendorTracker(sc)
+    except vi._ArmMissing as exc:
+        pytest.skip("ultralytics 트래커를 쓸 수 없다: %s" % exc)
+
+
+def vdet(name, conf, xyxy, cls=0):
+    return {"cls": cls, "name": name, "conf": conf, "xyxy": list(xyxy)}
+
+
+def test_a_well_detected_object_keeps_the_same_track_id():
+    """요구는 이것이다 — **잘 잡힌 물체는 이어져야 한다.** 기성 트래커는
+    new_track_thresh(0.25) 위의 검출로만 track 을 시작한다."""
+    tr = _vendor()
+    ids = [tr.update([vdet("styrofoam_box", 0.9, (10 + i, 10, 30 + i, 30))], i * 0.066, None)
+           [0]["track_id"] for i in range(4)]
+    assert len(set(ids)) == 1 and ids[0] is not None
+
+
+def test_a_weak_detection_is_kept_without_a_number():
+    """`on_untracked: keep` — 문턱을 못 넘은 검출을 **버리지 않는다.** 버리면
+    재현율이 0.640 → 0.024 가 되는 것을 쟀다."""
+    tr = _vendor()
+    out = tr.update([vdet("styrofoam_box", 0.9, (10, 10, 30, 30)),
+                     vdet("water_jug", 0.06, (60, 60, 70, 70), cls=1)], 0.0, None)
+    assert len(out) == 2
+    by = {d["name"]: d for d in out}
+    assert by["styrofoam_box"]["track_id"] is not None
+    assert by["water_jug"].get("track_id") is None
+
+
+def test_drop_mode_keeps_only_tracked_detections():
+    tr = _vendor(on_untracked="drop")
+    out = tr.update([vdet("styrofoam_box", 0.9, (10, 10, 30, 30)),
+                     vdet("water_jug", 0.06, (60, 60, 70, 70), cls=1)], 0.0, None)
+    assert [d["name"] for d in out] == ["styrofoam_box"]
+
+
+def test_the_detector_box_is_kept_by_default():
+    """칼만 박스를 쓰면 수십 px 짜리가 반 박자 늦어 IoU 0.5 를 못 넘는 것을 쟀다
+    (macro 0.290 → 0.082). 기본은 탐지기 박스 그대로다."""
+    tr = _vendor()
+    box = (10.0, 10.0, 30.0, 30.0)
+    tr.update([vdet("styrofoam_box", 0.9, box)], 0.0, None)
+    out = tr.update([vdet("styrofoam_box", 0.9, box)], 0.066, None)
+    assert out[0]["xyxy"] == list(box)
+
+
+def test_other_fields_survive_the_tracker():
+    """근거(arms·prompts)를 잃으면 번호는 붙었는데 왜 그 이름인지 설명할 수 없다."""
+    tr = _vendor()
+    d = dict(vdet("styrofoam_box", 0.9, (10, 10, 30, 30)), arms=["yoloe"],
+             prompts=["styrofoam box"], agree=1)
+    out = tr.update([d], 0.0, None)
+    assert out[0]["arms"] == ["yoloe"] and out[0]["prompts"] == ["styrofoam box"]
+
+
+def test_an_unknown_backend_is_refused_and_a_known_one_is_listed():
+    with pytest.raises(SystemExit) as e:
+        vi.VendorTracker({"backend": "sort"})
+    assert "bytetrack" in str(e.value)
+
+
+def test_keys_of_the_other_backend_are_tolerated_but_typos_are_not():
+    """한 설정 블록에 builtin 용 값과 기성 트래커 용 값이 같이 적혀 있다 —
+    backend 를 바꿔 가며 쓸 수 있어야 한다. 오타는 그래도 거절한다."""
+    _vendor(iou_match=0.2, center_dist=1.0, min_hits=2)      # builtin 용 — 통과
+    with pytest.raises(SystemExit) as e:
+        vi.VendorTracker({"backend": "bytetrack", "track_high_thresholdd": 0.3})
+    assert "모르는 값" in str(e.value)
+
+
+def test_a_time_gap_restarts_the_tracker():
+    """끊긴 구간 뒤에는 처음부터다 — 번호를 이어 가면 사라진 물체와 새 물체가 같은
+    번호를 받는다. 번호 세는 것이 1 로 돌아가는 것으로 확인한다."""
+    far = (90, 90, 110, 110)
+    tr = _vendor()
+    first = tr.update([vdet("styrofoam_box", 0.9, (10, 10, 30, 30))], 0.0, None)[0]["track_id"]
+    # 끊김 없이 다른 자리에 새 물체 → 다음 번호. **첫 장에는 번호가 없다** —
+    # 첫 장 이후에 생긴 track 은 한 장 더 확인되어야 나온다(그게 이 트래커의 문턱이다)
+    cont = tr.update([vdet("styrofoam_box", 0.9, (10, 10, 30, 30)),
+                      vdet("styrofoam_box", 0.9, far)], 0.066, None)
+    assert [d.get("track_id") for d in cont] == [first, None]
+    cont = tr.update([vdet("styrofoam_box", 0.9, (10, 10, 30, 30)),
+                      vdet("styrofoam_box", 0.9, far)], 0.132, None)
+    assert max(d["track_id"] for d in cont) > first
+
+    tr2 = _vendor()
+    tr2.update([vdet("styrofoam_box", 0.9, (10, 10, 30, 30))], 0.0, None)
+    after = tr2.update([vdet("styrofoam_box", 0.9, far)], 99.0, None)
+    assert after[0]["track_id"] == first, "끊긴 뒤에는 번호가 처음부터다"
+
+
+def test_the_shipped_config_tracks_without_filtering():
+    """설정이 **번호를 붙이는 층**이어야 한다 — 거르는 층이면 재현율이 무너진다."""
+    import yaml
+    data = yaml.safe_load(Path(__file__).with_name("vision_config.yaml").read_text(encoding="utf-8"))
+    sc = vi.stabilize_cfg(data, "river")
+    assert sc["enabled"] is True
+    assert sc["on_untracked"] == "keep" and sc["keep_boxes"] == "detection"
+    assert sc["backend"] in ("builtin",) + vi.VendorTracker.BACKENDS

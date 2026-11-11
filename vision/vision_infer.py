@@ -21,6 +21,10 @@ vision_infer.py — 스트림 프레임에 비전 모델 추론 (YOLOE · UniDep
 모델 (--models, 여러 개 동시에 가능)
   yoloe          YOLOE 검출+분할. 기본 prompt-free (내장 어휘 4585종, exclude/include 로 조정)
                  config models.yoloe.prompt.mode: text 면 classes 에 적은 클래스만 텍스트 프롬프트로 찾는다
+  river          하천 떠내려가는 물체 5종. **학습 없이** 제로샷 모델의 어휘·임계값으로만.
+                 models.river.prompts 는 클래스당 문구를 여럿 받고 **나가는 이름은 클래스 하나**다.
+                 임계값 세 단계: arm_conf(arm 하한) · prompt_conf(문구별, 병합 전) · class_conf(클래스별, 병합 후).
+                 arms 가 여럿이면 동의(min_arms)도 요구한다 — 정확하지만 느리다. 없는 arm 은 빼고 돈다
   unidepth       UniDepth V2 metric depth (m)
   moge2_aerial   MoGe2-Aerial — MoGe-2 ViT-L + 항공 LoRA (AerialMetric, ECCV 2026), metric depth (m)
   depth 모델을 고르면 depth 결과에 검출별 거리가 붙는다 (config fusion. yoloe 를 안 골라도 결합용으로 적재).
@@ -54,6 +58,10 @@ results.jsonl 한 줄 (v2 비전 결과, 규약 §3-6)
          producer {tier "server", kind "precise"}
   공통   n, frame_file ("frames/<번호>.jpg" — 실행 폴더 기준), stream, run, model, model_file, width, height,
          infer_ms, overlay_file, live (live 일 때)
+  river  arms, min_arms_declared, min_arms_applied, missing_arms, arm_ms, min_prompts,
+         prompts_declared, class_conf, prompt_conf, prompt_dropped, detections: 위와 같고
+         검출마다 agree(동의한 arm 수)·arms(arm 이름)·prompts(말한 문구들) 추가.
+         polygon 은 없다 (arm 이 마스크를 내지 않는다)
   yoloe  prompt (free | text), detections: [{class_id, label, confidence, bbox:[x1,y1,x2,y2], polygon?,
          track_id, held?, label_raw?}]   (config stabilize — 박스 EMA · 이름 다수결 · held = 못 잡은 장을 마지막 박스로 유지)
          depth 결합 검출은 depth_m 이 최근 몇 장의 중앙값, depth_m_raw 가 그 장 값
@@ -114,13 +122,18 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
-DEVICES = ("cam360", "drone", "robot1", "robot2")
-MODELS = ("yoloe", "unidepth", "moge2_aerial")
-DEVICE_ALIASES = {"camera": "cam360", "360": "cam360"}
+DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense")
+MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
+DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
+                  "pi6": "realsense", "rs": "realsense", "d455": "realsense"}
 MODEL_ALIASES = {"yoloe-pf": "yoloe", "yoloe_pf": "yoloe",
                  "moge": "moge2_aerial", "moge2": "moge2_aerial", "moge2-aerial": "moge2_aerial",
-                 "moge2aerial": "moge2_aerial"}
+                 "moge2aerial": "moge2_aerial",
+                 "river-zeroshot": "river", "river_zeroshot": "river", "하천": "river"}
 DEPTH_MODELS = ("unidepth", "moge2_aerial")
+#: 검출 모델. depth 결합(fusion)은 이 중 **먼저 오는 하나**의 검출을 쓴다 —
+#: 둘을 같이 돌리면 결과는 둘 다 저장되지만 거리·GPS 는 한쪽에만 붙는다.
+DETECT_MODELS = ("yoloe", "river")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 COLORMAPS = {"turbo": cv2.COLORMAP_TURBO, "jet": cv2.COLORMAP_JET, "inferno": cv2.COLORMAP_INFERNO,
              "magma": cv2.COLORMAP_MAGMA, "viridis": cv2.COLORMAP_VIRIDIS, "plasma": cv2.COLORMAP_PLASMA}
@@ -423,16 +436,176 @@ def box_iou(a, b):
     return inter / np.maximum(area(a)[:, None] + area(b)[None, :] - inter, 1e-9)
 
 
+#: `Stabilizer` 가 받는 값. 기성 트래커 설정에 섞여 있어도 거절하지 않기 위해 둔다.
+BUILTIN_KEYS = ("iou_match", "center_dist", "box_alpha", "min_hits", "hold_missed",
+                "max_missed", "label_decay", "depth_window")
+
+
+class VendorTracker:
+    """ultralytics 에 들어 있는 트래커를 그대로 쓴다 — 우리가 다시 구현하지 않는다.
+
+    8.4.155 기준 여섯이 **이미 설치되어 있다**(bytetrack · botsort · ocsort ·
+    deepocsort · fasttrack · tracktrack). 가중치를 받지 않는다 (AI-C-16); 기본값
+    yaml 도 패키지 안의 것을 읽는다. `with_reid` 는 따로 켜야 하고 그때는 외모
+    인코더가 필요하므로 폐쇄망에서 기본으로 두지 않는다.
+
+    왜 우리 `Stabilizer` 대신인가: 이것들은 **잘 잡힌 검출에서만 track 을 시작한다**
+    (`new_track_thresh`). 약한 검출은 이미 있는 track 을 **되찾는 데만** 쓰고
+    (`track_low_thresh` — ByteTrack 의 요점이다) 새 물체로 만들지 않는다. 우리
+    Stabilizer 는 conf 0.05 짜리 하나하나에 track 을 만들어서, 쓰레기를 이어 붙인
+    뒤 그것을 **더 오래** 띄웠다.
+
+    박스는 기본적으로 **탐지기 것을 그대로** 낸다(`keep_boxes: detection`).
+    칼만이 낸 박스를 쓰면 수십 px 짜리가 반 박자 늦어 IoU 0.5 문턱을 넘지 못하는 것을
+    쟀다(macro 0.290 → 0.082). 트래커는 **번호를 붙이는 데** 쓴다.
+    """
+
+    #: 우리처럼 **밖에서 만든 검출**을 먹일 수 있는 것만 둔다. `tracktrack` 은
+    #: NMS 이전의 원시 예측을 predictor 훅으로 가져가므로 이 경로로 쓸 수 없다.
+    BACKENDS = ("bytetrack", "botsort", "ocsort", "deepocsort", "fasttrack")
+
+    def __init__(self, sc):
+        backend = str(sc.get("backend") or "").lower()
+        if backend not in self.BACKENDS:
+            raise SystemExit("stabilize backend 를 모릅니다: %s (가능: builtin, %s)"
+                             % (backend, ", ".join(self.BACKENDS)))
+        try:
+            import yaml as _yaml
+            from ultralytics.trackers.track import TRACKER_MAP
+            from ultralytics.utils import IterableSimpleNamespace
+            import ultralytics
+        except Exception as exc:                       # 설치가 없으면 트래킹만 끈다
+            raise _ArmMissing("ultralytics 트래커를 쓸 수 없다 (%s)" % type(exc).__name__) from exc
+        try:
+            import lap                                 # noqa: F401  연관(linear assignment)에 쓴다
+        except ImportError as exc:
+            # ultralytics 는 없으면 **런타임에 받는다**. 폐쇄망에서 조용히 나가는
+            # 연결이 생기므로 먼저 거절한다 (AI-C-16). `pip install lap` 이 선행이다
+            raise _ArmMissing("lap 이 없다 — ultralytics 가 런타임에 받으려 한다. "
+                              "폐쇄망에서는 미리 설치한다 (pip install 'lap>=0.5.12')") from exc
+        spec = Path(ultralytics.__file__).parent / "cfg" / "trackers" / ("%s.yaml" % backend)
+        if not spec.is_file():
+            raise _ArmMissing("트래커 기본값이 없다: %s" % spec)
+        args = _yaml.safe_load(spec.read_text(encoding="utf-8"))
+        # 모르는 값은 거절한다(오타가 조용히 무시되면 안 된다). 다만 **다른 backend 의
+        # 값**은 거절하지 않는다 — 한 설정 블록에 builtin 용 값과 기성 트래커 용 값이
+        # 같이 적혀 있고, backend 를 바꿔 가며 쓸 수 있어야 한다. 쓰이지 않는다는 것만
+        # 알린다.
+        shared = ("backend", "enabled", "keep_boxes", "reset_gap_s", "on_untracked")
+        ignored = sorted(k for k in sc if k in BUILTIN_KEYS and k not in args and k not in shared)
+        unknown = [k for k in sc if k not in args and k not in shared and k not in BUILTIN_KEYS]
+        if unknown:
+            raise SystemExit("stabilize.%s 가 모르는 값: %s (이 트래커가 받는 것: %s · "
+                             "builtin 이 받는 것: %s)"
+                             % (backend, ", ".join(sorted(unknown)), ", ".join(sorted(args)),
+                                ", ".join(sorted(BUILTIN_KEYS))))
+        if ignored:
+            log("  %s 는 다음 값을 쓰지 않습니다 (backend: builtin 용): %s"
+                % (backend, ", ".join(ignored)))
+        args.update({k: v for k, v in sc.items() if k in args})
+        if args.get("with_reid"):
+            # 외모 인코더를 받아야 할 수 있다. 폐쇄망에서 조용히 나가지 않는다 —
+            # 쓰려면 사람이 자리를 적어 넣는다
+            if str(args.get("model", "auto")) == "auto":
+                log("  ** %s with_reid 가 켜져 있고 model 이 auto 입니다 — 탐지기 특징을 "
+                    "씁니다. 외부 가중치를 받지 않는지 확인하십시오 (AI-C-16) **" % backend)
+        self.backend = backend
+        # 트래커가 잇지 못한 검출을 어떻게 할 것인가. **기본은 남긴다.**
+        # 기성 트래커는 `new_track_thresh`(0.25) 위의 검출로만 track 을 시작한다 —
+        # 우리 작동점(conf 0.05)에서 그 조건을 넘는 것은 1/8 뿐이고, 못 넘은 것을
+        # 버리면 재현율이 0.640 → 0.024 로 무너진다(쟀다). 그래서 트래킹은
+        # **거르는 층이 아니라 번호를 붙이는 층**이다: 잘 잡힌 것은 번호를 받고
+        # 나머지는 번호 없이 그대로 나간다. 이러면 탐지 점수가 구조적으로 안 바뀐다.
+        self.on_untracked = str(sc.get("on_untracked", "keep")).lower()
+        if self.on_untracked not in ("keep", "drop"):
+            raise SystemExit("stabilize.on_untracked 는 keep 또는 drop: %s" % self.on_untracked)
+        self.keep_boxes = str(sc.get("keep_boxes", "detection")).lower()
+        if self.keep_boxes not in ("detection", "tracker"):
+            raise SystemExit("stabilize.keep_boxes 는 detection 또는 tracker: %s" % self.keep_boxes)
+        self.reset_gap = float(sc.get("reset_gap_s", 2.0))
+        self._make = lambda: TRACKER_MAP[backend](IterableSimpleNamespace(**dict(args, device="cpu")))
+        self.tracker = self._make()
+        self.args = args
+        self.last_ts = None
+
+    class _Boxes:
+        """ultralytics 트래커가 보는 모양.
+
+        `conf`·`cls`·`xywh`·`xyxy` 네 칸과 **불리언 마스크 인덱싱**이 필요하다 —
+        2단 연관이 `results[mask_high]` / `results[mask_low]` 로 검출을 가른다.
+        """
+
+        def __init__(self, dets=None, arrays=None):
+            if arrays is not None:
+                self.xyxy, self.conf, self.cls, self.xywh = arrays
+                return
+            dets = dets or []
+            self.xyxy = np.asarray([d["xyxy"] for d in dets], np.float32).reshape(-1, 4)
+            self.conf = np.asarray([d["conf"] for d in dets], np.float32).reshape(-1)
+            self.cls = np.asarray([d["cls"] for d in dets], np.float32).reshape(-1)
+            x1, y1, x2, y2 = (self.xyxy[:, i] for i in range(4))
+            self.xywh = np.stack([(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1], 1)
+
+        def __getitem__(self, mask):
+            return type(self)(arrays=(self.xyxy[mask], self.conf[mask],
+                                      self.cls[mask], self.xywh[mask]))
+
+        def __len__(self):
+            return len(self.conf)
+
+    def update(self, dets, ts, img=None):
+        if ts is not None and self.last_ts is not None and not (0 <= ts - self.last_ts <= self.reset_gap):
+            self.tracker = self._make()                # 끊긴 구간 — 처음부터
+        self.last_ts = ts if ts is not None else self.last_ts
+        if not dets:
+            self.tracker.update(self._Boxes([]), img)
+            return []
+        rows = np.asarray(self.tracker.update(self._Boxes(dets), img)).reshape(-1, 8)
+        out = [dict(d) for d in dets]
+        for row in rows:
+            idx = int(row[7])
+            if not 0 <= idx < len(out):
+                continue
+            out[idx]["track_id"] = int(row[4])
+            if self.keep_boxes == "tracker":
+                out[idx]["xyxy"] = [round(float(v), 1) for v in row[:4]]
+        if self.on_untracked == "drop":
+            return [d for d in out if d.get("track_id") is not None]
+        return out                                     # 번호 없는 것도 그대로 나간다
+
+    def smooth_depth(self, dets, model):               # 거리 평활은 하지 않는다
+        return dets
+
+
+def stabilize_cfg(cfg, model):
+    """`stabilize` 의 바탕값 위에 `stabilize.<model>` 을 얹는다.
+
+    모델마다 흔들리는 모양이 다르다 — river 는 수십 px 짜리가 움직이는 드론에서
+    장마다 들락거리고, yoloe prompt-free 는 큰 물체를 꾸준히 잡는다. 하나의
+    값으로 둘을 맞추면 한쪽은 너무 질기고 다른 쪽은 너무 성기다.
+    """
+    sc = cfg.get("stabilize") or {}
+    base = {k: v for k, v in sc.items() if not isinstance(v, dict)}
+    return {**base, **(sc.get(model) or {})}
+
+
 class Stabilizer:
     """기기·실행 폴더마다 하나. 프레임 사이 같은 물체(IoU, 이름 무관)를 이어 붙여 흔들림을 줄인다.
       track_id   같은 물체는 같은 번호 (Unity 등 받는 쪽이 물체를 이어 갈 수 있게)
       박스       EMA (box_alpha)                  이름  감쇠 누적 신뢰도로 다수결 (매 장 바뀌지 않게)
       등장       min_hits 장 연속 잡혀야 내보낸다      소멸  hold_missed 장까지는 마지막 박스로 유지 (held)
       거리       depth 모델마다 최근 depth_window 개의 중앙값 (depth_m, 원래 값은 depth_m_raw)
+      이음       IoU >= iou_match, **또는** 중심이 상자 대각선 평균의 center_dist 배 안
+                 (center_dist 0 이면 IoU 만 — 겹치지 않으면 track 이 끊긴다)
       reset_gap_s 보다 프레임 시각이 벌어지거나 거꾸로 가면 처음부터"""
 
     def __init__(self, sc):
         self.iou = float(sc.get("iou_match", 0.3))
+        # IoU 만으로는 **상자가 겹칠 때만** 이어진다. 수십 px 짜리가 자기 폭보다 멀리
+        # 움직이면(느린 프레임·고정 카메라에서 흔하다) 겹침이 0 이고 track 이 끊긴다.
+        # center_dist 는 그때의 보조 기준이다 — 두 상자 대각선 평균의 이 배 안에
+        # 중심이 있으면 같은 물체로 본다. 0 이면 끈다(옛 동작 그대로).
+        self.center = float(sc.get("center_dist", 0.0))
         self.alpha = float(sc.get("box_alpha", 0.5))
         self.min_hits = int(sc.get("min_hits", 2))
         self.hold = int(sc.get("hold_missed", 2))
@@ -448,11 +621,19 @@ class Stabilizer:
         self.last_ts = ts if ts is not None else self.last_ts
         pairs = []
         if self.tracks and dets:
-            iou = box_iou([t["box"] for t in self.tracks], [d["xyxy"] for d in dets])
-            pairs = sorted(((iou[i, j], i, j) for i in range(len(self.tracks)) for j in range(len(dets))
-                            if iou[i, j] >= self.iou), reverse=True)
+            tb = [t["box"] for t in self.tracks]
+            db = [d["xyxy"] for d in dets]
+            iou = box_iou(tb, db)
+            gate = self._center_gate(tb, db) if self.center > 0 else None
+            for i in range(len(tb)):
+                for j in range(len(db)):
+                    near = gate is not None and gate[i][j] is not None
+                    if iou[i, j] >= self.iou or near:
+                        # IoU 가 있는 쌍이 먼저, 없는 쌍은 중심이 가까운 순서로
+                        pairs.append((float(iou[i, j]), -(gate[i][j] if near else 0.0), i, j))
+            pairs.sort(reverse=True)
         used_t, used_d = set(), set()
-        for _, i, j in pairs:                                  # IoU 큰 쌍부터 하나씩
+        for _, _d, i, j in pairs:                              # IoU 큰 쌍부터 하나씩
             if i in used_t or j in used_d:
                 continue
             used_t.add(i)
@@ -463,7 +644,7 @@ class Stabilizer:
             self._vote(t, d)
             t["hits"] += 1
             t["missed"] = 0
-            t["det"] = d
+            t["det"] = t["last"] = d
         for i, t in enumerate(self.tracks):
             if i not in used_t:
                 t["missed"] += 1
@@ -471,7 +652,7 @@ class Stabilizer:
         for j, d in enumerate(dets):
             if j not in used_d:
                 t = {"id": self.next_id, "box": list(d["xyxy"]), "conf": d["conf"], "votes": {}, "cls": {},
-                     "hits": 1, "missed": 0, "det": d, "depth": {}}
+                     "hits": 1, "missed": 0, "det": d, "last": d, "depth": {}}
                 self.next_id += 1
                 self._vote(t, d)
                 self.tracks.append(t)
@@ -481,14 +662,37 @@ class Stabilizer:
             if t["hits"] < self.min_hits or t["missed"] > self.hold:
                 continue
             name = max(t["votes"], key=t["votes"].get)
-            d = dict(t["det"]) if t["det"] is not None else {}
-            if t["det"] is None:                               # 이번 장에 못 잡음 — 마지막 박스로 유지 (마스크 없음)
+            if t["det"] is not None:
+                d = dict(t["det"])
+            else:
+                # 이번 장에 못 잡음 — 마지막 박스로 유지한다. 마스크·외곽선은 **버린다**
+                # (이 장의 픽셀이 아니다). 나머지 근거(arms·prompts·agree)는 들고 간다:
+                # 비우면 held 검출이 "근거 없이 나타난 박스" 가 되어 읽는 쪽이 설명할 수 없다.
+                d = {k: v for k, v in (t.get("last") or {}).items()
+                     if k not in ("polygon", "mask", "depth_m", "depth_m_raw")}
                 d["held"] = True
             if d.get("name") != name:                          # 다수결 이름과 다른 마스크·외곽선은 그대로 둔다
                 d["name_raw"] = d.get("name")
             d.update(cls=t["cls"][name], name=name, conf=round(t["conf"], 4), track_id=t["id"],
                      xyxy=[round(float(v), 1) for v in t["box"]])
             out.append(d)
+        return out
+
+    def _center_gate(self, tb, db):
+        """[i][j] = 중심거리 / (대각선 평균). 문을 통과하지 못하면 None."""
+        import math
+        out = []
+        for a in tb:
+            row = []
+            for b in db:
+                ax, ay = (a[0] + a[2]) / 2, (a[1] + a[3]) / 2
+                bx, by = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+                da = math.hypot(a[2] - a[0], a[3] - a[1])
+                db_ = math.hypot(b[2] - b[0], b[3] - b[1])
+                scale = (da + db_) / 2 or 1.0
+                rel = math.hypot(ax - bx, ay - by) / scale
+                row.append(rel if rel <= self.center else None)
+            out.append(row)
         return out
 
     def _vote(self, t, d):
@@ -663,7 +867,476 @@ class MogeAerialRunner:
         return {"infer_ms": round(ms, 1), "checkpoint": Path(c["checkpoint"]).name}, depth, K
 
 
-RUNNERS = {"yoloe": YoloeRunner, "unidepth": UniDepthRunner, "moge2_aerial": MogeAerialRunner}
+# ---------------------------------------------------------------- 모델: river (하천 떠내려가는 물체, 제로샷)
+def _expand_vocab(classes, spec):
+    """클래스 → 찾을 문구들. 평면 목록(클래스당 문구 1개)도 그대로 받는다.
+
+    문구가 여럿이어도 **나가는 이름은 그 클래스 하나**다 — `polystyrene foam block`
+    으로 잡혀도 결과에는 `styrofoam_box` 가 적힌다. 상위 계약의 클래스는 늘지 않는다.
+
+    같은 문구를 두 클래스가 쓰면 거절한다: 돌아온 문구로 클래스를 되짚을 수 없고
+    조용히 한쪽으로 접으면 다른 쪽이 말없이 사라진다.
+    """
+    classes = [str(c) for c in classes or []]
+    if not classes:
+        raise SystemExit("models.river: classes 가 비었습니다")
+    if isinstance(spec, dict):
+        unknown = [k for k in spec if k not in classes]
+        if unknown:
+            raise SystemExit("models.river.prompts 에 classes 에 없는 이름이 있습니다: %s"
+                             % ", ".join(map(str, unknown)))
+        groups = [(c, [str(p) for p in (spec.get(c) or [])]) for c in classes]
+        empty = [c for c, words in groups if not words]
+        if empty:
+            raise SystemExit("models.river.prompts: 문구가 없는 클래스가 있습니다: %s"
+                             % ", ".join(empty))
+    else:
+        flat = [str(p) for p in spec or []]
+        if len(flat) != len(classes):
+            raise SystemExit("models.river: prompts 를 평면 목록으로 적으면 classes 와 같은 "
+                             "길이여야 합니다 (%d vs %d). 클래스당 문구를 여럿 두려면 "
+                             "prompts 를 클래스 → 문구목록 으로 적습니다."
+                             % (len(classes), len(flat)))
+        groups = [(c, [p]) for c, p in zip(classes, flat)]
+    prompts, owners, seen = [], [], {}
+    for cls, words in groups:
+        for word in words:
+            key = word.strip().lower()
+            if key in seen:
+                raise SystemExit("models.river.prompts: 같은 문구를 두 클래스가 씁니다 "
+                                 "— %r (%s, %s)" % (word, seen[key], cls))
+            seen[key] = cls
+            prompts.append(word)
+            owners.append(cls)
+    return prompts, owners
+
+
+def _prompt_class_map(prompts, owners):
+    """gdino 가 돌려주는 문구 → (클래스, 문구). 부분 일치로 짝짓는다 (문구를 쪼개 돌려주기도 한다)."""
+    pairs = list(zip(prompts, owners))
+
+    def match(label):
+        low = str(label).strip().lower()
+        if not low:
+            return None, None
+        for prompt, cls in pairs:
+            if low in prompt.lower() or prompt.lower() in low:
+                return cls, prompt
+        return None, None
+    return match
+
+
+class _ArmMissing(Exception):
+    """arm 의 가중치·스냅샷이 없다. 런타임에 받지 않는다 (AI-C-16 폐쇄망)."""
+
+
+class _ArmUltralytics:
+    """YOLOE / YOLO-World — ultralytics 텍스트 프롬프트."""
+
+    def __init__(self, spec, prompts, owners, device, shared):
+        weight = Path(str(spec["weight"])).expanduser()
+        if not weight.is_file():
+            raise _ArmMissing("가중치가 없다: %s" % weight)
+        self.prompts = list(prompts)
+        self.owners = list(owners)
+        kind = spec["kind"]
+        if kind == "yoloe":
+            from ultralytics import YOLOE
+            if weight.stem.endswith("-pf"):
+                raise SystemExit("river arm yoloe 에는 prompt-free(-pf) 가 아닌 가중치가 필요합니다: %s" % weight)
+            self.model = YOLOE(str(weight))
+            # ultralytics 는 텍스트 인코더(mobileclip_blt.ts)를 **작업 폴더**에서 찾는다.
+            # 없으면 인터넷에서 받으므로(≈570MB) 폐쇄망에서 깨진다 — 미리 확인하고 거절한다.
+            enc_dir = Path(str(spec.get("text_encoder_dir") or weight.parent)).expanduser()
+            if not (enc_dir / "mobileclip_blt.ts").is_file():
+                raise _ArmMissing("텍스트 인코더가 없다: %s/mobileclip_blt.ts" % enc_dir)
+            with contextlib.chdir(enc_dir):
+                pe = self.model.get_text_pe(list(prompts))
+            self.model.set_classes(list(prompts), pe)
+        else:
+            from ultralytics import YOLO
+            self.model = YOLO(str(weight))
+            self.model.set_classes(list(prompts))
+        self.device = device
+        self.imgsz = int(spec.get("imgsz") or shared["imgsz"])
+        self.conf = float(spec.get("conf", shared["base_conf"]))
+        self.max_det = int(spec.get("max_det") or shared["max_det"])
+        self.name = weight.name
+
+    def __call__(self, bgr):
+        r = self.model.predict(bgr, conf=self.conf, imgsz=self.imgsz, max_det=self.max_det,
+                               device=self.device, verbose=False)[0]
+        out = []
+        if r.boxes is not None and len(r.boxes):
+            for b in r.boxes:
+                index = int(b.cls)
+                if 0 <= index < len(self.owners):
+                    out.append({"cls_name": self.owners[index], "prompt": self.prompts[index],
+                                "conf": float(b.conf),
+                                "xyxy": [float(v) for v in b.xyxy[0].tolist()]})
+        return out
+
+
+class _ArmGroundingDino:
+    """Grounding DINO — 문구 하나로 묶어 넣고 돌려받은 문구를 클래스로 되짚는다."""
+
+    def __init__(self, spec, prompts, owners, device, shared):
+        from transformers import AutoProcessor, GroundingDinoForObjectDetection
+        model_id = str(spec.get("model") or "IDEA-Research/grounding-dino-tiny")
+        kw = {"local_files_only": True}
+        if spec.get("cache_dir"):
+            kw["cache_dir"] = str(Path(str(spec["cache_dir"])).expanduser())
+        try:
+            self.proc = AutoProcessor.from_pretrained(model_id, **kw)
+            self.model = GroundingDinoForObjectDetection.from_pretrained(model_id, **kw).to(device).eval()
+        except Exception as exc:                       # 스냅샷이 없다 — 받지 않는다
+            raise _ArmMissing("%s 스냅샷이 없다 (%s)" % (model_id, type(exc).__name__)) from exc
+        self.device = device
+        self.text = ". ".join(prompts) + "."
+        self.match = _prompt_class_map(prompts, owners)
+        self.conf = float(spec.get("conf", shared["base_conf"]))
+        self.text_threshold = float(spec.get("text_threshold", 0.2))
+        self.name = model_id
+
+    def __call__(self, bgr):
+        import torch
+        from PIL import Image
+        image = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        inputs = self.proc(images=image, text=self.text, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            raw = self.model(**inputs)
+        post = self.proc.post_process_grounded_object_detection(
+            raw, inputs.input_ids, threshold=self.conf, text_threshold=self.text_threshold,
+            target_sizes=[image.size[::-1]])[0]
+        out = []
+        for score, label, box in zip(post["scores"], post["text_labels"], post["boxes"]):
+            cls, prompt = self.match(label)
+            if cls:
+                out.append({"cls_name": cls, "prompt": prompt, "conf": float(score),
+                            "xyxy": [float(v) for v in box.tolist()]})
+        return out
+
+
+class _ArmOwlv2:
+    """OWLv2 — 문구를 그대로 넣고 번호로 돌려받는다."""
+
+    def __init__(self, spec, prompts, owners, device, shared):
+        from transformers import Owlv2ForObjectDetection, Owlv2Processor
+        model_id = str(spec.get("model") or "google/owlv2-large-patch14-ensemble")
+        kw = {"local_files_only": True}
+        if spec.get("cache_dir"):
+            kw["cache_dir"] = str(Path(str(spec["cache_dir"])).expanduser())
+        try:
+            self.proc = Owlv2Processor.from_pretrained(model_id, **kw)
+            self.model = Owlv2ForObjectDetection.from_pretrained(model_id, **kw).to(device).eval()
+        except Exception as exc:
+            raise _ArmMissing("%s 스냅샷이 없다 (%s)" % (model_id, type(exc).__name__)) from exc
+        self.device = device
+        self.prompts = [list(prompts)]
+        self.words = list(prompts)
+        self.owners = list(owners)
+        self.conf = float(spec.get("conf", shared["base_conf"]))
+        self.name = model_id
+
+    def __call__(self, bgr):
+        import torch
+        from PIL import Image
+        image = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        inputs = self.proc(text=self.prompts, images=image, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            raw = self.model(**inputs)
+        post = self.proc.post_process_grounded_object_detection(
+            raw, threshold=self.conf,
+            target_sizes=torch.tensor([image.size[::-1]]).to(self.device))[0]
+        out = []
+        for score, label, box in zip(post["scores"], post["labels"], post["boxes"]):
+            index = int(label)
+            if 0 <= index < len(self.owners):
+                out.append({"cls_name": self.owners[index], "prompt": self.words[index],
+                            "conf": float(score),
+                            "xyxy": [float(v) for v in box.tolist()]})
+        return out
+
+
+ARM_KINDS = {"yoloe": _ArmUltralytics, "yoloworld": _ArmUltralytics,
+             "gdino": _ArmGroundingDino, "owlv2": _ArmOwlv2}
+
+
+class RiverRunner:
+    """하천 떠내려가는 물체 — **학습 없이**. 문구 어휘와 클래스별 임계값으로 조인다.
+
+    왜 학습하지 않는가: 안동 자료는 현장 1곳·날짜 1일·촬영 1회다. 가중치를 학습하면
+    그 한 장면을 외운다(인접 프레임 평균차가 go1 50프레임 간격에도 0.30).
+
+    **어휘와 출력 이름은 다르다.** `prompts` 는 클래스당 문구를 여럿 받고(`water_jug`
+    를 `plastic water jug` · `water container` 로 찾는 식), 어느 문구로 잡혀도 결과에
+    적히는 이름은 클래스 하나다. 검출마다 어느 문구가 말했는지(`prompts`)를 남긴다 —
+    버리면 어휘를 왜 그렇게 뒀는지 뒤에서 설명할 수 없다.
+
+    **임계값은 세 단계다.** `arm_conf` 가 arm 이 내놓는 하한, `prompt_conf` 가 문구별
+    하한(병합 전 — 문구는 raw 검출의 성질이다), `class_conf` 가 클래스별 하한(병합 후
+    — 클래스는 병합군의 성질이다). 적지 않은 자리는 `conf` 를 쓴다. 위험물처럼 다른
+    조치를 부르는 클래스는 재현율을 위해 낮추고, 덤불·판자처럼 헛검출이 쏟아지는
+    문구는 올린다.
+
+    arm 이 여럿이면 **동의**(`min_arms`)도 요구할 수 있다: 학습 자료가 겹치지 않는
+    모델들이 같은 자리에 같은 이름을 말할 때만 받는다. 느리다 — 측정값은 4 arm 에서
+    한 장 3.33 s, yoloe 단독 0.166 s 다. `arms` 를 하나로 두면 그 모델 단독이다.
+
+    없는 arm: `on_missing_arm: degrade` 면 그 arm 만 빼고 돌리고 `min_arms` 를
+    남은 수로 줄인다. **줄인 사실을 기록에 적는다**(`arms`, `min_arms_applied`) —
+    작동점이 조용히 바뀌면 숫자가 어느 작동점의 것인지 알 수 없다. `refuse` 면
+    세우지 않는다. 런타임에 가중치를 받지 않는다 (AI-C-16 폐쇄망).
+    """
+    name = "river"
+
+    def __init__(self, cfg, device):
+        self.cfg = cfg
+        self.device = device
+        self.classes = [str(c) for c in cfg.get("classes") or []]
+        self.prompts, self.owners = _expand_vocab(self.classes, cfg.get("prompts"))
+        self.conf = float(cfg.get("conf", 0.25))
+        self.merge_iou = float(cfg.get("merge_iou", 0.5))
+        self.max_area = cfg.get("max_area_ratio")
+        self.max_det = int(cfg.get("max_det", 100))
+
+        # 클래스 합침 — **병합 전**에 이름을 바꾼다. 한 물체에 캔과 부탄이 따로 붙은
+        # 자리가 하나로 접히려면 이름이 먼저 같아져야 한다(클래스가 다르면 합치지 않는다).
+        self.merge_classes = self._class_merge(cfg.get("merge_classes"))
+
+        # 클래스별·문구별 임계값. 적지 않은 자리는 conf 다. 합쳐진 클래스의 임계값은
+        # **합친 뒤 이름**으로 찾는다 — 합치기 전 이름의 임계값은 아무 일도 하지 않는다.
+        self.class_conf = self._thresholds(cfg.get("class_conf"), self.classes, "class_conf")
+        self.prompt_conf = self._thresholds(cfg.get("prompt_conf"), self.prompts, "prompt_conf")
+
+        shared = {"imgsz": int(cfg.get("imgsz", 1920)),
+                  "base_conf": float(cfg.get("arm_conf", 0.05)),
+                  "max_det": self.max_det}
+        floor = shared["base_conf"]
+        low = [(n, v) for n, v in list(self.class_conf.items()) + list(self.prompt_conf.items())
+               if v < floor]
+        if low:
+            raise SystemExit("models.river: arm_conf(%.3f) 보다 낮은 임계값은 아무 일도 하지 "
+                             "않습니다 — arm 이 먼저 버립니다: %s"
+                             % (floor, ", ".join("%s %.3f" % t for t in low)))
+        if floor > self.conf:
+            raise SystemExit("models.river: arm_conf(%.3f) 가 conf(%.3f) 보다 큽니다 — arm 이 먼저 "
+                             "버린 검출은 동의에 쓸 수 없습니다" % (floor, self.conf))
+        specs = list(cfg.get("arms") or [])
+        if not specs:
+            raise SystemExit("models.river: arms 가 비었습니다")
+        on_missing = str(cfg.get("on_missing_arm", "degrade")).lower()
+        if on_missing not in ("degrade", "refuse"):
+            raise SystemExit("models.river.on_missing_arm 은 degrade 또는 refuse: %s" % on_missing)
+
+        self.arms, self.missing = [], []
+        for spec in specs:
+            kind = str(spec.get("kind") or "").lower()
+            if kind not in ARM_KINDS:
+                raise SystemExit("models.river arm kind 를 모릅니다: %s (가능: %s)"
+                                 % (kind, ", ".join(sorted(ARM_KINDS))))
+            label = str(spec.get("name") or kind)
+            try:
+                arm = ARM_KINDS[kind](dict(spec, kind=kind), self.prompts, self.owners,
+                                      device, shared)
+            except _ArmMissing as exc:
+                if on_missing == "refuse":
+                    raise SystemExit("models.river arm %s: %s (on_missing_arm: refuse)" % (label, exc))
+                self.missing.append((label, str(exc)))
+                log("  river arm %s 를 뺍니다 — %s" % (label, exc))
+                continue
+            self.arms.append((label, arm))
+        if not self.arms:
+            raise SystemExit("models.river: 쓸 수 있는 arm 이 없습니다 — "
+                             + "; ".join("%s: %s" % m for m in self.missing))
+        want = int(cfg.get("min_arms", 2))
+        if want < 1:
+            raise SystemExit("models.river.min_arms 는 1 이상입니다: %d" % want)
+        self.min_prompts = int(cfg.get("min_prompts", 1))
+        if self.min_prompts < 1:
+            raise SystemExit("models.river.min_prompts 는 1 이상입니다: %d" % self.min_prompts)
+        if self.min_prompts > 1 and len(self.arms) == 1:
+            # 한 모델은 한 박스에 **이름 하나**를 붙인다(어휘 전체에 대한 argmax).
+            # 그래서 문구 둘이 같은 자리를 가리키는 일이 사실상 없다 — tune 117장
+            # 에서 TP 0 · FP 6 이었다. 세우면 아무것도 검출하지 않는다.
+            raise SystemExit("models.river.min_prompts(%d) 는 arm 이 하나일 때 쓸 수 없습니다 "
+                             "— 한 모델은 한 박스에 문구 하나만 붙입니다(측정: tune 에서 "
+                             "검출 0). 동의를 원하면 arms 를 늘립니다." % self.min_prompts)
+        self.min_arms_declared = want
+        self.arms_declared = len(specs)
+        self.min_arms = min(want, len(self.arms))
+        self.arm_names = [label for label, _ in self.arms]
+        log("  river %d종 · 문구 %d · arm %d/%d (%s) · 동의 %d/%d"
+            % (len(self.classes), len(self.prompts), len(self.arms), self.arms_declared,
+               "+".join(self.arm_names), self.min_arms, len(self.arms)))
+        if self.merge_classes:
+            log("  river 클래스 합침: "
+                + ", ".join("%s → %s" % t for t in sorted(self.merge_classes.items()))
+                + " (합쳐진 이름은 결과에 나오지 않습니다)")
+        tuned = {k: v for k, v in self.class_conf.items() if v != self.conf}
+        log("  river 임계 conf %.2f%s%s"
+            % (self.conf,
+               (" · 클래스별 " + ", ".join("%s %.2f" % t for t in sorted(tuned.items()))) if tuned else "",
+               (" · 문구별 " + ", ".join("%r %.2f" % t for t in sorted(self.prompt_conf.items())))
+               if self.prompt_conf else ""))
+        if self.missing:
+            # arm 이 빠지면 같은 min_arms 가 **다른 작동점**이 된다. 3/4 와 3/3 은
+            # 다른 기준이고, 3/3 은 만장일치다 — 선언한 것보다 엄해진다. 조용히
+            # 지나가면 숫자가 어느 작동점의 것인지 알 수 없다.
+            log("  ** river 작동점이 바뀌었습니다: 선언 %d/%d → 적용 %d/%d%s. 빠진 arm: %s **"
+                % (want, self.arms_declared, self.min_arms, len(self.arms),
+                   " (만장일치)" if self.min_arms == len(self.arms) else "",
+                   ", ".join("%s(%s)" % m for m in self.missing)))
+
+    def _class_merge(self, spec):
+        """합칠 클래스 → 받을 클래스. 둘 다 classes 안에 있어야 하고 사슬은 만들지 않는다.
+
+        사슬(a→b, b→c)을 허용하면 적용 순서에 따라 결과가 달라진다. 자기 자신으로
+        보내는 것도 거절한다 — 아무 일도 하지 않는 선언은 읽는 사람을 속인다.
+        """
+        if not spec:
+            return {}
+        if not isinstance(spec, dict):
+            raise SystemExit("models.river.merge_classes 는 이름 → 이름 이어야 합니다")
+        known = set(self.classes)
+        out = {}
+        for src, dst in spec.items():
+            src, dst = str(src), str(dst)
+            for name in (src, dst):
+                if name not in known:
+                    raise SystemExit("models.river.merge_classes 에 classes 에 없는 이름이 "
+                                     "있습니다: %r (가능: %s)" % (name, ", ".join(self.classes)))
+            if src == dst:
+                raise SystemExit("models.river.merge_classes: %r 를 자기 자신으로 보냅니다" % src)
+            out[src] = dst
+        chain = [(s, d) for s, d in out.items() if d in out]
+        if chain:
+            raise SystemExit("models.river.merge_classes 에 사슬이 있습니다 (%s) — 적용 순서에 "
+                             "따라 결과가 달라집니다. 한 단계로 적습니다"
+                             % ", ".join("%s→%s→%s" % (s, d, out[d]) for s, d in chain))
+        return out
+
+    @staticmethod
+    def _thresholds(spec, allowed, field):
+        """클래스·문구 → 임계값. 모르는 이름은 거절한다 (오타가 조용히 무시되면 안 된다)."""
+        if not spec:
+            return {}
+        if not isinstance(spec, dict):
+            raise SystemExit("models.river.%s 는 이름 → 값 이어야 합니다" % field)
+        lower = {str(a).strip().lower(): str(a) for a in allowed}
+        out = {}
+        for key, value in spec.items():
+            canon = lower.get(str(key).strip().lower())
+            if canon is None:
+                raise SystemExit("models.river.%s 에 없는 이름이 있습니다: %r (가능: %s)"
+                                 % (field, key, ", ".join(map(str, allowed))))
+            out[canon] = float(value)
+        return out
+
+    def threshold(self, cls_name):
+        return self.class_conf.get(cls_name, self.conf)
+
+    @staticmethod
+    def _said(det):
+        """어느 문구가 말했는가. 문구를 돌려주지 않는 arm 은 **클래스 이름 자체**로 센다 —
+        빈 집합으로 두면 min_prompts 1 이 그 검출을 말없이 버린다."""
+        return det.get("prompt") or det["cls_name"]
+
+    def _merge(self, raw, img_area):
+        """같은 클래스가 merge_iou 이상 겹치면 하나로 보고 **어느 arm·문구가** 말했는지 모은다.
+
+        클래스가 다른 겹침은 합치지 않는다 — 캔과 부탄은 서로 다른 조치를 부르고,
+        둘을 한 칸에 합치면 그 구분이 사라진다.
+        """
+        kept = []
+        for det in sorted(raw, key=lambda d: -d["conf"]):
+            x1, y1, x2, y2 = det["xyxy"]
+            if self.max_area and (x2 - x1) * (y2 - y1) > float(self.max_area) * img_area:
+                continue                               # 장면 전체를 가리킨 검출
+            dup = None
+            for other in kept:
+                if other["cls_name"] != det["cls_name"]:
+                    continue
+                if float(box_iou([other["xyxy"]], [det["xyxy"]])[0, 0]) >= self.merge_iou:
+                    dup = other
+                    break
+            if dup is None:
+                kept.append({"cls_name": det["cls_name"], "conf": det["conf"],
+                             "xyxy": det["xyxy"], "arms": {det["arm"]},
+                             "prompts": {self._said(det)},
+                             "merged_from": ({det["merged_from"]} if det.get("merged_from")
+                                             else set())})
+            else:
+                dup["arms"].add(det["arm"])
+                dup["prompts"].add(self._said(det))
+                if det.get("merged_from"):
+                    dup["merged_from"].add(det["merged_from"])
+        return kept
+
+    def __call__(self, bgr):
+        t0 = time.perf_counter()
+        raw, per_arm_ms, dropped, folded = [], {}, 0, 0
+        for label, arm in self.arms:
+            a0 = time.perf_counter()
+            try:
+                found = arm(bgr)
+            except Exception as exc:                   # 한 arm 의 실패가 나머지를 멈추지 않는다 (AI-C-05)
+                log("  river arm %s 실패: %s: %s" % (label, type(exc).__name__, exc))
+                found = []
+                per_arm_ms[label] = None
+            else:
+                per_arm_ms[label] = round((time.perf_counter() - a0) * 1000, 1)
+            for det in found:
+                # 문구별 하한은 **병합 전**에 쓴다 — 문구는 raw 검출의 성질이고,
+                # 병합 뒤에는 어느 문구의 conf 였는지가 최대값에 가려진다.
+                bar = self.prompt_conf.get(det.get("prompt"))
+                if bar is not None and det["conf"] < bar:
+                    dropped += 1
+                    continue
+                merged_to = self.merge_classes.get(det["cls_name"])
+                if merged_to:
+                    det = dict(det, cls_name=merged_to, merged_from=det["cls_name"])
+                    folded += 1
+                raw.append(dict(det, arm=label))
+        img_area = float(bgr.shape[0] * bgr.shape[1])
+        dets = []
+        for group in self._merge(raw, img_area):
+            if (len(group["arms"]) < self.min_arms
+                    or len(group["prompts"]) < self.min_prompts
+                    or group["conf"] < self.threshold(group["cls_name"])):
+                continue
+            dets.append({"cls": self.classes.index(group["cls_name"]), "name": group["cls_name"],
+                         "conf": round(float(group["conf"]), 4),
+                         "xyxy": [round(float(v), 1) for v in group["xyxy"]],
+                         "agree": len(group["arms"]), "arms": sorted(group["arms"]),
+                         "prompts": sorted(group["prompts"])})
+            if group.get("merged_from"):
+                # 어느 이름으로 잡혀 합쳐졌는지 남긴다 — 합침을 되돌려 보려면 필요하고,
+                # 남기지 않으면 "부탄" 이 부탄으로 잡힌 것인지 캔이 넘어온 것인지 모른다
+                dets[-1]["merged_from"] = sorted(group["merged_from"])
+        dets.sort(key=lambda d: (-d["agree"], -d["conf"]))
+        del dets[self.max_det:]
+        ms = (time.perf_counter() - t0) * 1000
+        return {"infer_ms": round(ms, 1), "arms": list(self.arm_names),
+                "arm_ms": per_arm_ms, "missing_arms": [m[0] for m in self.missing],
+                "arms_declared": self.arms_declared,
+                "min_arms_declared": self.min_arms_declared,
+                "min_arms_applied": self.min_arms,
+                "unanimous": self.min_arms == len(self.arms), "conf": self.conf,
+                "class_conf": dict(self.class_conf), "prompt_conf": dict(self.prompt_conf),
+                "min_prompts": self.min_prompts, "prompts_declared": len(self.prompts),
+                "prompt_dropped": dropped, "merge_classes": dict(self.merge_classes),
+                "merged_dets": folded,
+                "prompt": "text"}, dets
+
+RUNNERS = {"yoloe": YoloeRunner, "river": RiverRunner,
+           "unidepth": UniDepthRunner, "moge2_aerial": MogeAerialRunner}
+
+
+def active_detector(names):
+    """돌릴 모델 목록·적재된 runner 중 검출 모델 하나를 고른다. 없으면 None."""
+    return next((m for m in DETECT_MODELS if m in names), None)
+
 
 
 # ---------------------------------------------------------------- depth 통계 · 시각화 · 결합
@@ -716,7 +1389,7 @@ LABEL_TOKENS = ("name", "conf", "cls", "id", "depth", "range", "gps", "alt", "ne
 
 
 def check_overlay_cfg(cfg):
-    for kind in ("yoloe", "depth"):
+    for kind in DETECT_MODELS + ("depth",):
         for line in label_spec(cfg.get("overlay") or {}, kind):
             bad = [t for t in line if t not in LABEL_TOKENS]
             if bad:
@@ -726,8 +1399,11 @@ def check_overlay_cfg(cfg):
 def label_spec(ocfg, kind):
     """overlay.<kind>.label → 줄 목록 [[항목, ...], ...]. 한 줄짜리 평평한 목록도 받는다"""
     spec = (ocfg.get(kind) or {}).get("label")
+    if spec is None and kind in DETECT_MODELS:
+        spec = (ocfg.get("yoloe") or {}).get("label")       # 검출 오버레이는 yoloe 설정을 같이 쓴다
     if spec is None:
-        spec = [["name", "conf"]] if kind == "yoloe" else [["name", "conf", "range"], ["gps"]]
+        spec = ([["name", "conf"]] if kind in DETECT_MODELS
+                else [["name", "conf", "range"], ["gps"]])
     if spec and not isinstance(spec[0], (list, tuple)):
         spec = [spec]
     return [list(line) for line in spec]
@@ -830,8 +1506,8 @@ def add_header(img, lines, ocfg):
     return np.vstack([band, img])
 
 
-def yoloe_overlay(bgr, dets, title, ocfg):
-    out = draw_dets(bgr.copy(), dets, ocfg, "yoloe")
+def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
+    out = draw_dets(bgr.copy(), dets, ocfg, kind)
     return add_header(out, [title if ocfg.get("title", True) else None], ocfg)
 
 
@@ -901,9 +1577,10 @@ def build_geo(cfg):
 
 
 # ---------------------------------------------------------------- 한 장 추론 (오프라인 · live 공통)
-def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cfg, pose_fn=None):
+def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, cfg, pose_fn=None):
     """한 장에 모델을 적용해 [(모델, 기록, 오버레이, depth 또는 None)] 을 돌려준다.
-    save_yoloe   : yoloe 결과를 돌려줄지 (False 여도 depth 결합에 필요하면 검출은 돌린다)
+    save_detect  : 검출 결과를 돌려줄지 (False 여도 depth 결합에 필요하면 검출은 돌린다).
+                   True/False 또는 검출 모델 이름 집합 — 집합이면 그 안에 있는 것만 저장한다
     depth_models : 돌릴 depth 모델
     pose_fn      : pose_fn(프레임 ts) → (드론 위치·자세, ts 차이 s). 검출 GPS 계산에 쓴다 (geo.py)"""
     fusion = cfg.get("fusion", {}) or {}
@@ -915,21 +1592,36 @@ def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cf
     out = []
     dets = None
     stab = None
-    if "yoloe" in runners and (save_yoloe or (depth_models and fusion.get("enabled", True))):
-        info, dets = runners["yoloe"](bgr)
-        sc = cfg.get("stabilize") or {}
+    det_model = active_detector(runners)
+    if isinstance(save_detect, (set, frozenset, list, tuple)):
+        wanted = det_model in set(save_detect)
+    else:
+        wanted = bool(save_detect)
+    if det_model and (wanted or (depth_models and fusion.get("enabled", True))):
+        info, dets = runners[det_model](bgr)
+        sc = stabilize_cfg(cfg, det_model)
         if sc.get("enabled", True):
-            key = (device, base.get("run"))
+            key = (device, base.get("run"), det_model)
             stab = cfg.setdefault("_stab", {}).get(key)
             if stab is None:
-                stab = cfg["_stab"][key] = Stabilizer(sc)
+                backend = str(sc.get("backend", "builtin")).lower()
+                try:
+                    stab = (Stabilizer(sc) if backend == "builtin" else VendorTracker(sc))
+                except _ArmMissing as exc:             # 트래커만 끈다 (AI-C-05)
+                    log("  트래킹을 끕니다 — %s" % exc)
+                    stab = False
+                cfg["_stab"][key] = stab
             ts = frame_ts(header)
-            dets = stab.update(dets, ts if ts is not None else time.time())
-        if save_yoloe:
-            rec = dict(base, model="yoloe", **info)
+            if stab:
+                dets = (stab.update(dets, ts if ts is not None else time.time(), bgr)
+                        if isinstance(stab, VendorTracker)
+                        else stab.update(dets, ts if ts is not None else time.time()))
+        if wanted:
+            rec = dict(base, model=det_model, **info)
             rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]
-            title = "yoloe  %s/%s #%s" % (device, base.get("run") or "live", base.get("n"))
-            out.append(("yoloe", rec, yoloe_overlay(bgr, rec["detections"], title, ocfg), None))
+            title = "%s  %s/%s #%s" % (det_model, device, base.get("run") or "live", base.get("n"))
+            out.append((det_model, rec,
+                        detect_overlay(bgr, rec["detections"], title, ocfg, det_model), None))
     fov = fov_hint(dev_cfg, header)
     pose = []                                           # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
 
@@ -962,7 +1654,7 @@ def infer_frame(bgr, base, header, device, save_yoloe, depth_models, runners, cf
         fused = None
         if dets is not None and fusion.get("enabled", True):
             fused = attach_depth(dets, depth, fusion)
-            if stab is not None:
+            if stab:                                   # 트래킹이 꺼졌거나 못 섰으면 건너뛴다
                 stab.smooth_depth(fused, m)
             add_geo(rec, fused, K)
             rec["detections"] = fused
@@ -1048,9 +1740,9 @@ def _process_run(device, run, own, runners, cfg, args, frames):
         h, w = bgr.shape[:2]
         base["image_wh"] = [w, h]
         need_depth = [m for m in own if m in DEPTH_MODELS and rel not in outs[m].done]
-        save_yoloe = "yoloe" in outs and rel not in outs["yoloe"].done
-        # yoloe 를 다른 프로세스가 맡고 있어도 결합용 검출은 여기서 돌린다 (저장은 안 함)
-        results = infer_frame(bgr, base, header, device, save_yoloe, need_depth, runners, cfg, pose_fn)
+        save_detect = {m for m in DETECT_MODELS if m in outs and rel not in outs[m].done}
+        # 검출을 다른 프로세스가 맡고 있어도 결합용 검출은 여기서 돌린다 (저장은 안 함)
+        results = infer_frame(bgr, base, header, device, save_detect, need_depth, runners, cfg, pose_fn)
         emitted_at = iso_ms()                               # 저장본도 결과가 나온 순간을 적는다 (live 는 done_ms 자리)
         for m, rec, overlay, depth in results:
             mcfg = cfg["models"][m]
@@ -1169,7 +1861,8 @@ class LiveRunner:
         h, w = bgr.shape[:2]
         base = {"n": header.get("n"), "frame": rel, "source": dv, "run": run_dir.name if run_dir else None,
                 "image_wh": [w, h], "live": True}
-        results = infer_frame(bgr, base, header, dv, "yoloe" in self.models,
+        results = infer_frame(bgr, base, header, dv,
+                              {m for m in DETECT_MODELS if m in self.models},
                               [m for m in self.models if m in DEPTH_MODELS], self.runners, self.cfg,
                               lambda ts: self.pose(dv, ts))
         done_ms = int(time.time() * 1000)
@@ -1335,7 +2028,11 @@ def main():
         return 0
 
     models = normalize(args.models or defaults.get("models", ["yoloe"]), MODELS, MODEL_ALIASES, "모델")
-    models = [m for m in MODELS if m in models]           # yoloe 를 먼저 돌려야 결합이 된다
+    models = [m for m in MODELS if m in models]           # 검출을 먼저 돌려야 결합이 된다
+    picked = [m for m in models if m in DETECT_MODELS]
+    if len(picked) > 1:
+        log("검출 모델이 둘입니다 (%s) — 결과는 둘 다 저장하지만 depth 결합·GPS 는 %s 검출에만 붙습니다"
+            % (" ".join(picked), picked[0]))
     if live:
         ignored = [o for o, on in (("--watch", args.watch), ("--overwrite", args.overwrite),
                                    ("--limit", args.limit), ("--stride", args.stride > 1)) if on]
@@ -1367,9 +2064,15 @@ def main():
     cfg["_geo"] = build_geo(cfg)
     check_overlay_cfg(cfg)
     load = list(models)
-    if "yoloe" not in load and any(m in DEPTH_MODELS for m in load) and (cfg.get("fusion") or {}).get("enabled", True):
-        load.insert(0, "yoloe")                         # depth 결합·GPS 계산용 검출. yoloe 결과 자체는 저장하지 않는다
-        log("depth 결합용으로 yoloe 도 적재 (yoloe 결과는 저장하지 않음 — 저장하려면 --models 에 yoloe 추가)")
+    if (active_detector(load) is None and any(m in DEPTH_MODELS for m in load)
+            and (cfg.get("fusion") or {}).get("enabled", True)):
+        helper = str((cfg.get("fusion") or {}).get("detector") or "yoloe")
+        if helper not in DETECT_MODELS:
+            raise SystemExit("fusion.detector 는 %s 중 하나입니다: %s"
+                             % (" 또는 ".join(DETECT_MODELS), helper))
+        load.insert(0, helper)                          # depth 결합·GPS 계산용 검출. 결과 자체는 저장하지 않는다
+        log("depth 결합용으로 %s 도 적재 (%s 결과는 저장하지 않음 — 저장하려면 --models 에 추가)"
+            % (helper, helper))
     runners = {}
     for m in load:
         t0 = time.time()
