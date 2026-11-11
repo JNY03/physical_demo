@@ -9,6 +9,20 @@ stream_to_server.py — pro2_auto_bg.py 의 영상판 (사진 촬영 → 실시�
   같은 /upload_pano 에 같은 equirect.jpg 를 올리므로 live.py 감시 루프가 그대로 집어간다.
   (2026-10-01 부터 같은 사진을 10001 데이터 스트림에도 보낸다 — 아래 [2026-10-01 수정])
 
+[2026-11-11 수정 — GPS · 배터리 · 온도를 상태로 보낸다]
+  카메라에 GPS 수신기가 있다 (camera._queryGpsStatus: state 1 = 인식, fix_type 0 = 위치 없음).
+  heartbeat 가 1초마다 받는 /osc/state 응답(배터리 · 온도 · 저장공간)과 GPS 조회 결과를 묶어
+  --telemetry 초(기본 1)마다 상태 한 건을 만든다. 드론 MQTT state 와 같은 모양이다:
+       topic   zoneA/cam360/cam360-001/state
+       payload schema_version · source_id · node_id · zone_id · timestamp(ISO +09:00) ·
+               gps{lat, lon, alt_m, fix_type, satellites, snr_max, state, raw} ·
+               battery{level_pct, charging} · temperature_c{battery, board, module} · camera_state
+       gps.lat/lon 은 fix_type < 2 면 null. raw 는 카메라 응답 그대로
+       (실외에서 fix 됐을 때의 좌표 칸 이름을 아직 실측하지 못해서 남긴다 — 여러 이름을 찾아본다)
+  보낼 곳: --upload 주소의 /upload_pano 를 /state 로 바꾼 곳 (데이터 스트림 10001 → POST /state).
+  모르는 곳(7866 pano_receiver 처럼 404)은 한 번 알리고 그다음부터 보내지 않는다.
+  상태는 별도 스레드가 보낸다 — heartbeat 와 영상 업로드를 막지 않고, 보낼 곳마다 스레드가 따로라 한 곳이 멈춰도 다른 곳은 제때 받는다.
+
 [2026-10-14 수정 — 통합데이터규약 v2 (CAM360-01)]
   장마다 보내는 폼을 바꿨다 (첫 번째 7866 · 두 번째부터 10001 모두 같은 폼).
        capture_id  그대로 (pano_receiver 의 저장 폴더 이름)
@@ -112,6 +126,8 @@ hb_thread = None
 CMD_URL = None
 STATE_URL = None
 _running = True
+last_osc_state = {}       # heartbeat 가 받은 /osc/state 의 "state" 칸 (배터리 · 온도 · 저장공간)
+TOPIC = "%s/cam360/%s/state" % ("zoneA", "cam360-001")
 
 
 # ── 카메라 제어 (preview_probe.py 와 동일) ───────────────
@@ -123,12 +139,133 @@ def headers():
 
 
 def heartbeat():
+    global last_osc_state
     while not hb_stop.is_set():
         try:
-            requests.post(STATE_URL, json={}, headers=headers(), timeout=3)
+            st = requests.post(STATE_URL, json={}, headers=headers(), timeout=3).json().get("state")
+            if isinstance(st, dict):
+                last_osc_state = st
         except Exception:
             pass
         time.sleep(1)
+
+
+# ── 상태 (GPS · 배터리 · 온도) — 2026-11-11 ─────────────────
+def _pick(d, *names):
+    for n in names:
+        if isinstance(d, dict) and d.get(n) is not None:
+            return d[n]
+    return None
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_telemetry(gps_res, osc):
+    """camera._queryGpsStatus 의 results · /osc/state 의 state → 상태 payload (드론 state 와 같은 모양)"""
+    g = gps_res if isinstance(gps_res, dict) else {}
+    loc = _pick(g, "location", "gps", "position") or g        # 좌표가 하위 객체로 올 수도 있다
+    fix = _pick(g, "fix_type", "fixType")
+    fix = int(fix) if _num(fix) is not None else None
+    sv = (g.get("sv_status") or {})
+    snrs = [_num(x.get("snr")) for x in (sv.get("status") or []) if isinstance(x, dict)]
+    snrs = [x for x in snrs if x is not None]
+    lat = _num(_pick(loc, "lat", "latitude", "Latitude"))
+    lon = _num(_pick(loc, "lon", "lng", "longitude", "Longitude"))
+    alt = _num(_pick(loc, "alt", "altitude", "Altitude"))
+    ok = fix is not None and fix >= 2 and lat is not None and lon is not None and not (lat == 0 and lon == 0)
+    b = osc.get("_battery") or {}
+    t = osc.get("_sys_temp") or {}
+    def temp(v):
+        v = _num(v)
+        return v if v is not None and -40 < v < 200 else None    # 모듈 없으면 1000 이 온다
+    return {"schema_version": "2.0", "source_id": SOURCE_ID, "node_id": NODE_ID, "zone_id": ZONE_ID,
+            "timestamp": iso_ms(),
+            "gps": {"lat": lat if ok else None, "lon": lon if ok else None, "alt_m": alt if ok else None,
+                    "fix_type": fix, "satellites": sv.get("sv_num"),
+                    "snr_max": max(snrs) if snrs else None,
+                    "state": _pick(g, "state"), "raw": gps_res},
+            "battery": {"level_pct": _num(b.get("battery_level")),
+                        "charging": bool(b.get("battery_charge")) if b.get("battery_charge") is not None else None},
+            "temperature_c": {"battery": temp(t.get("bat_temp")), "board": temp(t.get("nv_temp")),
+                              "module": temp(t.get("module_temp"))},
+            "camera_state": osc.get("_cam_state")}
+
+
+def state_url(upload_url):
+    """'http://h:10001/upload_pano' → 'http://h:10001/state'"""
+    head, _, _ = upload_url.partition("://")
+    host = upload_url.split("://", 1)[-1].split("/", 1)[0]
+    return "%s://%s/state" % (head, host)
+
+
+class Telemetry:
+    """interval 초마다 GPS 를 묻고 /osc/state 와 묶어 상태 한 건을 만든다 (따로 도는 스레드).
+    보낼 곳마다 스레드를 따로 둔다 — 한 곳이 멈춰 타임아웃을 기다려도 다른 곳(10001)은 제때 받는다.
+    밀리면 못 보낸 건은 버리고 최신 건만 보낸다."""
+
+    def __init__(self, uploads, interval, dry_run=False):
+        self.urls = [] if dry_run else list(dict.fromkeys(state_url(u) for u in uploads))
+        self.interval = interval
+        self.sent = self.failed = 0
+        self.last = None
+        self.ver = 0
+        self.cv = threading.Condition()
+        self.stop = threading.Event()
+        self.ths = [threading.Thread(target=self._run, daemon=True)]
+        self.ths += [threading.Thread(target=self._post_loop, args=(u,), daemon=True) for u in self.urls]
+        for t in self.ths:
+            t.start()
+
+    def line(self):
+        """화면 한 줄 요약"""
+        if self.last is None:
+            return "상태 -"
+        g, b, t = self.last["gps"], self.last["battery"], self.last["temperature_c"]
+        pos = ("%.6f,%.6f" % (g["lat"], g["lon"])) if g["lat"] is not None else "fix%s" % g["fix_type"]
+        return "GPS %s · 배터리 %s%% · %s℃" % (pos, "-" if b["level_pct"] is None else "%.0f" % b["level_pct"],
+                                             "-" if t["board"] is None else "%.0f" % t["board"])
+
+    def _run(self):
+        while not self.stop.wait(self.interval):
+            r = send("camera._queryGpsStatus", {}, timeout=3)
+            gps = r.get("results") if r.get("state") == "done" else None
+            with self.cv:
+                self.last = build_telemetry(gps, last_osc_state)
+                self.ver += 1
+                self.cv.notify_all()
+
+    def _post_loop(self, url):
+        sess = requests.Session()
+        seen = 0
+        while not self.stop.is_set():
+            with self.cv:
+                while self.ver == seen and not self.stop.is_set():
+                    self.cv.wait(0.5)
+                if self.stop.is_set():
+                    return
+                seen, body = self.ver, {"topic": TOPIC, "payload": self.last}
+            try:
+                resp = sess.post(url, json=body, timeout=(1.5, 3))
+                if resp.status_code in (404, 405, 501):     # /state 를 모르는 곳 (7866 pano_receiver 등)
+                    print("\n[상태] %s 는 /state 를 모름 (%d) — 이곳에는 상태를 보내지 않습니다"
+                          % (short_name(url), resp.status_code))
+                    return
+                self.sent += 1
+            except Exception:
+                self.failed += 1
+                self.stop.wait(2.0)                         # 꺼진 곳에 매초 두드리지 않게
+
+    def close(self):
+        self.stop.set()
+        with self.cv:
+            self.cv.notify_all()
+        for t in self.ths:
+            t.join(2.0)
 
 
 def connect(max_retry=3):
@@ -365,6 +502,8 @@ def main():
     ap.add_argument("--count", type=int, default=0, help="N장 올리고 종료 (0=무한)")
     ap.add_argument("--dry-run", action="store_true", help="업로드 없이 스트림만 측정")
     ap.add_argument("--url", default=None, help="스트림 주소 직접 지정")
+    ap.add_argument("--telemetry", type=float, default=1.0,
+                    help="GPS · 배터리 · 온도 상태를 보내는 주기(초). 0 이면 보내지 않는다")
     args = ap.parse_args()
 
     # 첫 번째(7866)는 예전처럼 응답을 기다리고, 두 번째(10001)부터는 따로 보낸다.
@@ -445,6 +584,7 @@ def main():
 
     sess = requests.Session()
     extras = [] if args.dry_run else [ExtraUploader(u) for u in uploads[1:]]
+    telem = Telemetry(uploads, args.telemetry, args.dry_run) if args.telemetry > 0 else None
     ages, encs, ups, totals = [], [], [], []
     n_up = 0
     t_start = time.time()
@@ -519,7 +659,8 @@ def main():
         print("  #%-4d 나이 %5.0fms  인코딩 %4.0fms  업로드 %5.0fms  | PC구간 %5.0fms"
               "  %4dKB  %s%s" % (n_up, age*1000, t_enc*1000, t_up*1000, tot*1000,
                                  len(data)//1024, status,
-                                 "".join("  | %s %s" % (x.name, x.status) for x in extras)))
+                                 "".join("  | %s %s" % (x.name, x.status) for x in extras)
+                                 + ("  | " + telem.line() if telem else "")))
 
     # ── 정리 ──
     stop.set()
@@ -527,6 +668,8 @@ def main():
     th.join(timeout=3.0)              # 리더가 스스로 cap.release() 하고 빠져나감
     for x in extras:
         x.close()                     # 보내던 장까지만 마치고 끝낸다
+    if telem:
+        telem.close()
     hb_stop.set()
 
     el = time.time() - t_start
@@ -535,6 +678,8 @@ def main():
     print("  리더 스레드 수신 %d프레임 (%.1f fps), read 실패 %d"
           % (rstat["read_ok"], rstat["read_ok"]/el if el else 0, rstat["read_fail"]))
     print("  버린 프레임 %d장  ← 목표 fps 로 솎아낸 결과 (정상)" % latest.dropped)
+    if telem:
+        print("  상태(GPS·배터리·온도) 보냄 %d · 실패 %d · 마지막 %s" % (telem.sent, telem.failed, telem.line()))
     if rstat["reconnect"]:
         print("  스트림이 끊겨 다시 붙은 횟수 %d" % rstat["reconnect"])
     for x in extras:

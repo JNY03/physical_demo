@@ -71,13 +71,22 @@ python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 
 
 | 포트 | 소스 | 받는 곳 |
 |---|---|---|
-| 10001 | cam360 | 360 노트북이 보내는 업로드 (`/upload_pano`) |
+| 10001 | cam360 | 360 노트북이 보내는 업로드 (`/upload_pano`) + 상태 (`/state`: GPS · 배터리 · 온도) |
 | 10002 | drone | pi3 `:8890/api/frame?cam=0` + MQTT `:1883` |
 | 10003 | robot1 | pi7 `:8090/stream/1` + MQTT `:1883` |
 | 10004 | robot2 | pi1 `:8090/stream/1` + MQTT `:1883` |
 
 - 10초마다 소스별 수신 속도(장/초, 건/초)가 찍힌다. 종료는 `Ctrl+C`.
 - 브라우저 확인: `http://localhost:10002/` (영상 + 비전), `/stream` (원본), `/health` (상태 JSON).
+- 가시화에서 가져갈 주소 (포트마다 같다):
+  - **영상 + 상태 한 번에**: `http://<이 노트북>:<포트>/frame?since=<지난 번호>` — 본문은 최신 JPEG, 헤더 `X-State` 에 그 순간의 최신 상태 JSON,
+    `X-Frame-N` 에 번호, `X-Frame-Meta` 에 프레임 헤더. 받은 `X-Frame-N` 을 `since` 로 다시 부르면 새 장이 올 때까지 기다렸다 준다 (없으면 204).
+    `&format=json` 이면 `{n, meta, state, image_b64}` JSON 하나로 준다.
+  - 영상: `http://<이 노트북>:<포트>/stream` (MJPEG — `<img src>` 에 그대로 넣는다)
+  - 상태: `http://<이 노트북>:<포트>/state` (JSON, 1초마다 읽는다). `latest.payload` 가 최신 상태 한 건이다.
+    360 은 `gps{lat, lon, alt_m, fix_type, satellites}` · `battery{level_pct, charging}` · `temperature_c{battery, board, module}`.
+    `gps.lat`/`lon` 은 fix 가 없으면(`fix_type < 2`) `null` 이다. 드론 · 로봇은 MQTT 로 받은 토픽별 최신 값이 `by_topic` 에 있다.
+  - Redis 로 받으려면 `camera_stream:<소스>` (영상) · `state_stream:<소스>` (상태).
 
 ### 3) 비전 추론 — `vision/vision_infer.py` (터미널 2, 선택)
 
@@ -104,6 +113,8 @@ python stream_to_server.py --fps 3                    # 기본 5fps → 3fps (�
 
 - `100.125.104.23` 은 이 노트북의 tailscale IP 다 (바뀌면 `tailscale ip -4` 로 확인). 360 노트북도 같은 tailnet 에 로그인되어 있어야 한다.
 - 카메라 IP 기본값은 `192.168.100.124` 이고, 다르면 `--ip` 로 바꾼다. 종료는 `Ctrl+C`.
+- GPS · 배터리 · 온도를 1초마다 `/upload_pano` 와 같은 서버의 `/state` 로 보낸다 (`--telemetry 2` 로 주기 변경, `0` 이면 끔).
+  7866 pano_receiver 처럼 `/state` 가 없는 곳은 한 번 알리고 건너뛴다. 실내에서는 위치가 안 잡혀 `gps.lat` 이 `null` 이다.
 
 ---
 

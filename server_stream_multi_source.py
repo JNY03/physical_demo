@@ -33,6 +33,12 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
   POST /upload        server_stream_depth_v2 와 같은 모양 (file + camera_id 등)
   POST /push          다른 기기에서 도는 이 파일이 넘겨 준 영상·상태 묶음 (--forward)
+  POST /state         상태 한 건 (JSON {"topic": ..., "payload": {...}}). 360 노트북이 GPS·배터리·온도를 1초마다 보낸다
+  GET  /state         그 소스의 최신 상태 (JSON). 가시화가 1초마다 읽어 가면 된다 — 영상은 /stream
+  GET  /frame         최신 한 장 + 그 순간의 최신 상태를 한 번에 (가시화용). 본문 = JPEG,
+                      헤더 X-Frame-N(번호) · X-Frame-Meta(보낸 쪽 프레임 헤더 JSON) · X-State(최신 상태 payload JSON)
+                      ?since=<받은 X-Frame-N> 이면 새 장이 올 때까지 최대 ?wait=초(기본 2, 최대 10) 기다린다 (없으면 204)
+                      ?format=json 이면 {"n", "meta", "state", "image_b64"} JSON 하나로 준다
   GET  /              원본 영상 + 비전 결과를 한 화면에
   GET  /stream        그 소스 영상을 브라우저로 본다 (MJPEG)
   GET  /vision?model=yoloe   비전 오버레이 (MJPEG). vision_infer.py live 가 Redis 에 넣은 것을 보여 준다
@@ -684,6 +690,8 @@ class Source:
         self.state_fh = None
         self.cv = threading.Condition()
         self.latest = (0, None)                 # /stream 으로 보여 줄 최신 한 장
+        self.latest_sender = None               # 그 장의 보낸 쪽 프레임 헤더 (GET /frame)
+        self.latest_state = {}                  # GET /state 로 보여 줄 토픽별 최신 상태 한 건
 
     def _open_new(self):
         """다음 번호의 frames/<번호>.jpg 를 새로 만든다. 기존 파일은 절대 덮어쓰지 않는다."""
@@ -766,6 +774,7 @@ class Source:
             self.got_frames += 1
         with self.cv:
             self.latest = (n, image)
+            self.latest_sender = sender
             self.cv.notify_all()
         if self.fwd is not None and not via.startswith("push"):   # 넘겨받은 것은 다시 넘기지 않는다 (고리 방지)
             self.fwd.put(b"F", packed)
@@ -814,6 +823,7 @@ class Source:
                                   "header": json.dumps(header, ensure_ascii=False)}):
                 self.redis_fail += 1
             self.got_states += 1
+            self.latest_state[topic] = rec
         if self.fwd is not None and not via.startswith("push"):
             self.fwd.put(b"S", line)
         return {"status": "saved" if saved else "not_saved", "source": self.name, "n": rec["n"]}
@@ -823,6 +833,14 @@ class Source:
             if self.latest[0] == last:
                 self.cv.wait(timeout)
             return self.latest
+
+    def state_snapshot(self):
+        """GET /state — latest = 토픽이 /state 로 끝나는 것 중 가장 최근 것 (없으면 아무 토픽이나 가장 최근)"""
+        with self.lock:
+            by_topic = dict(self.latest_state)
+        recs = sorted(by_topic.values(), key=lambda r: r["n"])
+        main = [r for r in recs if str(r.get("topic", "")).endswith("/state")] or recs
+        return {"source": self.name, "latest": main[-1] if main else None, "by_topic": by_topic}
 
     def set_status(self, key, text):
         self.status[key] = text
@@ -892,6 +910,7 @@ def make_handler(src, vision=None):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")   # 다른 주소의 가시화 웹이 /state 를 fetch 할 수 있게
             self.end_headers()
             self.wfile.write(body)
 
@@ -905,6 +924,10 @@ def make_handler(src, vision=None):
                 return self._mjpeg()
             if path == "/vision":
                 return self._vision(parse_qs(query).get("model", [None])[0])
+            if path == "/state":
+                return self._json(200, src.state_snapshot())
+            if path == "/frame":
+                return self._frame(parse_qs(query))
             if path == "/health":
                 h = src.health()
                 if vision is not None:
@@ -918,6 +941,11 @@ def make_handler(src, vision=None):
                 cells += ["<figure style='margin:4px'><figcaption>%s</figcaption>"
                           "<img src='/vision?model=%s' style='max-width:100%%'></figure>" % (m, m) for m in models]
                 note = "" if models else " · 비전 결과 없음 (vision_infer.py 가 돌면 새로고침)"
+                cells.append("<figure style='margin:4px'><figcaption>상태 (<a style='color:#9cf' href='/state'>/state</a>)"
+                             "</figcaption><pre id='st' style='font-size:12px;white-space:pre-wrap'>-</pre></figure>"
+                             "<script>setInterval(function(){fetch('/state').then(function(r){return r.json()})"
+                             ".then(function(j){var l=j.latest;document.getElementById('st').textContent="
+                             "l?JSON.stringify(l.payload,null,1):'아직 상태 없음'})},1000)</script>")
                 page = ("<!doctype html><meta charset='utf-8'><title>%s</title>"
                         "<body style='margin:0;background:#111;color:#ddd;font-family:sans-serif'>"
                         "<p style='margin:8px'>%s :%d · <a style='color:#9cf' href='/health'>health</a>%s</p>"
@@ -925,6 +953,45 @@ def make_handler(src, vision=None):
                         "</body>" % (src.name, src.name, src.port, note, "".join(cells)))
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             self._json(404, {"status": "error", "detail": "없는 주소"})
+
+        def _frame(self, q):
+            """최신 한 장 + 최신 상태. since 를 주면 그보다 새 장이 올 때까지 wait 초 기다린다"""
+            def arg(name, default):
+                try:
+                    return float(q.get(name, [default])[0])
+                except (TypeError, ValueError):
+                    return default
+            since = int(arg("since", -1))
+            deadline = time.time() + max(0.0, min(10.0, arg("wait", 2.0)))
+            n, img = src.latest
+            while (img is None or n == since) and not STOP.is_set():
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                n, img = src.wait_latest(n if img is not None else 0, min(left, 1.0))
+            if img is None or n == since:
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            meta = src.latest_sender if src.latest[0] == n else None
+            latest = src.state_snapshot()["latest"]
+            state = latest.get("payload") if latest else None
+            if (q.get("format") or [""])[0] == "json":
+                return self._json(200, {"source": src.name, "n": n, "meta": meta, "state": state,
+                                        "image_b64": base64.b64encode(img).decode("ascii")})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(img)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Expose-Headers", "X-Frame-N, X-Frame-Meta, X-State")
+            self.send_header("X-Frame-N", str(n))
+            self.send_header("X-Frame-Meta", json.dumps(meta, separators=(",", ":")))    # ensure_ascii — 헤더는 ASCII
+            self.send_header("X-State", json.dumps(state, separators=(",", ":")))
+            self.end_headers()
+            self.wfile.write(img)
 
         def _vision(self, model):
             """비전 오버레이 MJPEG. model 을 안 주면 결과가 있는 첫 모델"""
@@ -1001,6 +1068,22 @@ def make_handler(src, vision=None):
                         src.set_status(key, text)
                         log("%s 영상 받는 중 — %s 로 %s 에서 올라옴" % (src.name, path, self.client_address[0]))
                     res = src.add_frame(image, sender, "upload:" + path)
+                elif path == "/state":                # 상태 한 건 (360 노트북의 GPS·배터리·온도)
+                    try:
+                        rec = json.loads(body.decode("utf-8"))
+                    except ValueError:
+                        return self._json(400, {"status": "error", "detail": "JSON 이 아님"})
+                    if not isinstance(rec, dict) or not rec.get("topic") or "payload" not in rec:
+                        return self._json(400, {"status": "error", "detail": "topic · payload 칸이 필요함"})
+                    raw = rec["payload"]
+                    payload = (json.dumps(raw, ensure_ascii=False) if isinstance(raw, (dict, list))
+                               else str(raw)).encode("utf-8")
+                    key = "state" if src.name == "cam360" else "upload_state"
+                    text = "받는 중 (/state ← %s)" % self.client_address[0]
+                    if src.status.get(key) != text:
+                        src.set_status(key, text)
+                        log("%s 상태 받는 중 — /state 로 %s 에서 올라옴" % (src.name, self.client_address[0]))
+                    res = src.add_state(str(rec["topic"]), payload, rec.get("qos"), rec.get("retain"), "upload:/state")
                 elif path == "/push":                 # 다른 기기의 이 파일이 넘겨 준 묶음
                     res = {"status": "saved", "source": src.name, "frames": 0, "states": 0, "bad": 0}
                     for kind, data in unpack_records(body):
@@ -1525,7 +1608,7 @@ def main():
             else:
                 print("  %-9s %6s  상태 없음 (이 기기에 브로커가 없다)" % ("", ""))
     print("  " + "-" * 70)
-    print("  보기   http://<이 기기>:<포트>/  (원본 + 비전)  ·  /stream  ·  /vision?model=<모델>  ·  /health")
+    print("  보기   http://<이 기기>:<포트>/  (원본 + 비전)  ·  /stream  ·  /vision?model=<모델>  ·  /frame  ·  /state  ·  /health")
     print("Ctrl+C 로 끝냅니다. 10초마다 받은 양을 찍습니다.")
     print(bar, flush=True)
 
