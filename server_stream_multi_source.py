@@ -24,8 +24,10 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   10003 robot1  영상: pi7 :8090/stream/1 을 계속 읽는다        상태: pi7 MQTT :1883 전체 구독
   10004 robot2  영상: pi1 :8090/stream/1 을 계속 읽는다        상태: pi1 MQTT :1883 전체 구독
   10005 realsense 영상: pi6 :8090/stream/1 을 계속 읽는다      상태: 없음 (pi6 에 브로커가 없다)
-                  pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다. 깊이는 아니다 —
-                  D455 는 UVC 라 컬러만 /dev/video* 로 나오고, 깊이는 librealsense 가 있어야 한다
+                  pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다(깊이가 아니다).
+                  깊이도 UVC 로는 나온다(/dev/video0 의 Z16). 다만 단위·내부/외부 파라미터·
+                  두 스트림 짝맞춤이 스트림에 실려 오지 않아 librealsense 가 있어야 쓸 수 있고,
+                  16비트라 이 JPEG 경로로는 못 나른다 — realsense_work/README.md 를 본다
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
