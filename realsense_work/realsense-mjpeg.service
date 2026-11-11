@@ -1,0 +1,20 @@
+# pi6 의 RealSense 컬러 스트림을 MJPEG 으로 내는 서비스.
+# 설치(파이에서):
+#   sudo cp realsense-mjpeg.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now realsense-mjpeg
+# 설치하지 않으면 재부팅 때 스트림이 사라진다 — 그때는 아래 ExecStart 를 손으로 띄운다.
+[Unit]
+Description=RealSense D455 color -> MJPEG (data_stream realsense source)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=physical
+# 장치 번호는 /dev/video* 중 **컬러**다. D455 는 0/1 깊이 · 2/3 적외선 · 4/5 컬러이지만
+# 붙는 순서에 따라 바뀔 수 있다 — 바뀌면 `v4l2-ctl --list-devices` 로 다시 찾는다.
+ExecStart=/home/physical/pf_runtime/venv/bin/python /home/physical/realsense_mjpeg.py 8090 4 1280 720 15
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
