@@ -1007,16 +1007,30 @@ def _expand_vocab(classes, spec, decoys=None):
     classes = [str(c) for c in classes or []]
     if not classes:
         raise SystemExit("models.river: classes 가 비었습니다")
-    if isinstance(spec, dict):
+    if spec is None:
+        # 적지 않으면 **클래스 이름 자체가 문구**다. 프리 프롬프트 arm 만 쓰는 구성은
+        # 텍스트 문구가 필요 없지만 하위 계층(임계값·기록)은 문구 자리를 쓴다.
+        # 빈 dict/목록은 그대로 거절한다 — 비워 놓은 것과 안 적은 것은 다른 뜻이다.
+        groups = [(c, [c]) for c in classes]
+    elif isinstance(spec, dict):
         unknown = [k for k in spec if k not in classes]
         if unknown:
             raise SystemExit("models.river.prompts 에 classes 에 없는 이름이 있습니다: %s"
                              % ", ".join(map(str, unknown)))
-        groups = [(c, [str(p) for p in (spec.get(c) or [])]) for c in classes]
+        groups = []
+        for c in classes:
+            if c in spec and spec[c] is None:
+                # **문구를 두지 않는 클래스** — 프리 프롬프트 arm 만 채우는 가설 칸이다.
+                # 텍스트 어휘에 넣으면 그 낱말이 어휘 전체 argmax 에서 표를 가져가
+                # 진짜 물체를 지운다(미끼 문구가 현장에서 진 자리가 바로 그것이다).
+                # 그래서 어휘에 **넣지 않는다**. 빈 목록은 그대로 거절한다 —
+                # 비워 둔 것(실수)과 안 두겠다고 적은 것(null)은 다른 뜻이다.
+                continue
+            groups.append((c, [str(p) for p in (spec.get(c) or [])]))
         empty = [c for c, words in groups if not words]
         if empty:
-            raise SystemExit("models.river.prompts: 문구가 없는 클래스가 있습니다: %s"
-                             % ", ".join(empty))
+            raise SystemExit("models.river.prompts: 문구가 없는 클래스가 있습니다: %s "
+                             "(문구를 두지 않을 뜻이면 null 로 적습니다)" % ", ".join(empty))
     else:
         flat = [str(p) for p in spec or []]
         if len(flat) != len(classes):
@@ -1193,7 +1207,109 @@ class _ArmOwlv2:
         return out
 
 
+class _ArmYoloeFree:
+    """YOLOE **프리 프롬프트**(내장 어휘 4585종) — 자리를 내고 이름은 **가설로** 남긴다.
+
+    왜 이것을 더하는가 (2026-11-12 측정):
+
+    * 5종 텍스트 프롬프트는 실내 검수 27 정답에서 **자리를 0 개** 잡았다. 같은 장을
+      프리 프롬프트로 보면 **27/27**(IoU>=0.5 · 26/27 at 0.7)이다. 자리를 못 찾는
+      것은 어휘를 5개로 좁힌 탓이지 모델이 못 보는 탓이 아니었다.
+    * 그런데 프리 어휘가 붙이는 이름은 장마다 다르다 — 같은 나무판에 breadbox 7 ·
+      hassock 6 · plywood 5 · podium 4 · harpsichord 2 · exhaust hood 2 · block 1.
+      **자리는 믿고 이름은 믿지 않는다.**
+
+    그래서 `vocab_map` 은 프리 이름 → 우리 클래스의 **선언**이고, 지도에 없는 이름은
+    버리지 않고 `unconfirmed_class` 로 낸다. 1 위를 고르지 않고 가설로 남기는 것이다
+    (AI-S-04 — 기존 클래스에 강제 매핑하지 않는다). 어느 프리 이름이 말했는지는
+    `prompt` 로 남아 뒤에서 설명할 수 있다.
+
+    **위험물은 재질 낱말이 있을 때만 받는다.** `wooden_box` 는 `plywood` `wood`
+    `hardwood` 처럼 **재질을 말하는** 이름에서만 승격하고, `breadbox` `crate` `box`
+    처럼 모양만 말하는 이름은 `unconfirmed` 로 남는다 — 나무 상자와 골판지 상자·책을
+    가르는 것은 모양이 아니라 재질이기 때문이다. 이 둘을 섞으면 하천에서 측정된
+    wooden_box 정밀도 0.158 이 그대로 따라온다.
+
+    프리 프롬프트는 장당 72.5 상자를 낸다(5종 텍스트는 6.5). 이 비용을 숨기지 않는다.
+    """
+
+    def __init__(self, spec, prompts, owners, device, shared):
+        weight = Path(str(spec["weight"])).expanduser()
+        if not weight.is_file():
+            raise _ArmMissing("가중치가 없다: %s" % weight)
+        if not weight.stem.endswith("-pf"):
+            raise SystemExit("river arm yoloe_free 에는 prompt-free(-pf) 가중치가 "
+                             "필요합니다: %s" % weight)
+        from ultralytics import YOLOE
+        self.model = YOLOE(str(weight))
+        self.device = device
+        self.imgsz = int(spec.get("imgsz") or shared["imgsz"])
+        self.conf = float(spec.get("conf", shared["base_conf"]))
+        self.max_det = int(spec.get("max_det") or shared["max_det"])
+        self.name = weight.name
+        self.free_vocab = True          # 텍스트 문구를 쓰지 않는다 — 어휘는 가중치 안에 있다
+        known = set(shared.get("classes") or owners)
+        self.unconfirmed = spec.get("unconfirmed_class")
+        if self.unconfirmed is not None:
+            self.unconfirmed = str(self.unconfirmed)
+            if self.unconfirmed not in known:
+                raise SystemExit("river arm yoloe_free.unconfirmed_class 가 classes 에 "
+                                 "없습니다: %s" % self.unconfirmed)
+        self.vocab_map = self._read_map(spec.get("vocab_map"), known)
+        vocab = {str(v).lower() for v in (self.model.names or {}).values()}
+        if vocab:
+            unknown = sorted(n for n in self.vocab_map if n not in vocab)
+            if unknown:
+                # 어휘에 없는 이름을 적어 두면 **아무 일도 하지 않는다**. 조용히
+                # 지나가면 그 클래스가 왜 안 나오는지 설명할 수 없다.
+                raise SystemExit("river arm yoloe_free.vocab_map 에 내장 어휘에 없는 "
+                                 "이름이 있습니다(아무 일도 하지 않습니다): %s"
+                                 % ", ".join(unknown))
+        log("  river arm %s 프리 어휘 %d종 · 지도 %d개 → %d클래스%s"
+            % (self.name, len(vocab), len(self.vocab_map),
+               len(set(self.vocab_map.values())),
+               (" · 지도 밖은 %s" % self.unconfirmed) if self.unconfirmed else " · 지도 밖은 버린다"))
+
+    @staticmethod
+    def _read_map(spec, known):
+        """{우리 클래스: [프리 이름...]} 을 {프리 이름: 우리 클래스} 로 뒤집는다."""
+        if not spec:
+            raise SystemExit("river arm yoloe_free 에는 vocab_map 이 필요합니다")
+        if not isinstance(spec, dict):
+            raise SystemExit("river arm yoloe_free.vocab_map 은 클래스 → 이름 목록입니다")
+        out = {}
+        for cls, names in spec.items():
+            cls = str(cls)
+            if cls not in known:
+                raise SystemExit("river arm yoloe_free.vocab_map 에 classes 에 없는 "
+                                 "클래스가 있습니다: %s" % cls)
+            for n in (names or []):
+                n = str(n).lower()
+                if n in out and out[n] != cls:
+                    # 한 이름이 두 클래스를 가리키면 **어느 쪽도 믿을 수 없다**
+                    raise SystemExit("river arm yoloe_free.vocab_map: %r 이 %s 와 %s "
+                                     "둘을 가리킵니다" % (n, out[n], cls))
+                out[n] = cls
+        return out
+
+    def __call__(self, bgr):
+        r = self.model.predict(bgr, conf=self.conf, imgsz=self.imgsz, max_det=self.max_det,
+                               device=self.device, verbose=False)[0]
+        names = self.model.names or {}
+        out = []
+        if r.boxes is not None and len(r.boxes):
+            for b in r.boxes:
+                free = str(names.get(int(b.cls), int(b.cls))).lower()
+                cls = self.vocab_map.get(free, self.unconfirmed)
+                if cls is None:
+                    continue
+                out.append({"cls_name": cls, "prompt": free, "conf": float(b.conf),
+                            "xyxy": [float(v) for v in b.xyxy[0].tolist()]})
+        return out
+
+
 ARM_KINDS = {"yoloe": _ArmUltralytics, "yoloworld": _ArmUltralytics,
+             "yoloe_free": _ArmYoloeFree,
              "gdino": _ArmGroundingDino, "owlv2": _ArmOwlv2}
 
 
@@ -1247,7 +1363,10 @@ class RiverRunner:
 
         shared = {"imgsz": int(cfg.get("imgsz", 1920)),
                   "base_conf": float(cfg.get("arm_conf", 0.05)),
-                  "max_det": self.max_det}
+                  "max_det": self.max_det,
+                  # arm 이 이름을 검사할 때 보는 것은 **선언된 classes** 다. owners 는
+                  # '문구를 가진 클래스' 라서 문구 없는 가설 칸이 거기 없다
+                  "classes": tuple(self.classes)}
         floor = shared["base_conf"]
         low = [(n, v) for n, v in list(self.class_conf.items()) + list(self.prompt_conf.items())
                if v < floor]
@@ -1285,6 +1404,18 @@ class RiverRunner:
         if not self.arms:
             raise SystemExit("models.river: 쓸 수 있는 arm 이 없습니다 — "
                              + "; ".join("%s: %s" % m for m in self.missing))
+
+        # **가설 칸** — 프리 프롬프트 arm 이 지도 밖 이름을 여기로 보낸다(AI-S-04).
+        # 텍스트 문구를 가진 이름은 가설이 될 수 없다: 문구가 있으면 텍스트 arm 도
+        # 그 이름을 내고, 그러면 "이름을 고르지 않았다" 가 거짓이 된다.
+        self.hypothesis = {a.unconfirmed for _, a in self.arms
+                           if getattr(a, "unconfirmed", None)}
+        text_arms = [l for l, a in self.arms if not getattr(a, "free_vocab", False)]
+        named = sorted(h for h in self.hypothesis
+                       if text_arms and h in self.owners)
+        if named:
+            raise SystemExit("models.river: 가설 칸에 텍스트 문구가 있습니다 — %s "
+                             "(prompts 에 null 로 적습니다)" % ", ".join(named))
         want = int(cfg.get("min_arms", 2))
         if want < 1:
             raise SystemExit("models.river.min_arms 는 1 이상입니다: %d" % want)
@@ -1455,6 +1586,23 @@ class RiverRunner:
                 # 어느 이름으로 잡혀 합쳐졌는지 남긴다 — 합침을 되돌려 보려면 필요하고,
                 # 남기지 않으면 "부탄" 이 부탄으로 잡힌 것인지 캔이 넘어온 것인지 모른다
                 dets[-1]["merged_from"] = sorted(group["merged_from"])
+        # **같은 자리에 확정이 있으면 가설은 내보내지 않는다.** 클래스가 다른 겹침은
+        # 병합되지 않으므로(캔과 부탄을 한 칸에 합치지 않기 위한 규칙이다) 이 걸음이
+        # 없으면 텍스트 arm 이 이름을 댄 물체마다 프리 arm 의 `unconfirmed` 가 하나씩
+        # 더 붙어 **한 물체가 둘로 세어진다**. 가설은 이름을 모르는 자리에만 남는다.
+        covered = 0
+        if self.hypothesis and len(dets) > 1:
+            firm = [d for d in dets if d["name"] not in self.hypothesis]
+            if firm:
+                keep = []
+                for det in dets:
+                    if det["name"] in self.hypothesis and max(
+                            float(box_iou([det["xyxy"]], [f["xyxy"]])[0, 0]) for f in firm
+                    ) >= self.merge_iou:
+                        covered += 1
+                        continue
+                    keep.append(det)
+                dets = keep
         dets.sort(key=lambda d: (-d["agree"], -d["conf"]))
         del dets[self.max_det:]
         ms = (time.perf_counter() - t0) * 1000
@@ -1469,9 +1617,11 @@ class RiverRunner:
                 "prompt_dropped": dropped, "merge_classes": dict(self.merge_classes),
                 "decoys": list(self.decoys), "decoy_dropped": decoyed,
                 "merged_dets": folded,
+                "hypothesis": sorted(self.hypothesis),
+                "hypothesis_covered": covered,
                 "prompt": "text"}, dets
 
-RUNNERS = {"yoloe": YoloeRunner, "river": RiverRunner,
+RUNNERS = {"yoloe": YoloeRunner, "river": RiverRunner, "river_open": RiverRunner,
            "unidepth": UniDepthRunner, "moge2_aerial": MogeAerialRunner}
 
 

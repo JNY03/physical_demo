@@ -35,6 +35,9 @@ class FakeArm:
             self.boom = False
         self.dets = [dict(d) for d in spec.get("dets") or []]
         self.name = spec.get("name") or spec["kind"]
+        self.unconfirmed = spec.get("unconfirmed_class")   # 프리 프롬프트 arm 처럼 가설 칸을 가진다
+        self.free_vocab = bool(spec.get("free_vocab"))     # 어휘가 가중치 안에 있는 arm
+        self.shared = dict(shared)
 
     def __call__(self, bgr):
         if self.boom:
@@ -256,9 +259,21 @@ def test_the_shipped_config_tunes_nothing_on_the_labelled_data():
     cfg_path = Path(__file__).with_name("vision_config.yaml")
     data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     river = data["models"]["river"]
-    assert [a["kind"] for a in river["arms"]] == ["yoloe"]
-    assert len(river["classes"]) == 5
+    # arm 둘 — 이름을 대는 텍스트 arm 과 자리를 내는 프리 프롬프트 arm 이다
+    assert [a["kind"] for a in river["arms"]] == ["yoloe", "yoloe_free"]
+    free = river["arms"][1]
+    hypothesis = free["unconfirmed_class"]
+    classes = [c for c in river["classes"] if c != hypothesis]
+    assert len(classes) == 5
     assert set(river["prompts"]) == set(river["classes"])
+    # **가설 칸에는 텍스트 문구가 없다**(null). 있으면 그 낱말이 어휘 전체 argmax 에서
+    # 표를 가져가 진짜 물체를 지운다
+    assert river["prompts"][hypothesis] is None
+    assert all(river["prompts"][c] for c in classes)
+    # 재질을 말하는 이름만 우리 클래스로 올린다 — 모양 이름은 가설로 남는다
+    mapped = {n for names in free["vocab_map"].values() for n in names}
+    assert not (mapped & {"box", "crate", "breadbox", "book", "storage box"})
+    assert set(free["vocab_map"]) <= set(classes)
     assert set(river["class_conf"]) <= set(river["classes"])
     floor = river["arm_conf"]
     for name, value in list(river["class_conf"].items()) + list((river["prompt_conf"] or {}).items()):
@@ -266,12 +281,18 @@ def test_the_shipped_config_tunes_nothing_on_the_labelled_data():
     if len(river["arms"]) == 1:
         assert river["min_arms"] == 1 and river["min_prompts"] == 1
     vi.check_overlay_cfg(data)          # overlay 설정이 river 를 받아들인다
-    # 튜닝된 임계값이 없다 — 라벨이 전부 test 라 고를 자료가 없다
-    assert not river["class_conf"] and not river["prompt_conf"]
+    # 다섯 클래스에는 튜닝된 임계값이 없다 — 라벨이 전부 test 라 고를 자료가 없다.
+    # 가설 칸의 0.25 는 자료에서 고른 값이 아니라 검수 대기 줄의 길이를 정하는 운영값이다
+    assert set(river["class_conf"]) == {hypothesis}
+    assert not river["prompt_conf"]
     # 설정이 실제로 서는지 — 가짜 arm 으로 바꿔 끼워 세운다 (가중치 없이)
-    spun = vi.RiverRunner(dict(river, arms=[{"kind": "fake", "name": "yoloe", "dets": []}]), "cpu")
+    spun = vi.RiverRunner(dict(river, arms=[
+        {"kind": "fake", "name": "yoloe", "dets": []},
+        {"kind": "fake", "name": "yoloe_free", "dets": [], "unconfirmed_class": hypothesis},
+    ]), "cpu")
     assert spun.min_prompts == 1
-    assert {spun.threshold(c) for c in river["classes"]} == {river["conf"]}
+    assert spun.hypothesis == {hypothesis}
+    assert {spun.threshold(c) for c in classes} == {river["conf"]}
     # 트래킹은 켜져 있되 **거르지 않아야** 한다 — 거르면 재현율이 0.640 → 0.024 다
     river_track = data["stabilize"]["river"]
     assert river_track["enabled"] is True
@@ -782,3 +803,120 @@ def test_label_policy_keys_are_not_rejected_by_a_vendor_tracker():
     설정이 아예 안 선다 — 실제로 전체 추론이 그렇게 멈췄다."""
     tr = _vendor(label_policy="hyst-2", label_margin=0.6, label_max_missed=5)
     assert tr.backend == "bytetrack"
+
+
+# --- 프리 프롬프트 arm: 자리는 믿고 이름은 가설로 둔다 (2026-11-12) ----------
+
+def test_a_free_name_maps_to_our_class_and_the_rest_stay_unconfirmed():
+    """지도에 있는 이름만 우리 클래스가 된다. 나머지는 **버리지 않고** 가설로 남는다
+    — 1 위를 고르지 않는 것이 요점이다(AI-S-04)."""
+    m = vi._ArmYoloeFree._read_map(
+        {"wooden_box": ["plywood", "WOOD"], "water_jug": ["jug"]},
+        {"wooden_box", "water_jug", "unconfirmed"})
+    assert m == {"plywood": "wooden_box", "wood": "wooden_box", "jug": "water_jug"}
+
+
+def test_one_free_name_cannot_point_at_two_classes():
+    """한 이름이 두 클래스를 가리키면 어느 쪽도 믿을 수 없다."""
+    with pytest.raises(SystemExit) as e:
+        vi._ArmYoloeFree._read_map({"wooden_box": ["crate"], "styrofoam_box": ["crate"]},
+                                   {"wooden_box", "styrofoam_box"})
+    assert "crate" in str(e.value)
+
+
+def test_a_vocab_map_class_must_be_declared():
+    with pytest.raises(SystemExit) as e:
+        vi._ArmYoloeFree._read_map({"metal_drum": ["barrel"]}, {"wooden_box"})
+    assert "metal_drum" in str(e.value)
+
+
+def test_an_empty_vocab_map_is_refused():
+    """지도 없이 세우면 **모든 검출이 unconfirmed** 가 되어 아무것도 못 가린다."""
+    with pytest.raises(SystemExit):
+        vi._ArmYoloeFree._read_map(None, {"wooden_box"})
+
+
+def test_no_prompts_means_the_class_name_is_the_prompt():
+    """프리 프롬프트만 쓰는 구성은 텍스트 문구가 없다. 적지 않으면 클래스 이름이
+    문구다 — 빈 dict 는 그대로 거절한다(비워 둔 것과 안 적은 것은 다른 뜻이다)."""
+    prompts, owners = vi._expand_vocab(["wooden_box", "unconfirmed"], None)
+    assert prompts == ["wooden_box", "unconfirmed"]
+    assert owners == ["wooden_box", "unconfirmed"]
+    with pytest.raises(SystemExit):
+        vi._expand_vocab(["wooden_box"], {})
+
+
+# --- 가설 칸: 자리는 내고 이름은 고르지 않는다 (2026-11-12) ------------------
+
+HYP_CLASSES = CLASSES + ["unconfirmed"]
+HYP_PROMPTS = {c: [p] for c, p in zip(CLASSES, PROMPTS)}
+HYP_PROMPTS["unconfirmed"] = None       # 텍스트 문구를 두지 않는다
+
+
+def test_a_class_can_say_it_has_no_text_prompt():
+    """가설 칸은 어휘에 **들어가지 않는다.** 들어가면 그 낱말이 어휘 전체 argmax 에서
+    표를 가져가 진짜 물체를 지운다 — 미끼 문구가 현장에서 진 자리가 그것이다.
+    빈 목록은 그대로 거절한다(비워 둔 실수와 안 두겠다는 선언은 다른 뜻이다)."""
+    prompts, owners = vi._expand_vocab(HYP_CLASSES, HYP_PROMPTS)
+    assert "unconfirmed" not in prompts and "unconfirmed" not in owners
+    assert len(prompts) == len(CLASSES)
+    with pytest.raises(SystemExit) as e:
+        vi._expand_vocab(HYP_CLASSES, dict(HYP_PROMPTS, unconfirmed=[]))
+    assert "unconfirmed" in str(e.value)
+
+
+def test_a_hypothesis_class_cannot_also_carry_a_text_prompt():
+    """문구가 있으면 텍스트 arm 도 그 이름을 낸다 — 그러면 '이름을 고르지 않았다' 가
+    거짓이 되고, 어느 쪽이 말한 것인지 알 수 없는 칸이 생긴다."""
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([arm("text", []),
+                            arm("free", [], unconfirmed_class="water_jug")],
+                           classes=HYP_CLASSES, prompts=HYP_PROMPTS, min_arms=1), "cpu")
+    assert "water_jug" in str(e.value)
+
+
+def test_a_hypothesis_is_dropped_where_a_named_box_already_sits():
+    """클래스가 다른 겹침은 병합되지 않으므로(캔과 부탄을 한 칸에 합치지 않기 위한
+    규칙이다) 이 걸음이 없으면 이름이 붙은 물체마다 가설이 하나씩 더 붙어 **한 물체가
+    둘로 세어진다.**"""
+    meta, dets = vi.RiverRunner(
+        cfg([arm("text", [det("water_jug", 0.6, BOX)]),
+             arm("free", [det("unconfirmed", 0.9, BOX)], unconfirmed_class="unconfirmed")],
+            classes=HYP_CLASSES, prompts=HYP_PROMPTS, min_arms=1), "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["water_jug"]
+    assert meta["hypothesis"] == ["unconfirmed"] and meta["hypothesis_covered"] == 1
+
+
+def test_a_hypothesis_survives_where_nothing_is_named():
+    """이름을 아무도 대지 못한 자리가 **남아야** 검수·학습 후보가 생긴다 (AI-S-04, AI-L-01)."""
+    meta, dets = vi.RiverRunner(
+        cfg([arm("text", [det("water_jug", 0.6, BOX)]),
+             arm("free", [det("unconfirmed", 0.9, (60.0, 60.0, 70.0, 70.0))],
+                 unconfirmed_class="unconfirmed")],
+            classes=HYP_CLASSES, prompts=HYP_PROMPTS, min_arms=1), "cpu")(IMG)
+    assert sorted(d["name"] for d in dets) == ["unconfirmed", "water_jug"]
+    assert meta["hypothesis_covered"] == 0
+
+
+def test_an_arm_is_told_the_declared_classes_not_just_the_prompted_ones():
+    """arm 이 이름을 검사할 때 보는 것은 **classes** 다. `owners`(문구를 가진 클래스)
+    만 주면 문구 없는 가설 칸이 거기 없어서 arm 이 자기 설정을 거절한다 — 가짜 arm 은
+    그 검사를 하지 않으므로 시험이 통과했고, **실제 가중치로 한 번 돌려서** 드러났다."""
+    r = vi.RiverRunner(cfg([arm("free", [], unconfirmed_class="unconfirmed")],
+                           classes=HYP_CLASSES, prompts=HYP_PROMPTS, min_arms=1), "cpu")
+    told = r.arms[0][1].shared["classes"]
+    assert "unconfirmed" in told and set(told) == set(HYP_CLASSES)
+
+
+def test_the_free_only_profile_also_stands():
+    """`river_open` 은 텍스트 arm 이 없다 — 문구 자리가 placeholder 라 가설 칸이
+    거기 들어 있어도 해가 없다. 가설 검사를 구성과 무관하게 걸면 이 설정이 안 선다."""
+    import yaml
+    data = yaml.safe_load(Path(__file__).with_name("vision_config.yaml").read_text(encoding="utf-8"))
+    conf = data["models"]["river_open"]
+    assert "prompts" not in conf                     # 적지 않는다 — 프리 어휘를 쓴다
+    free = conf["arms"][0]
+    spun = vi.RiverRunner(dict(conf, arms=[
+        {"kind": "fake", "name": "free", "dets": [], "free_vocab": True,
+         "unconfirmed_class": free["unconfirmed_class"]}]), "cpu")
+    assert spun.hypothesis == {free["unconfirmed_class"]}
