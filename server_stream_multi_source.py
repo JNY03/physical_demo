@@ -10,6 +10,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
   드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
   /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
+2026-11-12 · 모듈 카메라 파이 둘 pi11(10008) · pi12(10009). CSI 라 /dev/video* 가 베이어 RAW 이고
+  cv2.VideoCapture 로 못 받는다 — 파이 쪽 rpicam-vid 가 MJPEG 로 내므로 robot_video_loop 를 그대로 쓴다.
+  브로커가 없어 STATE_SOURCES 에 넣지 않는다(영상만). picam_work/README.md.
 2026-11-12 · 새 로봇 a2 (Unitree A2, 포트 10007). a2-bridge 가 로봇과 같은 모양(:8090/stream/1 MJPEG · MQTT 1883)으로
   내므로 robot_video_loop · start_mqtt 를 그대로 쓴다. 프레임에 Frame-Meta 는 아직 없다(칸 머리 그대로 저장),
   상태 position 은 GPS 가 아니라 실내 x·y(m)다.
@@ -40,6 +43,13 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   10007 a2      영상: pi10 :8090/stream/1 (a2-bridge, MJPEG 1920x1080 약 10fps)   상태: pi10 MQTT :1883 전체 구독
                   토픽 zoneA/robot/a2-001/{status,state,heartbeat} (JSON) · terminal/a2-001/uplink (protobuf → base64 로 저장)
                   스냅샷 한 장은 :8090/snapshot/1. 같은 브로커의 9001 은 브라우저용(ws://…:9001/mqtt) — 영상은 MQTT 로 안 온다
+  10008 pi11    영상: pi11 :8090/stream/1 을 계속 읽는다      상태: 없음 (pi11 에 브로커가 없다)
+                  pi11 의 **모듈 카메라**(CSI imx708, Camera Module 3)다. pi6 와 달리 UVC 가
+                  아니라 /dev/video* 가 베이어 RAW 라 cv2.VideoCapture 로는 못 받는다 —
+                  파이 쪽에서 rpicam-vid 가 MJPEG 로 내고 모양만 로봇과 같다.
+                  picam_work/README.md 를 본다
+  10009 pi12    영상: pi12 :8090/stream/1 을 계속 읽는다      상태: 없음 (pi12 에 브로커가 없다)
+                  pi11 과 같은 기기·같은 카메라다(Pi 3 Model B · imx708). 같은 picam_mjpeg.py 를 쓴다.
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
@@ -193,13 +203,15 @@ except ImportError:
 
 # ---------------------------------------------------------------- 고정값
 SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
-           "realsense": 10005, "cam360_slice": 10006, "a2": 10007}
+           "realsense": 10005, "cam360_slice": 10006, "a2": 10007,
+           "pi11": 10008, "pi12": 10009}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "robot1": "robot1", "robot2": "robot2",
            "realsense": "realsense", "pi6": "realsense", "rs": "realsense",
            "d455": "realsense",
            "cam360_slice": "cam360_slice", "slice": "cam360_slice",
-           "a2": "a2", "unitree_a2": "a2"}
+           "a2": "a2", "unitree_a2": "a2",
+           "pi11": "pi11", "picam": "pi11", "pi12": "pi12"}
 #: MQTT 로 상태를 받는 소스. 여기 없는 소스는 영상만 받는다 — 브로커가 없는 기기에
 #: 붙으러 가면 끝없이 재접속만 하고 로그가 그 경고로 덮인다.
 STATE_SOURCES = {"drone", "robot1", "robot2", "a2"}
@@ -217,7 +229,9 @@ def load_default_hosts():
              "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
              "drone": None,          # pi3 (drone-agent 8890 · mosquitto 1883)
              "realsense": None,      # pi6 (realsense_mjpeg.py 8090 · 브로커 없음)
-             "a2": None}             # pi10 (a2-bridge 카메라 8090 · mosquitto 1883/9001)
+             "a2": None,             # pi10 (a2-bridge 카메라 8090 · mosquitto 1883/9001)
+             "pi11": None,           # pi11 (picam_mjpeg.py 8090 · 브로커 없음)
+             "pi12": None}           # pi12 (picam_mjpeg.py 8090 · 브로커 없음)
     if HOSTS_FILE.is_file():
         try:
             data = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))
@@ -1492,10 +1506,11 @@ def main():
         description="로봇·드론·360 카메라 데이터를 받아 Redis Stream 으로 흘리고 전부 파일로 저장한다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · robot2 10004 · realsense 10005 · "
-               "cam360_slice 10006 · a2 10007\n"
+               "cam360_slice 10006 · a2 10007 · pi11 10008 · pi12 10009\n"
                "자세한 설명은 파일 맨 위 주석.")
     ap.add_argument("--on", nargs="+", metavar="소스",
-                    help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice a2 (안 주면 전부)")
+                    help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice a2 "
+                         "pi11 pi12 (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
                     help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
@@ -1506,6 +1521,14 @@ def main():
                     help="리얼센스 MJPEG 경로 번호 (기본 1 — pi6 쪽은 번호를 무시한다)")
     ap.add_argument("--a2", default=DEFAULT_HOST["a2"], metavar="주소",
                     help="새 로봇 a2(Unitree A2, a2-bridge) 주소. 기본 hosts.local.json / PD_HOST_A2 값")
+    ap.add_argument("--pi11", default=DEFAULT_HOST["pi11"], metavar="주소",
+                    help="pi11 모듈 카메라 주소 (없으면 hosts.local.json / PD_HOST_PI11)")
+    ap.add_argument("--pi11-cam", type=int, default=1, metavar="번호",
+                    help="pi11 MJPEG 경로 번호 (기본 1 — pi11 쪽은 번호를 무시한다)")
+    ap.add_argument("--pi12", default=DEFAULT_HOST["pi12"], metavar="주소",
+                    help="pi12 모듈 카메라 주소 (없으면 hosts.local.json / PD_HOST_PI12)")
+    ap.add_argument("--pi12-cam", type=int, default=1, metavar="번호",
+                    help="pi12 MJPEG 경로 번호 (기본 1 — pi12 쪽은 번호를 무시한다)")
     ap.add_argument("--drone", default=DEFAULT_HOST["drone"], metavar="주소",
                     help="드론 파이(pi3) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot-cam", type=int, default=1, choices=range(1, 6), metavar="번호",
@@ -1633,6 +1656,11 @@ def main():
                 # a2-bridge 카메라는 /stream/1 하나뿐이다 (GO1 의 --robot-cam 1~5 와 무관)
                 video = "http://%s:%d/stream/1" % (host, ROBOT_VIDEO_PORT)
                 pulls.append((robot_video_loop, (s, host, 1), s, host))
+            elif s.name in ("pi11", "pi12"):
+                # 모듈 카메라 파이의 picam_mjpeg.py 도 같은 모양으로 낸다 — 여기도 풀러를 만들지 않는다
+                cam = args.pi11_cam if s.name == "pi11" else args.pi12_cam
+                video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, cam)
+                pulls.append((robot_video_loop, (s, host, cam), s, host))
             else:
                 video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, args.robot_cam)
                 pulls.append((robot_video_loop, (s, host, args.robot_cam), s, host))

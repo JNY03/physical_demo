@@ -3,5 +3,7 @@
   "robot2": "<robot2 pi 주소>",
   "drone": "<drone pi 주소>",
   "realsense": "<pi6 주소 — realsense_mjpeg.py 가 도는 기기>",
-  "a2": "<pi10 주소 — a2-bridge 가 도는 기기>"
+  "a2": "<pi10 주소 — a2-bridge 가 도는 기기>",
+  "pi11": "<pi11 주소 — picam_mjpeg.py 가 도는 모듈 카메라 파이>",
+  "pi12": "<pi12 주소 — pi11 과 같은 모듈 카메라 파이>"
 }

@@ -1,0 +1,20 @@
+# 라즈베리파이 모듈 카메라(CSI imx708)를 MJPEG 으로 내는 서비스. pi11 · pi12 가 같은 것을 쓴다.
+# 설치(파이에서):
+#   sudo cp picam-mjpeg.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now picam-mjpeg
+# 설치하지 않으면 재부팅 때 스트림이 사라진다 — 그때는 아래 ExecStart 를 손으로 띄운다.
+[Unit]
+Description=Raspberry Pi module camera (imx708) -> MJPEG (data_stream picam source)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=physical
+# 인자: 포트 카메라번호 너비 높이 fps. Pi 3 Model B 에서 1280x720@10 이 안정적이었다.
+# 카메라가 거꾸로 달렸으면 picam_mjpeg.py 의 _cmd() 에 --rotation 180 을 더한다.
+ExecStart=/usr/bin/python3 /home/physical/picam_mjpeg.py 8090 0 1280 720 10
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
