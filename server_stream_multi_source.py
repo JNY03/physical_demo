@@ -10,6 +10,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
   드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
   /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
+2026-11-12 · 새 로봇 a2 (Unitree A2, 포트 10007). a2-bridge 가 로봇과 같은 모양(:8090/stream/1 MJPEG · MQTT 1883)으로
+  내므로 robot_video_loop · start_mqtt 를 그대로 쓴다. 프레임에 Frame-Meta 는 아직 없다(칸 머리 그대로 저장),
+  상태 position 은 GPS 가 아니라 실내 x·y(m)다.
 2026-11-11 · 360 슬라이스 소스 cam360_slice (포트 10006, 받기만). e2p/slice360_live.py 가 넣는다.
   PUSH_ONLY(가져오지 않는 소스)를 두고, 10초 보고의 상태 칸은 상태를 받는 소스(REPORT_STATE)만 보인다
   — cam360 도 POST /state 로 상태를 받으므로 이제 상태 칸이 보인다.
@@ -34,6 +37,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   10006 cam360_slice 영상: 같은 기기의 e2p/slice360_live.py 가 POST 로 보낸다 (/upload)  상태: 없음
                   Redis camera_stream:cam360 의 파노라마를 정한 각도(u · v)로 잘라 90도 원근 사진으로 넣는다.
                   파노라마 원본(10001)은 손대지 않는다. 각도 고르기는 e2p/sweep_latest.py (2026-11-11)
+  10007 a2      영상: pi10 :8090/stream/1 (a2-bridge, MJPEG 1920x1080 약 10fps)   상태: pi10 MQTT :1883 전체 구독
+                  토픽 zoneA/robot/a2-001/{status,state,heartbeat} (JSON) · terminal/a2-001/uplink (protobuf → base64 로 저장)
+                  스냅샷 한 장은 :8090/snapshot/1. 같은 브로커의 9001 은 브라우저용(ws://…:9001/mqtt) — 영상은 MQTT 로 안 온다
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
@@ -154,7 +160,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
 
 주소 설정: 기기 주소(테일넷 IP)는 코드에 두지 않는다. hosts.example.json 을 hosts.local.json 으로
   복사해 채우거나 환경변수 PD_HOST_ROBOT1 / PD_HOST_ROBOT2 / PD_HOST_DRONE /
-  PD_HOST_REALSENSE 를 쓴다.
+  PD_HOST_REALSENSE / PD_HOST_A2 를 쓴다.
   hosts.local.json 은 .gitignore 대상 — 공개 저장소에 올리지 않는다.
 """
 import argparse
@@ -187,15 +193,16 @@ except ImportError:
 
 # ---------------------------------------------------------------- 고정값
 SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
-           "realsense": 10005, "cam360_slice": 10006}
+           "realsense": 10005, "cam360_slice": 10006, "a2": 10007}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "robot1": "robot1", "robot2": "robot2",
            "realsense": "realsense", "pi6": "realsense", "rs": "realsense",
            "d455": "realsense",
-           "cam360_slice": "cam360_slice", "slice": "cam360_slice"}
+           "cam360_slice": "cam360_slice", "slice": "cam360_slice",
+           "a2": "a2", "unitree_a2": "a2"}
 #: MQTT 로 상태를 받는 소스. 여기 없는 소스는 영상만 받는다 — 브로커가 없는 기기에
 #: 붙으러 가면 끝없이 재접속만 하고 로그가 그 경고로 덮인다.
-STATE_SOURCES = {"drone", "robot1", "robot2"}
+STATE_SOURCES = {"drone", "robot1", "robot2", "a2"}
 #: 가져오지 않고 POST 로 받기만 하는 소스 (기기 주소 · 가져오기 스레드 없음).
 #: 상태가 있는지와는 상관없다 — cam360 은 받기만 하지만 POST /state 로 상태도 받는다.
 PUSH_ONLY = ("cam360", "cam360_slice")
@@ -209,7 +216,8 @@ def load_default_hosts():
     hosts = {"robot1": None,         # pi7 (go1-camview 8090 · mosquitto 1883)
              "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
              "drone": None,          # pi3 (drone-agent 8890 · mosquitto 1883)
-             "realsense": None}      # pi6 (realsense_mjpeg.py 8090 · 브로커 없음)
+             "realsense": None,      # pi6 (realsense_mjpeg.py 8090 · 브로커 없음)
+             "a2": None}             # pi10 (a2-bridge 카메라 8090 · mosquitto 1883/9001)
     if HOSTS_FILE.is_file():
         try:
             data = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))
@@ -1484,10 +1492,10 @@ def main():
         description="로봇·드론·360 카메라 데이터를 받아 Redis Stream 으로 흘리고 전부 파일로 저장한다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · robot2 10004 · realsense 10005 · "
-               "cam360_slice 10006\n"
+               "cam360_slice 10006 · a2 10007\n"
                "자세한 설명은 파일 맨 위 주석.")
     ap.add_argument("--on", nargs="+", metavar="소스",
-                    help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice (안 주면 전부)")
+                    help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice a2 (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
                     help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
@@ -1496,6 +1504,8 @@ def main():
                     help="pi6 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
     ap.add_argument("--realsense-cam", type=int, default=1, metavar="번호",
                     help="리얼센스 MJPEG 경로 번호 (기본 1 — pi6 쪽은 번호를 무시한다)")
+    ap.add_argument("--a2", default=DEFAULT_HOST["a2"], metavar="주소",
+                    help="새 로봇 a2(Unitree A2, a2-bridge) 주소. 기본 hosts.local.json / PD_HOST_A2 값")
     ap.add_argument("--drone", default=DEFAULT_HOST["drone"], metavar="주소",
                     help="드론 파이(pi3) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot-cam", type=int, default=1, choices=range(1, 6), metavar="번호",
@@ -1619,6 +1629,10 @@ def main():
                 cam = args.realsense_cam
                 video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, cam)
                 pulls.append((robot_video_loop, (s, host, cam), s, host))
+            elif s.name == "a2":
+                # a2-bridge 카메라는 /stream/1 하나뿐이다 (GO1 의 --robot-cam 1~5 와 무관)
+                video = "http://%s:%d/stream/1" % (host, ROBOT_VIDEO_PORT)
+                pulls.append((robot_video_loop, (s, host, 1), s, host))
             else:
                 video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, args.robot_cam)
                 pulls.append((robot_video_loop, (s, host, args.robot_cam), s, host))

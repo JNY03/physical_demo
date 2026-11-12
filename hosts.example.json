@@ -2,5 +2,6 @@
   "robot1": "<robot1 pi 주소>",
   "robot2": "<robot2 pi 주소>",
   "drone": "<drone pi 주소>",
-  "realsense": "<pi6 주소 — realsense_mjpeg.py 가 도는 기기>"
+  "realsense": "<pi6 주소 — realsense_mjpeg.py 가 도는 기기>",
+  "a2": "<pi10 주소 — a2-bridge 가 도는 기기>"
 }

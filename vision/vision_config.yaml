@@ -63,6 +63,8 @@ devices:
   drone:  {fov_x_deg: meta}
   robot1: {fov_x_deg: null}
   robot2: {fov_x_deg: null}
+  # Unitree A2 (DS 10007). 1920x1080, 가로 시야 모름 — 확인 전까지 null. defaults.devices 에는 아직 안 넣음
+  a2:     {fov_x_deg: null}
 
 models:
   # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──

@@ -124,7 +124,8 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
-DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice")   # cam360_slice 2026-11-11 (DS 10006)
+DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",   # cam360_slice 2026-11-11 (DS 10006)
+           "a2")                                                                  # a2 2026-11-12 (DS 10007, Unitree A2)
 MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
                   "pi6": "realsense", "rs": "realsense", "d455": "realsense",
