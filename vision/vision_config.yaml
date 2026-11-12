@@ -65,6 +65,11 @@ devices:
   robot2: {fov_x_deg: null}
   # Unitree A2 (DS 10007). 1920x1080, 가로 시야 모름 — 확인 전까지 null. defaults.devices 에는 아직 안 넣음
   a2:     {fov_x_deg: null}
+  # 모듈 카메라 파이 (DS 10008·10009). imx708 1280x720 — **제원을 적지 않는다.** 렌즈가
+  # 표준인지 wide 인지에 따라 가로 시야가 66도와 102도로 갈리고, 둘 다 선언이지 관측이
+  # 아니다. 보정판으로 재서 넣는다 (AI-S-08 — 사전정보와 측정값을 구분한다)
+  pi11:   {fov_x_deg: null}
+  pi12:   {fov_x_deg: null}
 
 models:
   # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
