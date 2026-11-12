@@ -63,7 +63,7 @@ Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저�
 ### 2) 데이터 스트림 — `server_stream_multi_source.py` (터미널 1)
 
 ```bash
-python server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2)
+python server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2 · realsense · cam360_slice)
 python server_stream_multi_source.py --on drone         # 드론만
 python server_stream_multi_source.py --on drone robot1  # 골라 켜기
 python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 지정 (기본은 hosts.local.json)
@@ -75,6 +75,8 @@ python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 
 | 10002 | drone | pi3 `:8890/api/frame?cam=0` + MQTT `:1883` |
 | 10003 | robot1 | pi7 `:8090/stream/1` + MQTT `:1883` |
 | 10004 | robot2 | pi1 `:8090/stream/1` + MQTT `:1883` |
+| 10005 | realsense | pi6 `:8090/stream/1` (컬러만, 상태 없음) |
+| 10006 | cam360_slice | 같은 노트북의 `e2p/slice360_live.py` 가 cam360 파노라마를 잘라 올림 (`/upload`, 상태 없음) — 5) |
 
 - 10초마다 소스별 수신 속도(장/초, 건/초)가 찍힌다. 종료는 `Ctrl+C`.
 - 브라우저 확인: `http://localhost:10002/` (영상 + 비전), `/stream` (원본), `/health` (상태 JSON).
@@ -115,6 +117,38 @@ python stream_to_server.py --fps 3                    # 기본 5fps → 3fps (�
 - 카메라 IP 기본값은 `192.168.100.124` 이고, 다르면 `--ip` 로 바꾼다. 종료는 `Ctrl+C`.
 - GPS · 배터리 · 온도를 1초마다 `/upload_pano` 와 같은 서버의 `/state` 로 보낸다 (`--telemetry 2` 로 주기 변경, `0` 이면 끔).
   7866 pano_receiver 처럼 `/state` 가 없는 곳은 한 번 알리고 건너뛴다. 실내에서는 위치가 안 잡혀 `gps.lat` 이 `null` 이다.
+
+### 5) 360 슬라이스 — `e2p/sweep_latest.py` · `e2p/slice360_live.py` (데이터 스트림 노트북, 선택)
+
+360 파노라마(10001)를 정한 방향의 90도 원근 사진으로 잘라 **포트 10006(`cam360_slice`)** 으로 내놓는다.
+파노라마 원본은 그대로 남는다. 자르기는 데이터 스트림 밖의 따로 도는 파일이 하므로, 이 파일이 죽어도 받기·저장은 계속된다.
+처음 한 번 `pip install py360convert` (requirements.txt 에 있다).
+
+```bash
+# ⓪ 데이터 스트림을 띄우기 전에 u 고르기 (바탕화면 「e2p sweep」 바로가기와 같다)
+python e2p/sweep_camera.py                   # 360 카메라 지금 화면 한 장 → 원본 + u 24장(v -30) 한눈 그림을 사진 앱으로 연다
+                                             # 「360 카메라 실행」이 카메라를 쥐고 있으면 데이터 스트림의 10초 안 최신 장을 쓴다
+
+# ① 각도 고르기: 지금 들어오는 파노라마를 15도 간격 24장으로 잘라 본다 (2)·4) 가 돌고 있을 때)
+python e2p/sweep_latest.py --v 0 -15 -30     # → stream_data/cam360/<실행>/sweep/…/_sheet_v*.jpg 부터 본다
+python e2p/sweep_latest.py --from disk       # 데이터 스트림이 꺼져 있으면 마지막 저장본으로
+
+# ② 실시간 슬라이스 (터미널 하나를 계속 쓴다)
+python e2p/slice360_live.py --u 150 --v -35  # u: 0 = 파노라마 가운데, + 오른쪽 · v: 0 = 수평, - 아래
+python e2p/slice360_live.py --set 165 -35    # 다른 터미널에서: 돌고 있는 것의 각도 바꾸기 (다음 장부터)
+python e2p/slice360_live.py --show           # 지금 각도 (e2p/slice_angle.json)
+
+# ③ 슬라이스에 박스 검출 (선택)
+python vision/vision_infer.py --devices cam360_slice drone
+```
+
+- `--on` 으로 소스를 고를 때는 `cam360_slice`(또는 `slice`)를 같이 넣는다. 빠지면 slice360_live 에 「올리기 실패 … 10006」이 뜬다.
+- 확인: 데이터 스트림 10초 보고의 `cam360_slice 영상 N장/초` 가 cam360 과 비슷하면 된다. 브라우저 `http://localhost:10006/`.
+- 기본 크기 960×960 (장당 약 130KB — 파노라마 약 1MB 의 1/8 이라 가시화 망 부담이 적다). `--width` 로 바꾼다.
+- 장마다 meta 의 `slice` 칸에 어느 파노라마(`source_n`)를 어떤 각도(`u_deg` · `v_deg` · `fov_deg`)로 잘랐는지 남는다.
+  `timestamp` 는 원본 파노라마를 찍은 시각 그대로다.
+- 가시화 연결 관리: 「카메라」에 `http://<이 노트북>:10006/stream`, 「객체 탐지 추론 스트림」 포트에 `10006` (직접 입력).
+  다른 기기에서 공유기 IP 로 들어오면 portproxy · 방화벽에 10006 도 연다.
 
 ---
 

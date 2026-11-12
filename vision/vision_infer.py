@@ -4,6 +4,8 @@
 vision_infer.py — 스트림 프레임에 비전 모델 추론 (YOLOE · UniDepth · MoGe2-Aerial)
 ================================================================================
 2026-10-01
+2026-11-11 · 기기에 cam360_slice(DS 포트 10006 — e2p/slice360_live.py 가 자른 360 슬라이스)를 더했다.
+  슬라이스는 90도 원근 사진이라 vision_config.yaml devices 의 cam360_slice: {fov_x_deg: 90.0} 을 depth 모델이 쓴다.
 2026-10-14 · 통합데이터규약 v2 (DS-06) — 결과를 파일·Redis 로 낼 때만 v2 비전 결과(규약 §3-6)로 바꾼다(v2_record).
   안쪽 계산(오버레이 · 거리 결합 · 지리 계산)은 옛 칸 이름(cls · name · conf · xyxy · image_wh · frame · source)을 그대로 쓴다.
   그 장의 기록(frames.jsonl 한 줄 = Redis header, sender 포함)을 ModelOutput.write(…, header=) 로 넘겨
@@ -122,10 +124,11 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
-DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense")
+DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice")   # cam360_slice 2026-11-11 (DS 10006)
 MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
-                  "pi6": "realsense", "rs": "realsense", "d455": "realsense"}
+                  "pi6": "realsense", "rs": "realsense", "d455": "realsense",
+                  "slice": "cam360_slice"}
 MODEL_ALIASES = {"yoloe-pf": "yoloe", "yoloe_pf": "yoloe",
                  "moge": "moge2_aerial", "moge2": "moge2_aerial", "moge2-aerial": "moge2_aerial",
                  "moge2aerial": "moge2_aerial",

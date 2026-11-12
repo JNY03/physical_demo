@@ -10,6 +10,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
   드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
   /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
+2026-11-11 · 360 슬라이스 소스 cam360_slice (포트 10006, 받기만). e2p/slice360_live.py 가 넣는다.
+  PUSH_ONLY(가져오지 않는 소스)를 두고, 10초 보고의 상태 칸은 상태를 받는 소스(REPORT_STATE)만 보인다
+  — cam360 도 POST /state 로 상태를 받으므로 이제 상태 칸이 보인다.
 
 하는 일
   소스(로봇 2대 · 드론 · 360 카메라)가 주는 영상과 상태를 받아서
@@ -28,6 +31,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
                   깊이도 UVC 로는 나온다(/dev/video0 의 Z16). 다만 단위·내부/외부 파라미터·
                   두 스트림 짝맞춤이 스트림에 실려 오지 않아 librealsense 가 있어야 쓸 수 있고,
                   16비트라 이 JPEG 경로로는 못 나른다 — realsense_work/README.md 를 본다
+  10006 cam360_slice 영상: 같은 기기의 e2p/slice360_live.py 가 POST 로 보낸다 (/upload)  상태: 없음
+                  Redis camera_stream:cam360 의 파노라마를 정한 각도(u · v)로 잘라 90도 원근 사진으로 넣는다.
+                  파노라마 원본(10001)은 손대지 않는다. 각도 고르기는 e2p/sweep_latest.py (2026-11-11)
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
@@ -181,14 +187,20 @@ except ImportError:
 
 # ---------------------------------------------------------------- 고정값
 SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
-           "realsense": 10005}
+           "realsense": 10005, "cam360_slice": 10006}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "robot1": "robot1", "robot2": "robot2",
            "realsense": "realsense", "pi6": "realsense", "rs": "realsense",
-           "d455": "realsense"}
+           "d455": "realsense",
+           "cam360_slice": "cam360_slice", "slice": "cam360_slice"}
 #: MQTT 로 상태를 받는 소스. 여기 없는 소스는 영상만 받는다 — 브로커가 없는 기기에
 #: 붙으러 가면 끝없이 재접속만 하고 로그가 그 경고로 덮인다.
 STATE_SOURCES = {"drone", "robot1", "robot2"}
+#: 가져오지 않고 POST 로 받기만 하는 소스 (기기 주소 · 가져오기 스레드 없음).
+#: 상태가 있는지와는 상관없다 — cam360 은 받기만 하지만 POST /state 로 상태도 받는다.
+PUSH_ONLY = ("cam360", "cam360_slice")
+#: 10초 보고에 상태 칸을 보이는 소스 (MQTT 로 받는 것 + POST /state 로 받는 cam360)
+REPORT_STATE = STATE_SOURCES | {"cam360"}
 HOSTS_FILE = Path(__file__).resolve().parent / "hosts.local.json"   # 실제 주소는 여기에 (깃에 올리지 않음)
 
 
@@ -1062,7 +1074,7 @@ def make_handler(src, vision=None):
                     sender, image = form_to_frame(split_multipart(body, boundary))
                     if image is None:
                         return self._json(400, {"status": "error", "detail": "파일 칸이 없음"})
-                    key = "video" if src.name == "cam360" else "upload"   # 로봇·드론 포트는 가져오기 상태를 덮지 않는다
+                    key = "video" if src.name in PUSH_ONLY else "upload"   # 가져오는 포트는 가져오기 상태를 덮지 않는다
                     text = "받는 중 (%s ← %s)" % (path, self.client_address[0])
                     if src.status.get(key) != text:
                         src.set_status(key, text)
@@ -1427,7 +1439,7 @@ def report_loop(sources, sink, vision=None, every=10.0):
             f0, s0 = prev[s.name]
             prev[s.name] = (s.got_frames, s.got_states)
             line = "  %-6s 영상 %5.1f장/초 (누적 %d)" % (s.name, (s.got_frames - f0) / dt, s.got_frames)
-            if s.name != "cam360":                  # 360 은 상태가 없다
+            if s.name in REPORT_STATE:              # realsense · cam360_slice 는 상태가 없다
                 line += "  상태 %5.1f건/초 (누적 %d)" % ((s.got_states - s0) / dt, s.got_states)
             extra = []
             if s.save_fail:
@@ -1471,10 +1483,11 @@ def main():
     ap = argparse.ArgumentParser(
         description="로봇·드론·360 카메라 데이터를 받아 Redis Stream 으로 흘리고 전부 파일로 저장한다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · robot2 10004\n"
+        epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · robot2 10004 · realsense 10005 · "
+               "cam360_slice 10006\n"
                "자세한 설명은 파일 맨 위 주석.")
     ap.add_argument("--on", nargs="+", metavar="소스",
-                    help="켤 소스만 고른다: cam360 drone robot1 robot2 (안 주면 전부)")
+                    help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
                     help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
@@ -1582,6 +1595,13 @@ def main():
             s.set_status("video", "기다림 (stream_to_server.py 가 보내야 옴)")
             print("  cam360 :%d  영상 ← stream_to_server.py --upload http://<이 기기>:%d/upload_pano"
                   % (s.port, s.port))
+        elif s.name == "cam360_slice":
+            s.set_status("video", "기다림 (e2p/slice360_live.py 가 보내야 옴)")
+            print("  cam360_slice :%d  영상 ← e2p/slice360_live.py (이 기기 Redis 의 cam360 파노라마를 잘라 /upload)"
+                  % s.port)
+        elif s.name in PUSH_ONLY:
+            s.set_status("video", "기다림 (POST 로 보내야 옴)")
+            print("  %-9s :%d  받기만" % (s.name, s.port))
         elif args.no_pull:
             s.set_status("video", "기다림 (--no-pull: 넘겨 오는 것만 받음)")
             print("  %-6s :%d  받기만 (--no-pull)" % (s.name, s.port))

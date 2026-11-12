@@ -26,3 +26,9 @@ models/
 # 실험 출력 · 옛 압축본
 e2p/e2p_sweep_out/
 *.zip
+
+# 360 슬라이스 각도 파일 (실행 중 slice360_live.py 가 늘 고쳐 쓴다)
+e2p/slice_angle.json
+
+# 받은 작업 묶음 (가중치 포함, 반영한 뒤에는 저장소 밖 자료)
+result_files/

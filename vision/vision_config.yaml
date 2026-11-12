@@ -56,6 +56,10 @@ devices:
   # D455 는 UVC 라 컬러만 /dev/video* 로 나온다. hfov 90 은 **제원값**이고 관측이 아니다:
   # 보정 전에는 거리·좌표의 확정 근거로 쓰지 않는다(선언된 사전정보와 측정값을 구분한다).
   realsense: {fov_x_deg: 90.0}
+  # 360 슬라이스(DS 10006, e2p/slice360_live.py). 파노라마를 90도 시야로 잘라 만든 사진이라 가로 시야는
+  # 추정이 아니라 **자른 값 그대로** 90 이다 (slice360_live --fov 를 바꾸면 여기도 같이 바꾼다).
+  # defaults.devices 에는 넣지 않았다 — 필요할 때 --devices cam360_slice 로 켠다.
+  cam360_slice: {fov_x_deg: 90.0}
   drone:  {fov_x_deg: meta}
   robot1: {fov_x_deg: null}
   robot2: {fov_x_deg: null}
