@@ -576,7 +576,7 @@ main{display:flex;gap:10px;padding:8px;align-items:flex-start}
 var MODEL=__MODEL__, seq=-1, cur=null, natW=0, natH=0, mouse=null, hoverKey=null;
 var pins=new Map();                          // key → {el, det}
 var SHOWN={wooden_box_mine:"목함지뢰 (wooden box mine)",butane_canister:"부탄가스 (butane canister)"};
-var CUE={class:"이름",material:"재질",structure:"모양",match:"기준 사진",size:"크기",distance:"거리"};
+var CUE={semantic:"글 설명",shape:"형상",class:"이름",material:"재질",structure:"모양",match:"기준 사진",size:"크기",distance:"거리"};
 var img=document.getElementById("img"), marks=document.getElementById("marks"),
     tip=document.getElementById("tip"),
     st=document.getElementById("st"), sel=document.getElementById("model"),
