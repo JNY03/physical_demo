@@ -33,8 +33,8 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   10002 drone   영상: pi3 :8890/api/frame?cam=0 (Arducam) 롱폴   상태: pi3 MQTT :1883 전체 구독
   10003 robot1  영상: pi7 :8090/stream/1 을 계속 읽는다        상태: pi7 MQTT :1883 전체 구독
   10004 robot2  영상: pi1 :8090/stream/1 을 계속 읽는다        상태: pi1 MQTT :1883 전체 구독
-  10005 realsense 영상: pi6 :8090/stream/1 을 계속 읽는다      상태: 없음 (pi6 에 브로커가 없다)
-                  pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다(깊이가 아니다).
+  10005 realsense 영상: ds5 :8090/stream/1 을 계속 읽는다      상태: 없음 (리얼센스 쪽은 상태를 내지 않는다)
+                  ds5 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다(깊이가 아니다).
                   깊이도 UVC 로는 나온다(/dev/video0 의 Z16). 다만 단위·내부/외부 파라미터·
                   두 스트림 짝맞춤이 스트림에 실려 오지 않아 librealsense 가 있어야 쓸 수 있고,
                   16비트라 이 JPEG 경로로는 못 나른다 — realsense_work/README.md 를 본다
@@ -45,7 +45,7 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
                   토픽 zoneA/robot/a2-001/{status,state,heartbeat} (JSON) · terminal/a2-001/uplink (protobuf → base64 로 저장)
                   스냅샷 한 장은 :8090/snapshot/1. 같은 브로커의 9001 은 브라우저용(ws://…:9001/mqtt) — 영상은 MQTT 로 안 온다
   10008 pi11    영상: pi11 :8090/stream/1 을 계속 읽는다      상태: 없음 (pi11 에 브로커가 없다)
-                  pi11 의 **모듈 카메라**(CSI imx708, Camera Module 3)다. pi6 와 달리 UVC 가
+                  pi11 의 **모듈 카메라**(CSI imx708, Camera Module 3)다. D455 와 달리 UVC 가
                   아니라 /dev/video* 가 베이어 RAW 라 cv2.VideoCapture 로는 못 받는다 —
                   파이 쪽에서 rpicam-vid 가 MJPEG 로 내고 모양만 로봇과 같다.
                   picam_work/README.md 를 본다
@@ -217,7 +217,7 @@ SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
            "pi11": 10008, "pi12": 10009, "pi13": 10011}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "robot1": "robot1", "robot2": "robot2",
-           "realsense": "realsense", "pi6": "realsense", "rs": "realsense",
+           "realsense": "realsense", "pi6": "realsense", "ds5": "realsense", "rs": "realsense",
            "d455": "realsense",
            "cam360_slice": "cam360_slice", "slice": "cam360_slice",
            "a2": "a2", "unitree_a2": "a2",
@@ -241,7 +241,7 @@ def load_default_hosts():
     hosts = {"robot1": None,         # pi7 (go1-camview 8090 · mosquitto 1883)
              "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
              "drone": None,          # pi3 (drone-agent 8890 · mosquitto 1883)
-             "realsense": None,      # pi6 (realsense_mjpeg.py 8090 · 브로커 없음)
+             "realsense": None,      # ds5 (realsense_mjpeg.py 8090 · 상태 없음)
              "a2": None,             # pi10 (a2-bridge 카메라 8090 · mosquitto 1883/9001)
              "pi11": None,           # pi11 (picam_mjpeg.py 8090 · 브로커 없음)
              "pi12": None,           # pi12 (picam_mjpeg.py 8090 · 브로커 없음)
@@ -1746,9 +1746,9 @@ def main():
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
                     help="로봇2 파이(pi1) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--realsense", default=DEFAULT_HOST["realsense"], metavar="주소",
-                    help="pi6 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
+                    help="ds5 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
     ap.add_argument("--realsense-cam", type=int, default=1, metavar="번호",
-                    help="리얼센스 MJPEG 경로 번호 (기본 1 — pi6 쪽은 번호를 무시한다)")
+                    help="리얼센스 MJPEG 경로 번호 (기본 1 — 리얼센스 쪽은 번호를 무시한다)")
     ap.add_argument("--a2", default=DEFAULT_HOST["a2"], metavar="주소",
                     help="새 로봇 a2(Unitree A2, a2-bridge) 주소. 기본 hosts.local.json / PD_HOST_A2 값")
     ap.add_argument("--pi11", default=DEFAULT_HOST["pi11"], metavar="주소",
@@ -1882,7 +1882,7 @@ def main():
                 video = "http://%s:%d/api/frame?cam=%d" % (host, DRONE_VIDEO_PORT, DRONE_CAM)
                 pulls.append((drone_video_loop, (s, host, DRONE_CAM), s, host))
             elif s.name == "realsense":
-                # pi6 의 realsense_mjpeg.py 가 로봇과 **같은 모양**으로 낸다 — 풀러를 새로 만들지 않는다
+                # ds5 의 realsense_mjpeg.py 가 로봇과 **같은 모양**으로 낸다 — 풀러를 새로 만들지 않는다
                 cam = args.realsense_cam
                 video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, cam)
                 pulls.append((robot_video_loop, (s, host, cam), s, host))

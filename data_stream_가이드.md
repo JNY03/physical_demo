@@ -69,7 +69,7 @@ python server_stream_multi_source.py --on drone robot1  # 골라 켜기
 python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 지정 (기본은 hosts.local.json)
 ```
 
-pi11(포트 **10008**) · pi12(포트 **10009**) · pi13(포트 **10011**)은 **모듈 카메라**(CSI imx708)다. pi6 의 RealSense 와 달리 `/dev/video*` 가 베이어 RAW 라
+pi11(포트 **10008**) · pi12(포트 **10009**) · pi13(포트 **10011**)은 **모듈 카메라**(CSI imx708)다. ds5 의 RealSense 와 달리 `/dev/video*` 가 베이어 RAW 라
 `cv2.VideoCapture` 로는 못 받는다 — 파이 쪽에서 `rpicam-vid` 가 MJPEG 로 내고(`picam_work/`),
 받는 모양만 로봇과 같아 데이터 스트림 쪽에는 **새 풀러가 없다**.
 
@@ -93,7 +93,7 @@ python server_stream_multi_source.py --on pi11 pi12 pi13       # 모듈 카메�
 | 10002 | drone | pi3 `:8890/api/frame?cam=0` + MQTT `:1883` |
 | 10003 | robot1 | pi7 `:8090/stream/1` + MQTT `:1883` |
 | 10004 | robot2 | pi1 `:8090/stream/1` + MQTT `:1883` |
-| 10005 | realsense | pi6 `:8090/stream/1` (컬러만, 상태 없음) |
+| 10005 | realsense | ds5 `:8090/stream/1` (컬러만, 상태 없음 · 2026-11-13 pi6 에서 옮김) |
 | 10006 | cam360_slice | 같은 노트북의 `e2p/slice360_live.py` 가 cam360 파노라마를 잘라 올림 (`/upload`, 상태 없음) — 5) |
 | 10007 | a2 | pi10 `:8090/stream/1` + MQTT `:1883` (a2-bridge) |
 | 10008 | pi11 | pi11 `:8090/stream/1` (상태 없음 — pi11 에 브로커가 없다) |

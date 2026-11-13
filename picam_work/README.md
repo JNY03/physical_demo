@@ -10,9 +10,9 @@ pi13 이 10010 이 아닌 것은 실수가 아니다. 개발 기계에서 그 �
 
 - **MJPEG 으로 낸다.** `server_stream_multi_source.py` 의 `robot_video_loop` 가 로봇에서
   읽는 모양(`GET /stream/<번호>` multipart MJPEG)과 같게 내면 **데이터 스트림 쪽에 새
-  풀러를 만들 필요가 없다**. pi6 의 `realsense_work/` 와 같은 선택이고, 실제로 더한 것은
+  풀러를 만들 필요가 없다**. `realsense_work/` 와 같은 선택이고, 실제로 더한 것은
   소스 한 줄과 주소 한 줄이다.
-- **cv2.VideoCapture 를 쓰지 않는다.** 여기가 pi6 와 갈리는 자리다. pi6 의 D455 는 UVC 라
+- **cv2.VideoCapture 를 쓰지 않는다.** 여기가 리얼센스와 갈리는 자리다. D455 는 UVC 라
   `/dev/video*` 가 바로 컬러를 낸다. **모듈 카메라는 CSI 라 그 자리가 베이어 RAW 다** —
   같은 코드를 쓰면 장치는 열리고 쓸 수 없는 그림이 나온다. 그래서 libcamera 쪽
   (`rpicam-vid --codec mjpeg`)에서 받는다.

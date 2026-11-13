@@ -1,4 +1,4 @@
-# pi6 의 RealSense 컬러 스트림을 MJPEG 으로 내는 서비스.
+# ds5 의 RealSense 컬러 스트림을 MJPEG 으로 내는 서비스. (2026-11-13 pi6 에서 옮김 — pi6 쪽은 disable)
 # 설치(파이에서):
 #   sudo cp realsense-mjpeg.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now realsense-mjpeg

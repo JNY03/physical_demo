@@ -52,7 +52,7 @@ output:
 # 파노라마에서는 거리값을 그대로 믿지 않는다.
 devices:
   cam360: {fov_x_deg: null}
-  # pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림(1280x720). 깊이가 아니다 —
+  # ds5 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림(1280x720). 깊이가 아니다 —
   # D455 는 UVC 라 컬러만 /dev/video* 로 나온다. hfov 90 은 **제원값**이고 관측이 아니다:
   # 보정 전에는 거리·좌표의 확정 근거로 쓰지 않는다(선언된 사전정보와 측정값을 구분한다).
   realsense: {fov_x_deg: 90.0}

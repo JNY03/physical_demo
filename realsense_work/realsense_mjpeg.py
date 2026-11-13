@@ -16,6 +16,7 @@ D455 는 UVC 라 컬러 스트림이 /dev/video* 로 그냥 보인다 — 깊이
   GET /health      상태 JSON
 """
 import json
+import socket
 import sys
 import threading
 import time
@@ -29,7 +30,7 @@ WIDTH = int(sys.argv[3]) if len(sys.argv) > 3 else 1280
 HEIGHT = int(sys.argv[4]) if len(sys.argv) > 4 else 720
 FPS = int(sys.argv[5]) if len(sys.argv) > 5 else 15
 QUALITY = 85
-CAMERA_ID = "pi6-realsense-d455-color"
+CAMERA_ID = "%s-realsense-d455-color" % socket.gethostname()   # 기기 이름에서 딴다 — pi6 → ds5 로 옮겨도 그대로 맞다
 HFOV_DEG = 90.0            # D455 컬러의 **제원값**이다(관측이 아니다 — 보정 전에는 근거로 쓰지 않는다)
 BOUNDARY = "frame"
 
@@ -76,9 +77,9 @@ def grab_loop():
         time.sleep(gap)
 
 
-PAGE = ("<!doctype html><meta charset=utf-8><title>pi6 realsense</title>"
+PAGE = ("<!doctype html><meta charset=utf-8><title>%s realsense</title>"
         "<body style='margin:0;background:#111'>"
-        "<img src='/stream/1' style='width:100%%;height:auto'>").encode()
+        "<img src='/stream/1' style='width:100%%;height:auto'>" % socket.gethostname()).encode()
 
 
 class Handler(server.BaseHTTPRequestHandler):

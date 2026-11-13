@@ -1,7 +1,12 @@
-# pi6 RealSense → data_stream
+# ds5 RealSense → data_stream
 
-pi6 에 USB 로 붙은 **RealSense D455 의 컬러 스트림**을 data_stream 의 소스
+ds5 에 USB 로 붙은 **RealSense D455 의 컬러 스트림**을 data_stream 의 소스
 `realsense`(포트 10005)로 들인다.
+
+> 2026-11-13 카메라를 **pi6 에서 ds5 로** 옮겼다. ds5 에도 같은 경로(`~/pf_runtime/venv`,
+> `~/realsense_mjpeg.py`)와 같은 서비스를 깔았고 컬러 노드도 같은 `/dev/video4` 다.
+> pi6 의 `realsense-mjpeg` 서비스는 disable 했다. `camera_id` 는 기기 이름에서 따므로
+> 지금은 `ds5-realsense-d455-color` 다(예전 `pi6-realsense-d455-color`).
 
 ## 왜 이 모양인가
 
@@ -44,16 +49,16 @@ SDK 없이 된다. 그런데 **그 숫자가 무엇인지를 UVC 가 말해 주�
 
 그래서 **"깊이가 안 나온다" 가 아니라 "깊이를 쓰려면 librealsense 가 필요하다"** 가 맞다.
 지금 이 소스는 컬러만 받는다. 깊이가 필요해지면 그 파이에 SDK 를 올린다.
-- **상태(MQTT)는 없다.** pi6 에 브로커가 없다. `STATE_SOURCES` 에 넣지 않았으므로
+- **상태(MQTT)는 없다.** 리얼센스 스크립트는 상태를 내지 않는다(ds5 의 1883 브로커는 이 스트림과 상관없다). `STATE_SOURCES` 에 넣지 않았으므로
   영상만 받고 상태는 비운다(없는 브로커에 붙으러 가면 로그가 재접속 경고로 덮인다).
 
 ## 띄우기
 
 ```bash
-# pi6 에서
-scp realsense_mjpeg.py pi6:~/
-ssh pi6 '~/pf_runtime/venv/bin/python ~/realsense_mjpeg.py 8090 4 1280 720 15'
-curl http://<pi6 주소>:8090/health               # 다른 기기에서 확인
+# 이 PC 에서 ds5 로 (WSL 에서는 ds5.local 이 안 풀린다 — tailscale 이름 ds5 를 쓴다)
+scp realsense_mjpeg.py ds5:~/
+ssh ds5 '~/pf_runtime/venv/bin/python ~/realsense_mjpeg.py 8090 4 1280 720 15'
+curl http://<ds5 주소>:8090/health               # 다른 기기에서 확인
 ```
 
 재부팅에도 살리려면 `realsense-mjpeg.service` 를 설치한다(파일 머리에 명령이 있다).
@@ -61,7 +66,7 @@ curl http://<pi6 주소>:8090/health               # 다른 기기에서 확인
 ## 받기
 
 ```bash
-# hosts.local.json 에 "realsense": "<pi6 tailscale IP>" 를 적고
+# hosts.local.json 에 "realsense": "<ds5 tailscale IP>" 를 적고
 python server_stream_multi_source.py --on realsense
 ```
 

@@ -3,9 +3,9 @@
 
 왜 이 모양인가: `server_stream_multi_source.py` 의 `robot_video_loop` 가
 `GET /stream/<번호>` 의 multipart MJPEG 을 읽는다. 같은 모양으로 내면 데이터
-스트림 쪽에 **새 풀러를 만들지 않아도** 된다 — pi6 의 realsense_mjpeg.py 와 같은 선택이다.
+스트림 쪽에 **새 풀러를 만들지 않아도** 된다 — realsense_work/realsense_mjpeg.py 와 같은 선택이다.
 
-왜 cv2.VideoCapture 가 아닌가: pi6 의 D455 는 UVC 라 /dev/video* 가 바로 컬러를 낸다.
+왜 cv2.VideoCapture 가 아닌가: D455 는 UVC 라 /dev/video* 가 바로 컬러를 낸다.
 **모듈 카메라(imx708)는 CSI 라 그 자리가 베이어 RAW 다** — 같은 코드를 쓰면 열리기는
 하고 쓸 수 없는 그림이 나온다. 그래서 libcamera 쪽(rpicam-vid)에서 받는다.
 이 파이에는 picamera2 도 cv2 도 없어 **표준 라이브러리만** 쓴다(설치가 필요 없다).

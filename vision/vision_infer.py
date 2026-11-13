@@ -130,7 +130,7 @@ DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",  
            "pi13")                                                                # 모듈 카메라 파이 2026-11-13 (DS 10011)
 MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
-                  "pi6": "realsense", "rs": "realsense", "d455": "realsense",
+                  "pi6": "realsense", "ds5": "realsense", "rs": "realsense", "d455": "realsense",
                   "slice": "cam360_slice"}
 MODEL_ALIASES = {"yoloe-pf": "yoloe", "yoloe_pf": "yoloe",
                  "moge": "moge2_aerial", "moge2": "moge2_aerial", "moge2-aerial": "moge2_aerial",
