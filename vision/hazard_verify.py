@@ -52,9 +52,16 @@ class _Encoder:
             raise FileNotFoundError("%s: %s" % (_MISSING, path))
         providers = spec.get("providers") or ["CUDAExecutionProvider", "CPUExecutionProvider"]
         avail = set(ort.get_available_providers())
-        # **실 1개로 두면 CPU 에서 61 ms/장이다.** 8 개로 17.5 ms, 묶으면 11 ms/장까지
-        # 내려간다(실측 2026-11-13). CUDA EP 는 이 기계에서 cuBLAS 판이 안 맞아 못 선다 —
-        # 없으면 CPU 로 서되 **얼마나 걸리는지는 기록으로 나간다**(AI-O-01).
+        # **GPU 가 먼저다**(2026-11-13). onnxruntime-gpu 는 CUDA 판이 torch 와 맞아야 선다 —
+        # torch cu12.6 에는 onnxruntime-gpu 1.24.x(CUDA 12), 1.25 이후는 CUDA 13 을 요구한다.
+        # CUDA 라이브러리는 torch 가 깔아 둔 nvidia-* 패키지에서 미리 올린다(preload_dlls).
+        # CPU 로 떨어지면 실 8 개 · 묶음으로 crop 당 ~11 ms 다 — **어디서 돌았는지는 로그로
+        # 나간다**(`provider`, AI-O-01).
+        if "CUDAExecutionProvider" in providers and hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
         so = ort.SessionOptions()
         so.intra_op_num_threads = int(spec.get("threads") or 8)
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -65,7 +72,10 @@ class _Encoder:
         self.mean = np.array(spec.get("mean") or [0.0, 0.0, 0.0], np.float32).reshape(3, 1, 1)
         self.std = np.array(spec.get("std") or [1.0, 1.0, 1.0], np.float32).reshape(3, 1, 1)
         self.input = self.sess.get_inputs()[0].name
+        # fp16 모델은 입력도 fp16 이다 — 모델이 원하는 형으로 넘긴다
+        self.in_dtype = np.float16 if "float16" in self.sess.get_inputs()[0].type else np.float32
         self.output = self.sess.get_outputs()[0].name
+        self.provider = self.sess.get_providers()[0]
 
     def __call__(self, crops):
         """BGR crop 목록 → (N, D) 정규화 임베딩."""
@@ -75,7 +85,7 @@ class _Encoder:
                                           interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
             x = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
             batch[i] = (x - self.mean) / self.std
-        v = self.sess.run([self.output], {self.input: batch})[0].astype(np.float32)
+        v = self.sess.run([self.output], {self.input: batch.astype(self.in_dtype)})[0].astype(np.float32)
         n = np.linalg.norm(v, axis=1, keepdims=True)
         return v / np.maximum(n, 1e-8)
 
@@ -136,9 +146,11 @@ class HazardVerifier:
         if log:
             parts = []
             if self.learned:
-                parts.append("match(모델 %d · 프로토타입 %d묶음%s)"
+                parts.append("match(모델 %d · 프로토타입 %d묶음%s · %s)"
                              % (len(self.encoders), len(self.bank),
-                                " · **동봉본**" if self.bank_bundled else ""))
+                                " · **동봉본**" if self.bank_bundled else "",
+                                ",".join(sorted({e.provider.replace("ExecutionProvider", "")
+                                                 for e in self.encoders}))))
             if self.structure:
                 parts.append("structure(프로토타입 불필요)")
             log("  verify %s%s%s"

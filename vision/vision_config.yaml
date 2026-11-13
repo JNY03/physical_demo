@@ -361,7 +361,12 @@ models:
       structure: true             # 학습하지 않은 구조 서명을 함께 센다(설명 가능한 신호)
       models:
         - name: clip_b32
-          path: /home/khw67/data_stream/models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx
+          # **fp32 를 GPU 에서**(2026-11-13). int8 양자화본은 CPU 에서 12 crop 542 ms 였고(GPU 에서는
+          # int8 연산이 CPU 로 오가 더 느리다), fp32 는 CUDA 에서 19.5 ms. 프로토타입은 양자화본으로
+          # 만든 것이라 임베딩이 cos 0.93 으로 어긋나지만, pi13 정답 crop 에서 match 단서가 오히려
+          # 더 잘 갈랐다(목함지뢰 match: 상자 79 · 통 31 · 기타 63 ← 양자화본 63 · 24 · 57).
+          # 기준 crop 이 생기면 이 모델로 프로토타입을 다시 만든다(assets/butane_ref/README.md)
+          path: /home/khw67/data_stream/models/clip-vit-base-patch32/onnx/vision_model.onnx
           size: 224
           mean: [0.48145466, 0.4578275, 0.40821073]
           std:  [0.26862954, 0.26130258, 0.27577711]
@@ -374,6 +379,9 @@ models:
       - kind: yoloe               # YOLOE-11l-seg · O365+GoldG+LVIS · MobileCLIP 텍스트 타워
         weight: /home/khw67/data_stream/models/yoloe-11l-seg.pt
         text_encoder_dir: /home/khw67/data_stream/models    # mobileclip_blt.ts 가 있는 폴더
+        imgsz_follow_frame: true  # **프레임 크기 근처로**(2026-11-13): imgsz(1920)를 상한으로 프레임 긴 변
+                                  # (32 배수)을 쓴다. GO1 464×400 → 480, 1280×720 → 1280. 키워 돌리면
+                                  # 느리기만 했다(robot1 275 ms). 작은 먼 물체가 걱정되면 false
       # **자리를 내는 arm**(2026-11-12 추가). 이름을 대지 않는다 — 지도에 든 재질 낱말만
       # 우리 클래스로 올리고 나머지는 전부 `unconfirmed` 다.
       #

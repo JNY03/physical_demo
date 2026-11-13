@@ -854,15 +854,8 @@ def fov_from_k(K, w):
     return float(np.degrees(2 * np.arctan(0.5 * w / K[0, 0]))) if K is not None and K[0, 0] > 0 else None
 
 
-def _unidepth_get_paddings(original_shape, aspect_ratio_range):
-    """UniDepth get_paddings 와 같지만 int() 대신 round().
-    원본은 464×400 처럼 int(400 * 1.16) = 463 이 되면 pad = -1 이 되어 depth 폭이 1 로 잘린다."""
-    H_ori, W_ori = original_shape
-    min_ratio, max_ratio = aspect_ratio_range
-    target = min(max_ratio, max(min_ratio, W_ori / H_ori))
-    H_new, W_new = max(H_ori, round(W_ori / target)), max(W_ori, round(H_ori * target))
-    pad_t, pad_l = (H_new - H_ori) // 2, (W_new - W_ori) // 2
-    return (pad_l, W_new - W_ori - pad_l, pad_t, H_new - H_ori - pad_t), (H_new, W_new)
+# UniDepth get_paddings 의 int() 버그 고침 — 주인은 depth_track.py 하나(river 거리도 같은 것을 쓴다)
+from depth_track import unidepth_get_paddings as _unidepth_get_paddings  # noqa: E402
 
 
 class UniDepthRunner:
@@ -1081,6 +1074,14 @@ class _ArmMissing(Exception):
     """arm 의 가중치·스냅샷이 없다. 런타임에 받지 않는다 (AI-C-16 폐쇄망)."""
 
 
+def _arm_imgsz(arm, bgr):
+    """arm 이 돌 입력 크기. `follow_frame` 이면 imgsz 를 넘지 않는 선에서 프레임 긴 변(32 배수)."""
+    if not getattr(arm, "follow_frame", False):
+        return arm.imgsz
+    long_side = max(bgr.shape[:2])
+    return int(min(arm.imgsz, -(-long_side // 32) * 32))
+
+
 class _ArmUltralytics:
     """YOLOE / YOLO-World — ultralytics 텍스트 프롬프트."""
 
@@ -1110,12 +1111,16 @@ class _ArmUltralytics:
             self.model.set_classes(list(prompts))
         self.device = device
         self.imgsz = int(spec.get("imgsz") or shared["imgsz"])
+        # **프레임 크기 근처로 돈다**(`imgsz_follow_frame`, 2026-11-13). imgsz 를 상한으로 두고
+        # 프레임 긴 변(32 배수로 올림)이 더 작으면 그것을 쓴다. 464×400 GO1 프레임을 1920 으로
+        # 키우면 275 ms, 480 이면 그 몇 분의 일이다. 1280×720 은 1920 → 1280.
+        self.follow_frame = bool(spec.get("imgsz_follow_frame", False))
         self.conf = float(spec.get("conf", shared["base_conf"]))
         self.max_det = int(spec.get("max_det") or shared["max_det"])
         self.name = weight.name
 
     def __call__(self, bgr):
-        r = self.model.predict(bgr, conf=self.conf, imgsz=self.imgsz, max_det=self.max_det,
+        r = self.model.predict(bgr, conf=self.conf, imgsz=_arm_imgsz(self, bgr), max_det=self.max_det,
                                device=self.device, verbose=False)[0]
         out = []
         if r.boxes is not None and len(r.boxes):
@@ -1484,6 +1489,11 @@ class RiverRunner:
         # 클래스 전부에 대해 같은 단서를 재고, 가장 높은 클래스가 하한 이상이면 그 이름으로
         # 의심한다. 검출기가 댄 낱말은 단서 하나일 뿐이다. 식의 주인은 hazard_overlay.assess.
         self.assess = bool(cfg.get("assess", False))
+        # **기기마다 따로 기억한다**(`use_stream`, 2026-11-13). 실행기 하나를 여러 기기가 함께
+        # 쓰는데 검증 캐시(앞 장과 겹치면 다시 안 잰다)와 거리 기억(트랙으로 나른다)이 하나뿐
+        # 이었다 — 기기가 번갈아 올 때마다 캐시가 깨져 매번 다시 쟀고(robot1·realsense·pi13
+        # 동시: 장당 ~800 ms), **다른 기기의 같은 자리 결과를 빌려 쓸 수 있었다.**
+        self._stream, self._streams = None, {}
         # **부품은 전체에 접는다**(`nest_ratio`, 2026-11-13). 부탄 통 안의 뚜껑·라벨·마개가
         # 따로 잡혀 한 물체에 상자가 여럿 겹쳤다. 작은 상자가 큰 상자 안에 이 비율 이상
         # 들어가 있으면 **큰 것 하나만** 남긴다. null = 끔.
@@ -1648,6 +1658,23 @@ class RiverRunner:
         """어느 문구가 말했는가. 문구를 돌려주지 않는 arm 은 **클래스 이름 자체**로 센다 —
         빈 집합으로 두면 min_prompts 1 이 그 검출을 말없이 버린다."""
         return det.get("prompt") or det["cls_name"]
+
+    def use_stream(self, key):
+        """이번 장이 어느 기기(실행)의 것인지 알린다 — 그 기기의 검증 캐시·거리 기억으로 바꾼다."""
+        if key == self._stream:
+            return
+        v, dp = self.verifier, self.depth
+        if self._stream is not None:
+            self._streams[self._stream] = {
+                "v_last": getattr(v, "_last", None), "d_mem": getattr(dp, "_mem", None),
+                "d_n": getattr(dp, "_n", None)}
+        st = self._streams.get(key) or {}
+        if v is not None:
+            v._last = st.get("v_last") or []
+        if dp is not None:
+            dp._mem = st.get("d_mem") or {}
+            dp._n = st.get("d_n") or 0
+        self._stream = key
 
     def _drop_nested(self, dets):
         """큰 상자 안에 `nest_ratio` 이상 들어간 작은 상자를 지운다(큰 것이 전체다).
@@ -2203,6 +2230,8 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
     else:
         wanted = bool(save_detect)
     if det_model and (wanted or (depth_models and fusion.get("enabled", True))):
+        if hasattr(runners[det_model], "use_stream"):      # 기기마다 따로 기억하는 실행기
+            runners[det_model].use_stream((device, base.get("run")))
         info, dets = runners[det_model](bgr)
         sc = stabilize_cfg(cfg, det_model)
         if sc.get("enabled", True):

@@ -102,6 +102,22 @@ class _OnnxRelative:
         return np.squeeze(self.sess.run([self.o], {self.i: rgb.transpose(2, 0, 1)[None]})[0])
 
 
+def unidepth_get_paddings(original_shape, aspect_ratio_range):
+    """UniDepth `get_paddings` 와 같지만 int() 대신 round().
+
+    원본은 464×400(GO1 카메라) 처럼 int(400 * 1.16) = 463 이 되면 pad = -1 이 되어 depth 폭이
+    **1 로 잘린다**(출력 400×1 → 상자 안을 재다 ValueError 로 비전 전체가 멈췄다, 2026-11-13).
+    UniDepth 는 외부 저장소라 고치지 않고 **불러온 뒤 이 함수로 바꿔 끼운다** — river 의 거리
+    (`_UniDepth`)와 단독 depth 모델(vision_infer.UniDepthRunner)이 이 하나를 쓴다.
+    """
+    H_ori, W_ori = original_shape
+    min_ratio, max_ratio = aspect_ratio_range
+    target = min(max_ratio, max(min_ratio, W_ori / H_ori))
+    H_new, W_new = max(H_ori, round(W_ori / target)), max(W_ori, round(H_ori * target))
+    pad_t, pad_l = (H_new - H_ori) // 2, (W_new - W_ori) // 2
+    return (pad_l, W_new - W_ori - pad_l, pad_t, H_new - H_ori - pad_t), (H_new, W_new)
+
+
 class _UniDepth:
     """UniDepth V2 — metric depth **와 내부파라미터를 함께** 낸다.
 
@@ -124,6 +140,8 @@ class _UniDepth:
             sys.path.insert(0, src)
         sys.modules.setdefault("wandb", types.ModuleType("wandb"))
         from unidepth.models import UniDepthV2
+        import unidepth.models.unidepthv2.unidepthv2 as udv2
+        udv2.get_paddings = unidepth_get_paddings         # 464×400 에서 폭이 1 이 되는 버그
         self.torch = torch
         self.device = str(spec.get("device") or "cuda:0")
         self.model = UniDepthV2.from_pretrained(str(spec["model_id"])).to(self.device).eval()
@@ -141,7 +159,13 @@ class _UniDepth:
         if k is not None:
             k = k.squeeze().float().cpu().numpy()
             self.intrinsics = (float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]))
-        return out["depth"].squeeze().float().cpu().numpy()
+        depth = out["depth"][0, 0].float().cpu().numpy()
+        H, W = bgr.shape[:2]
+        if depth.shape != (H, W):
+            # 바꿔 끼운 뒤에도 모양이 다르면 **재지 않는다** — 틀린 지도로 거리를 내는 것보다
+            # 거리 없음이 낫다(호출하는 쪽이 None 을 '모름' 으로 다룬다)
+            return None
+        return depth
 
 
 KINDS = {"hf_metric": _HFMetric, "onnx_relative": _OnnxRelative, "unidepth": _UniDepth}
@@ -191,6 +215,8 @@ class DepthTracker:
 
     def _sample(self, dmap, box, shape):
         H, W = shape
+        if dmap is None or np.ndim(dmap) != 2:
+            return None                              # 지도가 아니다 — 재지 않는다(0 이 아니다)
         dh, dw = dmap.shape[:2]
         x1, y1, x2, y2 = box
         sx, sy = dw / float(W), dh / float(H)

@@ -34,3 +34,18 @@ def test_side_by_side_overlap_is_not_nesting():
     a, b = _d([0, 0, 200, 200]), _d([150, 0, 350, 200])              # 25% 만 겹친다
     kept, n = _run([a, b])
     assert len(kept) == 2 and n == 0
+
+
+def test_use_stream_keeps_caches_per_device():
+    v = SimpleNamespace(_last=[])
+    dp = SimpleNamespace(_mem={}, _n=0)
+    r = SimpleNamespace(verifier=v, depth=dp, _stream=None, _streams={})
+    use = lambda k: RiverRunner.use_stream(r, k)
+    use(("robot1", "a")); v._last = ["r1"]; dp._mem = {"k": 1}; dp._n = 3
+    use(("pi13", "b"))
+    assert v._last == [] and dp._mem == {} and dp._n == 0         # 다른 기기는 빈 기억에서
+    v._last = ["p13"]
+    use(("robot1", "a"))
+    assert v._last == ["r1"] and dp._mem == {"k": 1} and dp._n == 3   # 돌아오면 제 것
+    use(("pi13", "b"))
+    assert v._last == ["p13"]

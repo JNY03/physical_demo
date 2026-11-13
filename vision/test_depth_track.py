@@ -120,3 +120,19 @@ def test_a_provider_that_will_not_load_disables_distance_only():
 def test_an_unknown_kind_is_reported_not_guessed():
     t = dt.DepthTracker({"enabled": True, "kind": "telepathy"}, log=None)
     assert t.ready is False and "kind" in t.why
+
+
+def test_unidepth_paddings_never_negative_for_go1_frame():
+    # 464×400(GO1): 원본 int(400*1.16)=463 → pad -1 → depth 폭 1. 고친 함수는 여백이 음수가 아니다
+    from depth_track import unidepth_get_paddings
+    for h, w in ((400, 464), (800, 928), (720, 1280), (480, 640), (464, 400)):
+        (pl, pr, pt, pb), (H, W) = unidepth_get_paddings((h, w), (0.5, 2.5))
+        assert min(pl, pr, pt, pb) >= 0 and H >= h and W >= w
+
+
+def test_sample_ignores_non_2d_map():
+    import numpy as np
+    from depth_track import DepthTracker
+    t = DepthTracker({"enabled": False}, log=None)
+    assert t._sample(np.ones(400), [0, 0, 10, 10], (400, 464)) is None
+    assert t._sample(None, [0, 0, 10, 10], (400, 464)) is None
