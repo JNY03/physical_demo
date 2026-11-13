@@ -69,16 +69,23 @@ python server_stream_multi_source.py --on drone robot1  # 골라 켜기
 python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 지정 (기본은 hosts.local.json)
 ```
 
-pi11(포트 **10008**) · pi12(포트 **10009**)는 **모듈 카메라**(CSI imx708)다. pi6 의 RealSense 와 달리 `/dev/video*` 가 베이어 RAW 라
+pi11(포트 **10008**) · pi12(포트 **10009**) · pi13(포트 **10011**)은 **모듈 카메라**(CSI imx708)다. pi6 의 RealSense 와 달리 `/dev/video*` 가 베이어 RAW 라
 `cv2.VideoCapture` 로는 못 받는다 — 파이 쪽에서 `rpicam-vid` 가 MJPEG 로 내고(`picam_work/`),
 받는 모양만 로봇과 같아 데이터 스트림 쪽에는 **새 풀러가 없다**.
 
 ```bash
-python server_stream_multi_source.py --on pi11            # pi11 만
-python server_stream_multi_source.py --on pi11 pi12       # 모듈 카메라 둘 다
+python server_stream_multi_source.py --on pi11                 # pi11 만
+python server_stream_multi_source.py --on pi11 pi12 pi13       # 모듈 카메라 셋 다
 ```
 
-pi12 는 pi11 과 **같은 기기·같은 카메라**(Pi 3 Model B · imx708)이고 같은 `picam_mjpeg.py` 를 쓴다.
+셋은 **같은 기기·같은 카메라**(Pi 3 Model B · imx708)이고 같은 `picam_mjpeg.py` 를 쓴다 —
+기기를 더할 때 서버에서 늘리는 것은 `SOURCES` · `PICAM_SOURCES` · `DEFAULT_HOST` · `--piNN` 뿐이고
+가져오는 코드는 손대지 않는다.
+
+리본 접촉이 나쁘면 **고장이 소프트웨어처럼 보인다**. pi13 이 그랬고, 증상은 두 단계로 나타난다 —
+센서가 아예 안 보이거나(`No cameras available`), 보이는데 스트리밍만 실패한다
+(`imx708 … Failed to write reg 0x0100. error = -5`). 둘 다 리본을 다시 꽂는 것이 먼저다.
+`picam_work/README.md` 에 증상 표가 있다.
 
 | 포트 | 소스 | 받는 곳 |
 |---|---|---|
@@ -91,6 +98,7 @@ pi12 는 pi11 과 **같은 기기·같은 카메라**(Pi 3 Model B · imx708)이
 | 10007 | a2 | pi10 `:8090/stream/1` + MQTT `:1883` (a2-bridge) |
 | 10008 | pi11 | pi11 `:8090/stream/1` (상태 없음 — pi11 에 브로커가 없다) |
 | 10009 | pi12 | pi12 `:8090/stream/1` (상태 없음 — pi12 에 브로커가 없다) |
+| 10011 | pi13 | pi13 `:8090/stream/1` (상태 없음 — pi13 에 브로커가 없다). **10010 은 비워 둔다** — 개발 기계에서 다른 프로그램이 쓰고 있었다 |
 
 - 10초마다 소스별 수신 속도(장/초, 건/초)가 찍힌다. 종료는 `Ctrl+C`.
 - 브라우저 확인: `http://localhost:10002/` (영상 + 비전), `/stream` (원본), `/health` (상태 JSON).
