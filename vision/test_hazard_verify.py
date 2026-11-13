@@ -72,11 +72,21 @@ def test_the_structure_cue_reads_a_lying_can_too():
     assert abs(a - b) < 0.12
 
 
-def test_wood_cue_wants_low_saturation():
-    wood = np.full((120, 60, 3), (150, 190, 225), np.uint8)   # 옅은 나무색
+def test_the_mine_gets_no_structure_cue_because_none_was_found():
+    """**갈리지 않는 수를 근거로 내지 않는다.**
+
+    전에는 여기서 목질색을 셌는데 `material` 이 같은 것을 보고 있어 같은 사실이
+    평균에 두 번 들어갔다. 색을 안 보는 형상 단서로 바꿔 보려고 명암 기울기 셋을
+    쟀고 **셋 다 갈리지 않았다** — 하늘이 진짜 상자보다 '네모났다'(0.515 vs 0.440).
+    그래서 내지 않는다. 증거처럼 보이는데 증거가 아닌 수가 중복보다 나쁘다.
+    """
+    wood = np.full((120, 60, 3), (150, 190, 225), np.uint8)
     vivid = np.full((120, 60, 3), (30, 30, 240), np.uint8)
-    assert hv.HazardVerifier._structure(wood, "wooden_box_mine") > \
-           hv.HazardVerifier._structure(vivid, "wooden_box_mine")
+    assert hv.HazardVerifier._structure(wood, "wooden_box_mine") is None
+    assert hv.HazardVerifier._structure(vivid, "wooden_box_mine") is None
+    # 부탄은 구성이 색 말고도 **순서**(뚜껑→어깨→몸통)를 보므로 그대로 둔다
+    assert hv.HazardVerifier._structure(_can((200, 60, 40), (40, 40, 220)),
+                                        "butane_canister") is not None
 
 
 def test_a_crop_too_small_is_not_scored():
