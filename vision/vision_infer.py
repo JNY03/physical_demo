@@ -1642,12 +1642,19 @@ class RiverRunner:
                              # 이겼는지가 사라진다 — 가설 칸은 이름이 전부 `unconfirmed`
                              # 라서 이 낱말이 없으면 사람이 볼 것이 아무것도 없다
                              "lead": self._said(det),
+                             # **낱말별 확신을 들고 간다.** 집합만 남기면 "무엇이
+                             # 얼마나 그렇게 불렀는지" 가 사라져 사람이 후보를 견줄 수
+                             # 없다. 같은 낱말이 여러 번이면 가장 높은 것을 남긴다.
+                             "votes": {self._said(det): det["conf"]},
                              "prompts": {self._said(det)},
                              "merged_from": ({det["merged_from"]} if det.get("merged_from")
                                              else set())})
             else:
                 dup["arms"].add(det["arm"])
-                dup["prompts"].add(self._said(det))
+                word = self._said(det)
+                dup["prompts"].add(word)
+                if det["conf"] > dup["votes"].get(word, 0.0):
+                    dup["votes"][word] = det["conf"]
                 if det.get("merged_from"):
                     dup["merged_from"].add(det["merged_from"])
         return kept
@@ -1715,6 +1722,8 @@ class RiverRunner:
                          "xyxy": [round(float(v), 1) for v in group["xyxy"]],
                          "agree": len(group["arms"]), "arms": sorted(group["arms"]),
                          "lead": group["lead"],
+                         "votes": {k: round(float(v), 4) for k, v in
+                                   sorted(group["votes"].items(), key=lambda t: -t[1])},
                          "prompts": sorted(group["prompts"])})
             if group.get("merged_from"):
                 # 어느 이름으로 잡혀 합쳐졌는지 남긴다 — 합침을 되돌려 보려면 필요하고,

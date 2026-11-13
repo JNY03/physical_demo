@@ -1106,3 +1106,15 @@ def test_the_shipped_config_only_tightens_the_hazard_it_measured():
     # 측정이 min_arms 2 를 재현율 0.029 로 떨어뜨렸다. 되살아나면 시험이 막는다
     assert not river["class_rules"]["butane_canister"].get("min_arms")
     assert river["merge_classes"] == {"beverage_can": "butane_canister"}
+
+
+def test_a_detection_keeps_what_each_word_was_worth():
+    """집합만 남기면 "무엇이 얼마나 그렇게 불렀는지" 가 사라진다 — 사람이 후보를
+    견줄 수 없다. 확신 내림차순으로 들고 간다."""
+    a = {"kind": "fake", "name": "a",
+         "dets": [{"cls_name": "wooden_box_mine", "conf": 0.31, "xyxy": list(BOX), "prompt": "plank"}]}
+    b = {"kind": "fake", "name": "b",
+         "dets": [{"cls_name": "wooden_box_mine", "conf": 0.72, "xyxy": list(BOX), "prompt": "plywood"}]}
+    _info, dets = vi.RiverRunner(cfg([a, b], min_arms=1), "cpu")(IMG)
+    assert list(dets[0]["votes"]) == ["plywood", "plank"]        # 높은 것이 먼저
+    assert dets[0]["votes"]["plywood"] == 0.72
