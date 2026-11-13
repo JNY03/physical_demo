@@ -121,3 +121,24 @@ def test_turning_structure_off_without_a_bank_disables_the_stage():
     d = {"name": "butane_canister", "conf": 0.5, "xyxy": [0, 0, 60, 200]}
     assert v(np.zeros((200, 60, 3), np.uint8), [d]) == 0.0
     assert "verify" not in d
+
+
+def test_a_missing_declared_bank_falls_back_to_the_bundled_one():
+    """막 clone 한 기계에서도 `match` 가 선다. **어느 쪽을 썼는지는 기록에 남는다** —
+    조용히 바뀌면 숫자가 어느 프로토타입의 것인지 알 수 없다."""
+    v = hv.HazardVerifier({"classes": ["butane_canister"], "models": [],
+                           "prototypes": "/nope/does-not-exist.npz"}, log=None)
+    assert v.bank_bundled is True
+    assert v.bank, "동봉본을 읽지 못했다"
+    assert any(k.endswith("/_negative") for k in v.bank), "음성 묶음이 없다"
+
+
+def test_a_declared_bank_wins_over_the_bundled_one(tmp_path):
+    """현장이 자기 프로토타입을 적었으면 그것을 쓴다 — 동봉본은 **차선**이다."""
+    import numpy as _np
+    mine = tmp_path / "mine.npz"
+    _np.savez(mine, **{"clip_b32/butane_canister": _np.zeros((1, 512), _np.float32)})
+    v = hv.HazardVerifier({"classes": ["butane_canister"], "models": [],
+                           "prototypes": str(mine)}, log=None)
+    assert v.bank_bundled is False
+    assert set(v.bank) == {"clip_b32/butane_canister"}

@@ -96,13 +96,21 @@ class HazardVerifier:
                 self.encoders.append(_Encoder(m))
             except Exception as exc:                 # 한 모델이 없어도 나머지로 돈다
                 self.missing.append((str(m.get("name") or m.get("path")), str(exc)))
-        bank = Path(str(spec.get("prototypes") or "")).expanduser()
+        # **선언이 먼저, 동봉이 다음.** 배포 기계는 자기 자산 경로를 적고, 그 경로가
+        # 없는 기계(막 clone 한 곳)는 코드 옆에 동봉된 39 KB 로 물러선다 — 그래야
+        # `match` 가 "기계마다 되기도 하고 안 되기도 하는" 단서가 되지 않는다.
+        # **어느 쪽을 썼는지 기록에 남긴다**: 조용히 바뀌면 숫자가 어느 프로토타입의
+        # 것인지 알 수 없다.
+        bundled = Path(__file__).resolve().parent / "assets/butane_ref/prototypes.npz"
+        declared = Path(str(spec.get("prototypes") or "")).expanduser()
+        bank = declared if declared.exists() else bundled
+        self.bank_path, self.bank_bundled = bank, (bank == bundled)
         self.bank = {}
         if bank.exists():
             z = np.load(bank, allow_pickle=False)
             self.bank = {k: z[k] for k in z.files}
         else:
-            self.missing.append((str(bank), _MISSING))
+            self.missing.append((str(declared or bundled), _MISSING))
         self.min_models = int(spec.get("min_models") or 1)
         # **시간을 되사는 두 가지.** (a) 앞 장과 거의 같은 자리의 같은 클래스는 다시
         # 임베딩하지 않는다 — 고정 카메라에서 같은 물체가 장마다 다시 계산된다.
@@ -123,7 +131,9 @@ class HazardVerifier:
         if log:
             parts = []
             if self.learned:
-                parts.append("match(모델 %d · 프로토타입 %d묶음)" % (len(self.encoders), len(self.bank)))
+                parts.append("match(모델 %d · 프로토타입 %d묶음%s)"
+                             % (len(self.encoders), len(self.bank),
+                                " · **동봉본**" if self.bank_bundled else ""))
             if self.structure:
                 parts.append("structure(프로토타입 불필요)")
             log("  verify %s%s%s"
