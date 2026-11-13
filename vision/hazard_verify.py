@@ -90,6 +90,35 @@ class _Encoder:
         return v / np.maximum(n, 1e-8)
 
 
+class _TextEncoder:
+    """CLIP 글 인코더(ONNX) — **글 설명 비교**(semantic) 단서의 문장 쪽. 시작할 때 한 번만 돈다."""
+
+    def __init__(self, spec):
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+        path = Path(spec["text_model"]).expanduser()
+        tok = Path(spec["tokenizer"]).expanduser()
+        for f in (path, tok):
+            if not f.exists():
+                raise FileNotFoundError("%s: %s" % (_MISSING, f))
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
+        avail = set(ort.get_available_providers())
+        self.sess = ort.InferenceSession(
+            str(path), providers=[p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in avail])
+        self.tok = Tokenizer.from_file(str(tok))
+        self.tok.enable_padding(length=77, pad_id=int(spec.get("pad_id", 49407)))
+        self.tok.enable_truncation(77)
+
+    def __call__(self, texts):
+        ids = np.array([e.ids for e in self.tok.encode_batch(list(texts))], np.int64)
+        v = self.sess.run(None, {self.sess.get_inputs()[0].name: ids})[0].astype(np.float32)
+        return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-8)
+
+
 class HazardVerifier:
     """후보 crop 과 프로토타입의 거리. **판정이 아니라 근거를 낸다.**
 
@@ -142,7 +171,36 @@ class HazardVerifier:
         # 바로 이것이다). 그래서 **배운 쪽과 안 배운 쪽을 따로 센다.**
         self.learned = (bool(self.encoders) and bool(self.bank)
                         and len(self.encoders) >= self.min_models)
-        self.ready = self.learned or self.structure
+        # **글 설명 비교**(semantic, 2026-11-13). crop 을 위험물 **묘사 문장**과, 그리고
+        # **장면을 모른 채 쓴 일반 문장**(an object · the ground …)과 견줘 확률을 낸다.
+        # 기준 사진이 필요 없고 장면에 무엇이 있는지 몰라도 된다 — 장소·장치가 바뀌어도 선다.
+        # 일반 문장에 **장면에 있는 물건 이름을 넣지 않는다**(넣으면 그 장면에만 맞는다).
+        # 사진 임베딩은 match 와 같은 인코더의 것을 다시 쓴다 — 추가 비용은 문장 몇 개뿐이다.
+        self.semantic, self.sem_enc, self.sem_why = None, None, None
+        sspec = spec.get("semantic") or {}
+        if sspec.get("enabled", False):
+            try:
+                te = _TextEncoder(sspec)
+                prompts = sspec.get("prompts") or {}
+                negs = list(sspec.get("negatives") or [])
+                cls_list = [c for c in self.classes if prompts.get(c)]
+                if not cls_list or not negs:
+                    raise ValueError("semantic.prompts(클래스별) 와 negatives 가 필요합니다")
+                self.semantic = {
+                    "classes": cls_list,
+                    "pos": {c: te(prompts[c]) for c in cls_list},
+                    "neg": te(negs),
+                    "temp": float(sspec.get("temperature", 100.0)),
+                    "n_prompts": {c: len(prompts[c]) for c in cls_list}, "n_neg": len(negs)}
+                self.sem_enc = str(sspec.get("encoder") or (self.encoders[0].name if self.encoders else ""))
+                if not any(e.name == self.sem_enc for e in self.encoders):
+                    raise ValueError("semantic.encoder %r 가 models 에 없습니다" % self.sem_enc)
+            except Exception as exc:                 # 없으면 이 단서만 빠진다(AI-C-05)
+                self.semantic, self.sem_why = None, "%s: %s" % (type(exc).__name__, str(exc)[:120])
+        # **작은 crop 은 외형 단서를 재지 않는다**(`min_px`). 짧은 변이 이보다 작으면 224 로
+        # 키운 CLIP 입력에 볼 것이 없다 — 틀린 확신 대신 '못 잼' 으로 둔다(하천 원거리 60 px).
+        self.min_px = int(spec.get("min_px") or 0)
+        self.ready = self.learned or self.structure or self.semantic is not None
         if log:
             parts = []
             if self.learned:
@@ -153,6 +211,12 @@ class HazardVerifier:
                                                  for e in self.encoders}))))
             if self.structure:
                 parts.append("structure(프로토타입 불필요)")
+            if self.semantic:
+                parts.append("semantic(문장 %s · 일반 %d)" % (
+                    "/".join("%s %d" % (c, n) for c, n in self.semantic["n_prompts"].items()),
+                    self.semantic["n_neg"]))
+            elif self.sem_why:
+                parts.append("semantic **빠짐**(%s)" % self.sem_why)
             log("  verify %s%s%s"
                 % (" + ".join(parts) if parts else "**비활성**",
                    "" if self.learned else " · **match 없음**",
@@ -264,7 +328,7 @@ class HazardVerifier:
                 reused += 1
                 continue
             c = bgr[y1:y2, x1:x2]
-            if c.size == 0 or min(c.shape[:2]) < 8:
+            if c.size == 0 or min(c.shape[:2]) < max(8, self.min_px):
                 d["verify_by"] = None                # 너무 작아 **재지 않는다** (0 이 아니다)
                 own(d)
                 continue
@@ -280,8 +344,22 @@ class HazardVerifier:
         per = {}                                     # (id(d), cls) → {모델: 근거}
         # 프로토타입이 없으면 인코더를 **돌리지 않는다** — 돌려도 견줄 것이 없고
         # 그 비용은 그대로 든다
-        for enc in (self.encoders if self.learned else ()):
+        sem = {}                                     # id(d) → {클래스: 확률}
+        run = [e for e in self.encoders
+               if self.learned or (self.semantic and e.name == self.sem_enc)]
+        for enc in run:
             emb = enc(crops)                         # 한 프레임의 후보를 한 번에
+            if self.semantic and enc.name == self.sem_enc:
+                S = self.semantic
+                cols = [(emb @ S["pos"][c].T).max(1) for c in S["classes"]]
+                cols.append((emb @ S["neg"].T).max(1))          # 일반 문장 중 가장 비슷한 것
+                L = np.stack(cols, 1) * S["temp"]
+                P = np.exp(L - L.max(1, keepdims=True))
+                P /= P.sum(1, keepdims=True)
+                for i, d in enumerate(keep):
+                    sem[id(d)] = {c: round(float(P[i, j]), 4) for j, c in enumerate(S["classes"])}
+            if not self.learned:
+                continue
             neg = self._protos(enc.name, "_negative")
             for i, d in enumerate(keep):
                 n = float((emb[i] @ neg.T).max()) if neg is not None and len(neg) else 0.0
@@ -302,12 +380,15 @@ class HazardVerifier:
                         # 학습하지 않은 신호다. margin 과 자릿수를 맞춰 넣되 **출처를 남긴다**
                         rows["structure"] = {"pos": st, "neg": 0.0, "margin": round(st - 0.15, 4),
                                              "learned": False}
-                if not rows:
+                s = (sem.get(id(d)) or {}).get(cls)
+                if not rows and s is None:
                     continue
                 margins = [r["margin"] for r in rows.values()]
-                by[cls] = {"margin": round(float(np.mean(margins)), 4),
+                by[cls] = {"margin": round(float(np.mean(margins)), 4) if margins else None,
                            "agree": int(sum(m > 0 for m in margins)),
                            "models": len(margins), "per_model": rows, "cached": False}
+                if s is not None:
+                    by[cls]["semantic"] = s           # 0~1, 그 클래스 문장일 확률
             d["verify_by"] = by or None
             own(d)
         self._last = [(tuple(int(v) for v in d["xyxy"]), d["verify_by"])

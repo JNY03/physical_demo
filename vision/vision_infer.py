@@ -1074,6 +1074,18 @@ class _ArmMissing(Exception):
     """arm 의 가중치·스냅샷이 없다. 런타임에 받지 않는다 (AI-C-16 폐쇄망)."""
 
 
+def _mask_polys(r):
+    """분할 모델 결과의 마스크 윤곽(원본 좌표, float32 N×2) 목록. 마스크가 없으면 빈 목록.
+    **형상 단서**(hazard_overlay.shape_cue)가 쓴다 — 상자만으로는 볼록함·채움을 볼 수 없다."""
+    m = getattr(r, "masks", None)
+    if m is None:
+        return []
+    try:
+        return [np.asarray(p, np.float32) for p in m.xy]
+    except Exception:
+        return []
+
+
 def _arm_imgsz(arm, bgr):
     """arm 이 돌 입력 크기. `follow_frame` 이면 imgsz 를 넘지 않는 선에서 프레임 긴 변(32 배수)."""
     if not getattr(arm, "follow_frame", False):
@@ -1123,13 +1135,15 @@ class _ArmUltralytics:
         r = self.model.predict(bgr, conf=self.conf, imgsz=_arm_imgsz(self, bgr), max_det=self.max_det,
                                device=self.device, verbose=False)[0]
         out = []
+        polys = _mask_polys(r)
         if r.boxes is not None and len(r.boxes):
-            for b in r.boxes:
+            for i, b in enumerate(r.boxes):
                 index = int(b.cls)
                 if 0 <= index < len(self.owners):
                     out.append({"cls_name": self.owners[index], "prompt": self.prompts[index],
                                 "conf": float(b.conf),
-                                "xyxy": [float(v) for v in b.xyxy[0].tolist()]})
+                                "xyxy": [float(v) for v in b.xyxy[0].tolist()],
+                                "poly": polys[i] if i < len(polys) else None})
         return out
 
 
@@ -1320,8 +1334,9 @@ class _ArmYoloeFree:
         out = []
         H, W = bgr.shape[:2]
         cap = self.max_area_ratio * W * H if self.max_area_ratio else None
+        polys = _mask_polys(r)
         if r.boxes is not None and len(r.boxes):
-            for b in r.boxes:
+            for i, b in enumerate(r.boxes):
                 x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
                 area = (x2 - x1) * (y2 - y1)
                 if cap is not None and area > cap:
@@ -1333,7 +1348,8 @@ class _ArmYoloeFree:
                 if cls is None:
                     continue
                 out.append({"cls_name": cls, "prompt": free, "conf": float(b.conf),
-                            "xyxy": [float(v) for v in b.xyxy[0].tolist()]})
+                            "xyxy": [float(v) for v in b.xyxy[0].tolist()],
+                            "poly": polys[i] if i < len(polys) else None})
         return out
 
 
@@ -1499,6 +1515,13 @@ class RiverRunner:
         # 들어가 있으면 **큰 것 하나만** 남긴다. null = 끔.
         nr = cfg.get("nest_ratio")
         self.nest_ratio = float(nr) if nr else None
+        # **붙은 두 물체를 하나로 잡은 상자는 뺀다**(`group_split`, 2026-11-13). 다른 후보 둘
+        # 이상을 품고(각각 이 상자 넓이의 member_min 이상) 그 후보들이 상자의 cover 이상을
+        # 덮으면 그 상자는 물체가 아니라 **묶음**이다 — 나무상자와 붙은 통을 감싼 'wooden block',
+        # 충전기·케이블·수첩을 감싼 'stick insect' 가 그랬다. 품은 후보들은 남는다.
+        # 부품(통 안의 뚜껑 8%)은 member_min 에 못 미쳐 묶음으로 세지 않는다 — 부품 접기의 몫이다.
+        gs = cfg.get("group_split")
+        self.group_split = dict(gs) if gs else None
 
         self.hypothesis = {a.unconfirmed for _, a in self.arms
                            if getattr(a, "unconfirmed", None)}
@@ -1676,37 +1699,158 @@ class RiverRunner:
             dp._n = st.get("d_n") or 0
         self._stream = key
 
-    def _drop_nested(self, dets):
-        """큰 상자 안에 `nest_ratio` 이상 들어간 작은 상자를 지운다(큰 것이 전체다).
+    def _reassess_masked(self, dets, bgr, cards):
+        """**안에 든 다른 물체를 가리고 다시 잰다**(2026-11-13).
 
-        **예외 하나**: 작은 쪽이 **다른 위험물로 의심**되면 남긴다. 큰 '나무 토막' 상자가
-        옆의 부탄 통을 통째로 덮은 장이 실제로 있었다 — 크기만 보고 지우면 그 통을 놓친다.
+        상자 D 가 자기와 크게 겹친 다른 물체 M(검출기가 그 클래스 이름으로 부름, 겹친 넓이가 D 의
+        member_min 이상)의 클래스로 기울어 있으면, D 의 점수는 D 가 아니라 M 을 잰 것이다 — 나무상자 앞에 붙은 통을
+        함께 감싼 상자가 '부탄' 이 되고(pi13 장면1 왼쪽 상자 52/192 장), 장면을 감싼 상자가 그 안의
+        통 때문에 '부탄' 이 됐다. 그래서 M 자리를 D crop 의 중앙색으로 칠한 그림에서 D 의 단서를
+        다시 재고 그 판정을 쓴다. 장면이나 물건 이름에 기대지 않는 규칙이다.
+        부품(통 안의 뚜껑·라벨)은 의심되지 않거나(근거 부족) 넓이가 작아 이 걸음에 들지 않는다.
+        """
+        if not dets:
+            return
+        rule = self.group_split or {}
+        mmin = float(rule.get("member_min", 0.15))
+        inside = float(rule.get("inside", 0.8))
+
+        def area(b):
+            return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+        def inter(a, b):
+            return (max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+                    * max(0.0, min(a[3], b[3]) - max(a[1], b[1])))
+
+        def lean(d):
+            a = d.get("assess") or {}
+            s = a.get("scores") or {}
+            return max((c for c in s if s[c] is not None), key=lambda c: s[c], default=None)
+        H, W = bgr.shape[:2]
+        for D in dets:
+            if not D.get("assess"):
+                continue
+            c = lean(D)
+            # **검출기가 이 클래스로 부른 상자는 가리지 않는다** — 그 상자는 그 물체 전체이고, 안의
+            # 의심 후보는 부품(통의 라벨·뚜껑)이다. 이름이 다른데(wooden block 인데 부탄으로 기움)
+            # 또는 이름이 없는데(장면을 감싼 상자) 기운 경우만 안의 것이 끌고 간 것으로 본다.
+            if c is None or D.get("name") == c:
+                continue
+            B, A = D["xyxy"], area(D["xyxy"])
+            # 가리는 것은 **검출기가 그 클래스 이름으로 부른** 물체뿐이다 — 붙은 다른 물체(앞의 통)는
+            # 이름을 받고, 부품(라벨·뚜껑)은 받지 않는다. 이름 없는 라벨을 가리면 통이 제 라벨을 잃었다
+            # **안에 들지 않아도** 이 상자의 member_min 이상과 겹치면 센다 — 앞에 붙은 통은 상자 밖으로
+            # 삐져나온다(pi13 장면1: 통의 위쪽만 상자에 들어 52 장이 가려지지 않았다). 겹친 곳만 칠한다
+            mem = [M for M in dets if M is not D and M.get("name") == c
+                   and (M.get("assess") or {}).get("suspect") == c
+                   and inter(M["xyxy"], B) >= mmin * A
+                   # 거의 같은 상자는 같은 물체다(IoU 0.7 이상) — 크기로 거르지 않는다: 앞의 통이
+                   # 뒤 상자보다 클 수 있다(장면1 통 81k px² > 상자 76k px²)
+                   and inter(M["xyxy"], B) / (A + area(M["xyxy"]) - inter(M["xyxy"], B)) < 0.7]
+            if not c or not mem:
+                continue
+            x1, y1 = max(0, int(B[0])), max(0, int(B[1]))
+            x2, y2 = min(W, int(B[2])), min(H, int(B[3]))
+            if x2 - x1 < 8 or y2 - y1 < 8:
+                continue
+            img = bgr.copy()
+            fill = np.median(bgr[y1:y2, x1:x2].reshape(-1, 3), axis=0).astype(np.uint8)
+            for M in mem:
+                m = M["xyxy"]
+                ya, yb = max(y1, int(m[1])), min(y2, int(m[3]))
+                xa, xb = max(x1, int(m[0])), min(x2, int(m[2]))
+                if yb > ya and xb > xa:
+                    img[ya:yb, xa:xb] = fill
+            probe = {k: v for k, v in D.items() if k not in ("verify", "verify_by", "assess", "_poly")}
+            if self.verifier is not None:
+                saved = getattr(self.verifier, "_last", None)
+                self.verifier._last = []                       # 캐시를 쓰지도 남기지도 않는다
+                self.verifier(img, [probe])
+                self.verifier._last = saved
+            D["assess"] = dict(cards.assess(probe, img), masked=len(mem))
+            if probe.get("verify_by") is not None:
+                D["verify_by"], D["verify"] = probe["verify_by"], probe.get("verify")
+
+    def _drop_groups(self, dets):
+        """다른 후보 둘 이상으로 채워진 큰 상자(묶음)를 지운다. (남은 것, 지운 수)."""
+        mmin = float(self.group_split.get("member_min", 0.15))
+        inside = float(self.group_split.get("inside", 0.8))
+        cover = float(self.group_split.get("cover", 0.5))
+
+        def area(b):
+            return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+        def inter(a, b):
+            w = min(a[2], b[2]) - max(a[0], b[0])
+            h = min(a[3], b[3]) - max(a[1], b[1])
+            return max(0.0, w) * max(0.0, h)
+        gone = set()
+        for D in dets:
+            B, A = D["xyxy"], area(D["xyxy"])
+            if A <= 0:
+                continue
+            mem = [M for M in dets if M is not D and area(M["xyxy"]) >= mmin * A
+                   and area(M["xyxy"]) < A and inter(M["xyxy"], B) >= inside * area(M["xyxy"])]
+            if len(mem) < 2:
+                continue
+            # 서로 많이 겹치는 것은 같은 물체의 두 상자다 — 다른 물체 둘이어야 묶음이다
+            distinct = [m for i, m in enumerate(mem)
+                        if all(inter(m["xyxy"], o["xyxy"]) < 0.5 * min(area(m["xyxy"]), area(o["xyxy"]))
+                               for o in mem[:i])]
+            if len(distinct) < 2:
+                continue
+            # 덮는 넓이: 칸으로 나눠 센다(겹친 곳을 두 번 세지 않는다)
+            g = 24
+            xs = np.linspace(B[0], B[2], g + 1)
+            ys = np.linspace(B[1], B[3], g + 1)
+            cx, cy = (xs[:-1] + xs[1:]) / 2, (ys[:-1] + ys[1:]) / 2
+            X, Y = np.meshgrid(cx, cy)
+            hit = np.zeros_like(X, bool)
+            for m in distinct:
+                b = m["xyxy"]
+                hit |= (X >= b[0]) & (X <= b[2]) & (Y >= b[1]) & (Y <= b[3])
+            if hit.mean() >= cover:
+                gone.add(id(D))
+        return [d for d in dets if id(d) not in gone], len(gone)
+
+    def _drop_nested(self, dets):
+        """**부품은 전체에 접는다** — 큰 상자 안에 `nest_ratio` 이상 들어간 상자를 지운다.
+
+        * 의심되지 않은 상자: 어떤 큰 상자 안에 들면 지운다(통의 라벨·마개).
+        * 같은 클래스로 의심된 것끼리 포개지면 **한 번에** 고른다(2026-11-13). 의심된 후보를
+          (그 클래스 이름으로 불렸는가, 넓이) 순으로 세우고, 앞서 남긴 것과 포개진 것은 지운다 —
+          이름 붙은 것과 전체가 부품보다 먼저 자리를 잡는다.
+          짝마다 따로 고르면 '장면 상자가 통을 지우고 라벨이 장면 상자를 지워' 라벨만 남았다.
+        * 작은 쪽이 **다른** 위험물로 의심되면 남긴다(큰 나무 토막 상자가 옆 통을 덮은 장).
         """
         def area(b):
             return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
 
+        def nested(a, b):                            # 작은 쪽이 큰 쪽 안에 비율 이상 드는가
+            small, big = (a, b) if area(a) <= area(b) else (b, a)
+            iw = min(small[2], big[2]) - max(small[0], big[0])
+            ih = min(small[3], big[3]) - max(small[1], big[1])
+            return iw > 0 and ih > 0 and area(small) > 0 and iw * ih / area(small) >= self.nest_ratio
+
         def sus(d):
             return (d.get("assess") or {}).get("suspect")
-        order = sorted(dets, key=lambda d: -area(d["xyxy"]))
-        keep, dropped = [], 0
-        for d in order:
-            b, a = d["xyxy"], area(d["xyxy"])
-            gone = False
-            for big in keep:
-                B = big["xyxy"]
-                iw = min(b[2], B[2]) - max(b[0], B[0])
-                ih = min(b[3], B[3]) - max(b[1], B[1])
-                if iw <= 0 or ih <= 0 or a <= 0:
-                    continue
-                if iw * ih / a >= self.nest_ratio and (not sus(d) or sus(d) == sus(big)):
-                    gone = True
-                    break
-            if gone:
-                dropped += 1
+        gone = set()
+        for d in dets:                                # 의심 아닌 부품
+            if not sus(d) and any(o is not d and area(o["xyxy"]) > area(d["xyxy"])
+                                  and nested(d["xyxy"], o["xyxy"]) for o in dets):
+                gone.add(id(d))
+        # (그 이름으로 불렸는가, 넓이) — 이름 붙은 것이 먼저, 그다음 **큰 것**(전체)이 부품보다 먼저.
+        # 장면을 감싼 상자는 앞 걸음(_reassess_masked)에서 안의 이름 붙은 통을 가리고 다시 재
+        # 의심이 벗겨지므로 여기까지 오지 않는다
+        ranked = sorted((d for d in dets if sus(d)),
+                        key=lambda d: (d.get("name") == sus(d), area(d["xyxy"])), reverse=True)
+        kept = []
+        for d in ranked:
+            if any(sus(k) == sus(d) and nested(d["xyxy"], k["xyxy"]) for k in kept):
+                gone.add(id(d))
             else:
-                keep.append(d)
-        kept = set(map(id, keep))
-        return [d for d in dets if id(d) in kept], dropped
+                kept.append(d)
+        return [d for d in dets if id(d) not in gone], len(gone)
 
     def _merge(self, raw, img_area):
         """같은 클래스가 merge_iou 이상 겹치면 하나로 보고 **어느 arm·문구가** 말했는지 모은다.
@@ -1739,10 +1883,13 @@ class RiverRunner:
                              # 없다. 같은 낱말이 여러 번이면 가장 높은 것을 남긴다.
                              "votes": {self._said(det): det["conf"]},
                              "prompts": {self._said(det)},
+                             "_poly": det.get("poly"),
                              "merged_from": ({det["merged_from"]} if det.get("merged_from")
                                              else set())})
             else:
                 dup["arms"].add(det["arm"])
+                if dup.get("_poly") is None and det.get("poly") is not None:
+                    dup["_poly"] = det["poly"]
                 word = self._said(det)
                 dup["prompts"].add(word)
                 if det["conf"] > dup["votes"].get(word, 0.0):
@@ -1816,7 +1963,8 @@ class RiverRunner:
                          "lead": group["lead"],
                          "votes": {k: round(float(v), 4) for k, v in
                                    sorted(group["votes"].items(), key=lambda t: -t[1])},
-                         "prompts": sorted(group["prompts"])})
+                         "prompts": sorted(group["prompts"]),
+                         "_poly": group.get("_poly")})              # 내보내지 않는다(_ 칸)
             if group.get("merged_from"):
                 # 어느 이름으로 잡혀 합쳐졌는지 남긴다 — 합침을 되돌려 보려면 필요하고,
                 # 남기지 않으면 "부탄" 이 부탄으로 잡힌 것인지 캔이 넘어온 것인지 모른다
@@ -1851,7 +1999,11 @@ class RiverRunner:
             for d in dets:
                 if d["name"] in cards.HAZARD or d["name"] in self.hypothesis:
                     d["assess"] = cards.assess(d, bgr)
+            self._reassess_masked(dets, bgr, cards)
             assess_ms = round((time.perf_counter() - a0) * 1000, 1)
+        grouped = 0
+        if self.group_split:
+            dets, grouped = self._drop_groups(dets)
         nested = 0
         if self.nest_ratio:
             dets, nested = self._drop_nested(dets)
@@ -1870,6 +2022,7 @@ class RiverRunner:
                 "verify_ms": verify_ms,
                 "assess_ms": assess_ms,
                 "nested_dropped": nested, "nest_ratio": self.nest_ratio,
+                "group_dropped": grouped,
                 "depth_ms": depth_ms,
                 "depth_space": getattr(self.depth, "space", None) if self.depth else None,
                 "verify_reused": getattr(self.verifier, "last_reused", 0) if self.verifier else 0,
@@ -1883,6 +2036,64 @@ class RiverRunner:
                 "hypothesis": sorted(self.hypothesis),
                 "hypothesis_covered": covered,
                 "prompt": "text"}, dets
+
+class AssessSmoother:
+    """**정지한 물체 · 정지한 카메라인데 판정이 흔들리는 것**을 막는다(2026-11-13).
+
+    장마다 점수가 몇 점씩 오르내리면 하한 근처의 물체는 의심 ↔ 아님을 오간다. 그래서
+    트랙(track_id)마다 클래스 점수를 **지수 평균**(alpha)하고, 의심은 **들어갈 때**(하한)와
+    **나올 때**(하한 − hysteresis) 문턱을 달리한다. 트랙이 없는 검출은 그대로 둔다.
+    날 점수는 `assess.raw_scores` 로 남긴다 — 평활이 무엇을 바꿨는지 뒤에서 볼 수 있게.
+    """
+
+    def __init__(self, spec):
+        self.alpha = float(spec.get("alpha", 0.4))
+        self.hyst = float(spec.get("hysteresis", 5.0))
+        self.max_missed = int(spec.get("max_missed", 15))
+        self.mem, self.n = {}, 0
+
+    def update(self, dets):
+        self.n += 1
+        for d in dets:
+            a, tid = d.get("assess"), d.get("track_id")
+            if not a or tid is None:
+                continue
+            raw = a.get("scores") or {}
+            m = self.mem.get(tid)
+            if m is None:
+                sm = dict(raw)
+            else:
+                sm = {}
+                for c, v in raw.items():
+                    old = m["s"].get(c)
+                    sm[c] = old if v is None else (v if old is None else
+                                                   self.alpha * v + (1 - self.alpha) * old)
+            best = max((c for c in sm if sm[c] is not None), key=lambda c: sm[c], default=None)
+            top = sm.get(best) if best else None
+            Ts = a.get("min_scores") or {}
+            T = float(Ts.get(best, a.get("min_score") or 0))
+            prev = m["sus"] if m else None
+            if top is None or not a.get("enough", True):
+                sus = None                           # 근거가 모자란 장은 의심하지 않는다
+            elif best == prev:
+                sus = best if top >= T - self.hyst else None
+            elif top >= T:
+                sus = best
+            elif prev and sm.get(prev) is not None and sm[prev] >= float(
+                    Ts.get(prev, a.get("min_score") or 0)) - self.hyst:
+                sus = prev
+            else:
+                sus = None
+            self.mem[tid] = {"s": sm, "sus": sus, "n": self.n}
+            d["assess"] = dict(a, raw_scores=raw, smoothed=True, suspect=sus,
+                               min_score=float(Ts.get(sus or best, a.get("min_score") or 0)),
+                               score=None if top is None else round(float(top), 1),
+                               scores={c: None if v is None else round(float(v), 1)
+                                       for c, v in sm.items()})
+        for k in [k for k, v in self.mem.items() if self.n - v["n"] > self.max_missed]:
+            del self.mem[k]
+        return dets
+
 
 RUNNERS = {"yoloe": YoloeRunner, "river": RiverRunner, "river_open": RiverRunner,
            "unidepth": UniDepthRunner, "moge2_aerial": MogeAerialRunner}
@@ -2108,6 +2319,10 @@ def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
                 dist = cards.fmt_distance(d.get("dist"))
                 text = "  ".join(s for s in (cards.SHOWN.get(sus, sus), dist,
                                              "%d" % round(a["score"])) if s)
+            elif d.get("name") in cards.HAZARD:
+                # 검출기는 위험물 낱말로 불렀지만 **점수가 의심에 못 미쳤다** — 회색 라벨에
+                # 위험물 이름을 쓰면 위험물처럼 읽힌다(줄자에 'butane gas canister'). 일반 이름으로
+                text = "object"
             else:
                 text = d.get("lead") or (d.get("prompts") or [None])[0] or d.get("name") or ""
             marked.append(dict(d, _label=text, _colour=hz if sus else ot))
@@ -2254,6 +2469,14 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
                 dets = (stab.update(dets, ts if ts is not None else time.time(), bgr)
                         if isinstance(stab, VendorTracker)
                         else stab.update(dets, ts if ts is not None else time.time()))
+        # **판정이 장마다 흔들리지 않게**(assess_smooth, 2026-11-13) — 트랙 번호가 붙은 뒤에
+        asm = ((cfg.get("models") or {}).get(det_model) or {}).get("assess_smooth")
+        if asm and asm.get("enabled", True):
+            skey = (device, base.get("run"), det_model)
+            sm = cfg.setdefault("_asm", {}).get(skey)
+            if sm is None:
+                sm = cfg["_asm"][skey] = AssessSmoother(asm)
+            dets = sm.update(dets)
         if wanted:
             rec = dict(base, model=det_model, **info)
             rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]

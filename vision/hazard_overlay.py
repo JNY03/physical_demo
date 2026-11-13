@@ -293,6 +293,46 @@ def band_of(ratio, bands):
     return None, None, None
 
 
+#: 형상 범위의 기본값(설정 shape.<클래스> 가 이긴다). **실물 치수에서** 잡는다:
+#:   부탄 통 66×200 mm — 옆에서 3.0, 비스듬히 줄어 ~1.6 까지. 위에서 보면 원(1.0)이라 못 맞춘다.
+#:   목함지뢰 200×90(실물 2.2) · 140×80(시연 1.75) — 윗면이 보이면 ~1.2 까지 준다.
+SHAPE_DEFAULT = {
+    "butane_canister": {"aspect": [1.6, 3.4], "solidity_min": 0.90, "rect_fill_min": None},
+    "wooden_box_mine": {"aspect": [1.15, 2.8], "solidity_min": 0.92, "rect_fill_min": 0.75},
+}
+
+
+def shape_cue(poly, cls):
+    """(pct, 설명) 또는 None. 각 항목은 0~1 로 매기고 평균한다.
+
+    * 종횡비: 범위 안이면 1, 밖이면 log2 로 1 옥타브에 걸쳐 0 으로
+    * 볼록 채움: solidity_min 에서 1, 그보다 0.15 낮으면 0 (상자·통은 볼록하다 — 줄자·케이블 묶음은 아니다)
+    * 사각형 채움(상자만): rect_fill_min 에서 1, 그보다 0.25 낮으면 0
+    """
+    p = np.asarray(poly, np.float32).reshape(-1, 2)
+    if len(p) < 3:
+        return None
+    area = float(cv2.contourArea(p))
+    (_cx, _cy), (rw, rh), _a = cv2.minAreaRect(p)
+    hull = float(cv2.contourArea(cv2.convexHull(p)))
+    if area <= 0 or hull <= 0 or min(rw, rh) < 4:
+        return None
+    spec = dict(SHAPE_DEFAULT.get(cls) or {}, **((CFG.get("shape") or {}).get(cls) or {}))
+    lo, hi = spec.get("aspect") or [1.0, 99.0]
+    ar = max(rw, rh) / max(min(rw, rh), 1e-6)
+    off = 0.0 if lo <= ar <= hi else abs(np.log2(ar / (lo if ar < lo else hi)))
+    parts = [max(0.0, 1.0 - off)]
+    solid = area / hull
+    smin = spec.get("solidity_min")
+    if smin is not None:
+        parts.append(min(1.0, max(0.0, 1.0 - (smin - solid) / 0.15)))
+    fill = area / max(rw * rh, 1e-6)
+    fmin = spec.get("rect_fill_min")
+    if fmin is not None:
+        parts.append(min(1.0, max(0.0, 1.0 - (fmin - fill) / 0.25)))
+    return 100.0 * float(np.mean(parts)), "aspect %.1f · convex %.2f · fill %.2f" % (ar, solid, fill)
+
+
 def grounds(det, W, H, bands, metres, colour=None):
     """Cues as percentages on one scale, plus the models that produced them.
 
@@ -348,17 +388,22 @@ def grounds(det, W, H, bands, metres, colour=None):
     # 이 crop 이 담을 수 있느냐다. 픽셀 예산은 **증거가 아니다** — 30 px 짜리는
     # 틀린 crop 이 아니라 **물을 수 없는** crop 이다. 그래서 옆에서 같이 점수가 되지
     # 않고 이 줄의 **무게**가 된다.
-    if colour is not None and cue_on("material"):
+    small = short < float(cue("appearance", "min_px", 48))   # 외형 단서를 물을 수 없는 크기
+    if colour is not None and cue_on("material") and not small:
         full = float(cue("material", "coverage_full", 0.35))
         px = float(cue("material", "confidence_px", MATERIAL_PX))
         if cls == "butane_canister":
             # 인쇄된 금속: 채도 높은 도색 + 도색 안 된 돔/바닥
             lw = float(cue("material", "butane_livery_weight", 0.6))
             mf = float(cue("material", "butane_metal_full", 0.30))
-            # 도색 띠는 안 보일 때가 있다(가려짐·뒷면·먼지) — 맨 금속 항을 **도색에 묶지
-            # 않는다**. 대신 금속 규칙에서 따뜻한 색조를 빼 밝은 원목이 금속이 되지 않게 했고
-            # (colour_cue), 화면을 덮는 바닥 상자는 프리 arm 의 max_area_ratio 가 막는다.
-            cov = lw * max(colour["red"], colour["blue"]) / full + (1 - lw) * colour["chrome"] / mf
+            # **맨 금속은 도색과 함께일 때 크게 센다**(2026-11-13). 무채색·밝음만으로는 흰 충전기·
+            # 케이블·회색 바닥도 '금속' 이 되어 재질 100% 가 나왔다(pi13 장면2 오검출 46 점).
+            # 도색 띠가 안 보이는 통(뒷면·가려짐)을 위해 **0 으로 묶지는 않고** 30% 는 남긴다 —
+            # 그 경우는 글 설명·기준 사진·형상 단서가 메운다.
+            floor = float(cue("material", "butane_metal_alone", 0.3))
+            livery = max(colour["red"], colour["blue"])
+            tie = floor + (1 - floor) * min(1.0, livery / full)
+            cov = lw * livery / full + (1 - lw) * tie * colour["chrome"] / mf
             txt = "livery %.2f · bare metal %.2f" % (max(colour["red"], colour["blue"]),
                                                      colour["chrome"])
         else:
@@ -377,7 +422,12 @@ def grounds(det, W, H, bands, metres, colour=None):
     if v:
         per = v.get("per_model") or {}
         learned = {k: r for k, r in per.items() if r.get("learned", True)}
-        if learned and cue_on("match"):
+        sem = v.get("semantic")
+        if sem is not None and cue_on("semantic") and not small:
+            # **글 설명 비교**: 위험물 묘사 문장 vs 장면을 모른 채 쓴 일반 문장. 확률 그대로 %.
+            rows.append(("semantic", 100.0 * float(sem), "text description", False, 1.0))
+            src["semantic"] = "clip_text"
+        if learned and cue_on("match") and not small:
             m = float(np.mean([r["margin"] for r in learned.values()]))
             span = float(cue("match", "margin_span", MARGIN_SPAN))
             pct = 100.0 * min(1.0, max(0.0, 0.5 + m / (2 * span)))
@@ -394,6 +444,17 @@ def grounds(det, W, H, bands, metres, colour=None):
                          else "cuboid, flat face", False, 1.0))
             src["structure"] = "rule"
 
+    # shape - **분할 마스크의 형상**(2026-11-13). 크기·회전에 무관한 수만 쓴다:
+    # 볼록 채움(마스크/볼록 껍질), 사각형 채움(마스크/최소 회전 사각형), 종횡비(그 사각형).
+    # 범위는 **물건의 실제 치수**에서 잡았다(장면에 맞춘 값이 아니다) — 설정 shape.<클래스>.
+    poly = det.get("_poly")
+    if poly is not None and cue_on("shape"):
+        sp = shape_cue(poly, cls)
+        if sp is not None:
+            pct, txt = sp
+            rows.append(("shape", pct, txt, False, 1.0))
+            src["shape"] = "mask+rule"
+
     # distance is reported, never scored - a missing depth map is not evidence
     # **없으면 적지 않는다.** 'no depth' 를 쓰면 없다는 사실이 한 줄을 차지한다
     if metres is not None and cue_on("distance"):
@@ -403,8 +464,8 @@ def grounds(det, W, H, bands, metres, colour=None):
     # 줄(pct None)은 빠진 뒤 **남은 무게로 다시 나눈다** — 못 잰 것을 0 점으로 세지 않는다.
     # **중요도 순으로 세운다.** match 와 size 는 선언(기준 사진·규격)에 기대는 단서라
     # 뒤에 둔다 — 선언이 현장과 어긋나면 먼저 흔들리는 쪽이다.
-    order = {"class": 0, "material": 1, "structure": 2, "match": 3, "size": 4,
-             "distance": 8, "source": 9}
+    order = {"semantic": 0, "match": 1, "shape": 2, "class": 3, "material": 4, "structure": 5,
+             "size": 6, "distance": 8, "source": 9}           # 무게 순 — 읽는 사람이 센 단서부터 본다
     rows.sort(key=lambda r: order.get(r[0], 5))
     w = weights()
     scored = [(r[1], w.get(r[0], 0.0)) for r in rows if r[1] is not None]
@@ -414,16 +475,17 @@ def grounds(det, W, H, bands, metres, colour=None):
 
 
 #: 단서 중요도. **설정(`decision.weights`)이 이긴다** — 이것은 설정이 없을 때의 값이다.
-#: **검출기가 댄 이름(class)을 덜 믿는다** — 도메인이 바뀌면 낱말이 먼저 흔들리고, 이름을
-#: 못 받은 후보는 늘 0 이다. 물체 자체에서 재는 단서(match·material·structure)를 더 믿는다.
-#:   match 0.30      기준 사진 대비 pos − neg. 음성 기준을 빼서 "무엇과도 비슷한" crop 을 깎는다
-#:   material 0.25   색 규칙(나무: 따뜻한 저채도 · 부탄: 도색 + 맨 금속)
-#:   structure 0.20  모양(상자: 평평한 면, 부탄: 뚜껑·어깨·몸통 — 부탄 쪽은 아직 약하다)
+#: 기준은 **환경이 바뀌어도 덜 흔들리는 단서를 높게**(2026-11-13): 장소·카메라·조명이 바뀌면
+#: 색 규칙(재질)이 가장 먼저 흔들리고, 검출기가 댄 이름(class)은 도메인이 바뀌면 낱말이 흔들린다.
+#:   semantic 0.30   글 설명 비교(CLIP 문장) — 기준 사진도 장면 지식도 필요 없다
+#:   match 0.20      기준 사진 대비 pos − neg
+#:   shape 0.15      분할 마스크의 형상(종횡비·볼록·채움) — 크기·회전에 무관
 #:   class 0.15      검출기가 **그 클래스 낱말로** 부른 확신
-#:   size            **뺐다**(2026-11-13). 비스듬한 물체에서 박스가 실물보다 커져 실제 물체에서도
-#:                   거의 늘 0 이었다 — 무게가 없으면 계산하더라도 점수에 들어가지 않는다
+#:   material 0.10   색 규칙 — 카메라 색감·조명에 가장 흔들린다
+#:   structure 0.10  밝기 프로파일 규칙(상자: 평평한 면 · 부탄: 뚜껑·어깨·몸통 — 부탄 쪽은 약하다)
 #: 무게의 합이 1 일 필요는 없다 — 잰 단서의 무게 합으로 나눈다.
-DEFAULT_WEIGHTS = {"match": 0.30, "material": 0.25, "structure": 0.20, "class": 0.15}
+DEFAULT_WEIGHTS = {"semantic": 0.30, "match": 0.20, "shape": 0.15, "class": 0.15,
+                   "material": 0.10, "structure": 0.10}
 
 
 def weights():
@@ -432,9 +494,15 @@ def weights():
 
 
 # ---------------------------------------------------------------- 판정 (점수로 견준다)
-def min_score():
-    """위험물로 **의심**한다고 말할 점수 하한. 설정(`decision.min_score`)이 정한다."""
-    return float((CFG.get("decision") or {}).get("min_score", 50.0))
+def min_score(cls=None):
+    """위험물로 **의심**한다고 말할 점수 하한. 클래스별 값(`decision.min_score_by_class`)이
+    있으면 그것, 없으면 `decision.min_score`. 클래스마다 단서의 성질이 달라 갈리는 자리가
+    다르다(2026-11-13: 부탄은 통 64~72 · 줄자 53~55, 목함지뢰는 상자 54~92 · 수첩 38)."""
+    dec = CFG.get("decision") or {}
+    by = dec.get("min_score_by_class") or {}
+    if cls is not None and cls in by:
+        return float(by[cls])
+    return float(dec.get("min_score", 50.0))
 
 
 def assess(det, clean_bgr, wh=None):
@@ -470,8 +538,21 @@ def assess(det, clean_bgr, wh=None):
     best = max((c for c in scores if scores[c] is not None), key=lambda c: scores[c],
                default=None)
     top = scores.get(best) if best else None
-    return {"scores": scores, "suspect": best if (top is not None and top >= min_score()) else None,
-            "score": top, "min_score": min_score(), "cards": cards}
+    # **근거가 모자라면 의심하지 않는다**(min_evidence, 2026-11-13). 작은 부품(뚜껑·라벨 글자)은
+    # 외형 단서가 모두 '못 잼' 이라 이름 0 · 형상 100 만 남아 점수가 50 이 됐다 — 형상 하나로
+    # 위험물이라고 말한 것이다. 잰 단서 무게가 전체의 이 비율 미만이면 점수는 두되 판정은 없다.
+    w = weights()
+    total = sum(w.values()) or 1.0
+    have = 0.0
+    if best:
+        have = sum(w.get(r[0], 0.0) for r in cards[best]["rows"] if r[1] is not None)
+    enough = have / total >= float((CFG.get("decision") or {}).get("min_evidence", 0.45))
+    return {"scores": scores,
+            "suspect": best if (top is not None and enough and top >= min_score(best)) else None,
+            "score": top, "min_score": min_score(best), "evidence": round(have / total, 2),
+            "min_scores": {c: min_score(c) for c in HAZARD},
+            "enough": bool(enough),
+            "cards": cards}
 
 
 # ---------------------------------------------------------------- draw

@@ -296,6 +296,14 @@ models:
                                   # structure·class — size 는 뺐다)를 **중요도 무게로** 재고, 가장 높은
                                   # 클래스가 하한 이상이면 그 이름으로 의심한다. 하한은
                                   # vision/assets/hazard_cues.json decision.min_score
+    group_split:                  # **붙은 물체 묶음 상자를 뺀다**(2026-11-13): 다른 후보 둘 이상이
+      member_min: 0.15            # 각각 이 상자 넓이의 15% 이상이고 80% 이상 안에 들며
+      inside: 0.8
+      cover: 0.5                  # 함께 상자의 50% 이상을 덮으면 그 상자는 물체가 아니라 묶음이다
+    assess_smooth:                # **판정이 장마다 흔들리지 않게**(2026-11-13): 트랙마다 점수 지수 평균,
+      alpha: 0.4                  # 의심은 하한에서 들어가고 하한-hysteresis 에서 나온다
+      hysteresis: 5
+      max_missed: 15              # 이 장 수만큼 안 보인 트랙은 잊는다
     nest_ratio: 0.7               # **부품은 전체에 접는다**(2026-11-13). 작은 상자가 큰 상자 안에
                                   # 이 비율 이상 들어가면 큰 것 하나만 남긴다(부탄 통 안의 뚜껑·
                                   # 라벨·마개). 작은 쪽이 **다른** 위험물로 의심되면 남긴다. null = 끔
@@ -356,9 +364,46 @@ models:
       candidates: [unconfirmed]   # 이름 없는 후보도 위 두 클래스 **모두에 대해** 잰다(assess 가 견준다)
       prototypes: /home/khw67/data_stream/models/butane_ref/prototypes.npz
       threads: 8
+      min_px: 48                  # crop 짧은 변이 이보다 작으면 임베딩하지 않는다(외형 단서 '못 잼')
       max_per_frame: 12            # 이 장의 예산. 넘으면 **확신 낮은 쪽**이 다음 장으로
       cache_iou: 0.7              # 앞 장과 이만큼 겹치는 같은 클래스는 다시 재지 않는다
       structure: true             # 학습하지 않은 구조 서명을 함께 센다(설명 가능한 신호)
+      # **글 설명 비교**(semantic, 2026-11-13). crop 을 위험물 묘사 문장과, **장면을 모른 채 쓴**
+      # 일반 문장과 견줘 확률을 낸다. 일반 문장에 **장면에 있는 물건 이름을 넣지 않는다** —
+      # 넣으면 그 장면에만 맞는다(pi13 실측은 수첩·충전기·줄자 이름 없이 쟀다).
+      # 넣은 '헷갈리는 물건'(병·골판지 상자·플라스틱 상자)은 위험물마다 알려진 혼동 범주다.
+      semantic:
+        enabled: true
+        encoder: clip_b32         # 사진 임베딩은 아래 같은 이름의 모델 것을 쓴다
+        text_model: /home/khw67/data_stream/models/clip-vit-base-patch32/onnx/text_model.onnx
+        tokenizer: /home/khw67/data_stream/models/clip-vit-base-patch32/tokenizer.json
+        temperature: 100          # CLIP 의 logit 배율
+        prompts:
+          butane_canister:
+            - a photo of a portable butane gas canister
+            - a metal aerosol spray can with a plastic cap
+            - a cylindrical gas cartridge for a camping stove
+            - a butane gas can lying on the ground
+          wooden_box_mine:
+            - a photo of a small wooden box
+            - a rectangular plain wooden crate
+            - a wooden box mine
+            - a small wooden box lying on the ground
+        negatives:
+          - a photo of an object
+          - a household item
+          - a piece of trash
+          - a plastic object
+          - a rock
+          - the ground
+          - a toy
+          - an electronic device
+          - a paper product
+          - a bottle
+          - a cardboard box
+          - a plastic box
+          - a plant
+          - water
       models:
         - name: clip_b32
           # **fp32 를 GPU 에서**(2026-11-13). int8 양자화본은 CPU 에서 12 crop 542 ms 였고(GPU 에서는

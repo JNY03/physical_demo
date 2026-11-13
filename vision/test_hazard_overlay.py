@@ -64,7 +64,8 @@ def test_score_is_weighted_mean_of_measured_cues_only():
     ho.load_cues()
     w = ho.weights()
     assert "size" not in w and not ho.cue_on("size")                   # size 단서는 뺐다
-    assert w["match"] > w["class"] and w["material"] > w["class"]   # 이름을 덜 믿는다
+    # 환경이 바뀌어도 덜 흔들리는 단서를 높게: 글 설명·기준 사진 > 이름 > 색 규칙
+    assert w["semantic"] >= w["match"] > w["class"] > w["material"]
     det = {"cls": "butane_canister", "conf": 0.6, "xyxy": [0, 0, 100, 300], "lead": "beverage can",
            "verify": None}                                           # match·structure 는 못 잰다
     colour = {"red": 0.2, "blue": 0.0, "both": 0.0, "wood": 0.0, "chrome": 0.3, "lit": 0.2}
@@ -87,7 +88,9 @@ def test_assess_compares_every_hazard_class_and_uses_min_score():
     assert a["min_score"] == ho.min_score()
     best = max(a["scores"], key=lambda c: a["scores"][c] or -1)
     assert a["suspect"] == (best if a["scores"][best] >= a["min_score"] else None)
-    assert a["cards"][best]["rows"][0][0] == "class"
+    keys = [r[0] for r in a["cards"][best]["rows"] if r[1] is not None]
+    order = sorted(keys, key=lambda k: -ho.weights().get(k, 0))
+    assert keys == order                                             # 무게 순으로 늘어선다
 
 
 def test_card_scale_follows_photo_width():
@@ -95,3 +98,26 @@ def test_card_scale_follows_photo_width():
     for w in (1280, 3840, 8000):
         assert abs(ho.card_scale(w) - w / ho.CARD_BASE_W) < 1e-9
     assert ho.card_scale(320) == ho.CARD_MIN_SCALE                    # 작은 그림은 하한까지만
+
+
+def test_shape_cue_separates_box_can_and_irregular():
+    import cv2
+    def rect(w, h):
+        return np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)
+    box = ho.shape_cue(rect(160, 100), "wooden_box_mine")[0]         # 1.6:1 볼록 사각형
+    can = ho.shape_cue(rect(70, 200), "butane_canister")[0]          # 2.9:1 원통 옆모습
+    star = np.array([[50, 0], [62, 38], [100, 38], [69, 62], [81, 100], [50, 76],
+                     [19, 100], [31, 62], [0, 38], [38, 38]], np.float32)   # 오목한 묶음
+    assert box > 90 and can > 90
+    assert ho.shape_cue(star, "wooden_box_mine")[0] < 60
+    assert ho.shape_cue(rect(100, 100), "butane_canister")[0] < 80   # 정사각은 통 옆모습이 아니다
+
+
+def test_small_crop_does_not_score_appearance():
+    ho.load_cues()
+    det = {"cls": "butane_canister", "conf": 0.6, "xyxy": [0, 0, 20, 30], "lead": "can",
+           "verify": {"semantic": 0.99, "per_model": {"clip_b32": {"margin": 0.2}}}}
+    colour = {"red": 0.5, "blue": 0.0, "both": 0.0, "wood": 0.0, "chrome": 0.3, "lit": 0.5}
+    _sc, rows, _src = ho.grounds(det, 1280, 720, None, None, colour=colour)
+    got = {k for k, p, *_ in rows if p is not None}
+    assert not got & {"semantic", "match", "material"}               # 20 px: 묻지 않는다(0 점 아님)
