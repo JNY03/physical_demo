@@ -1835,7 +1835,7 @@ def colorbar(width, lo, hi, vis):
 
 
 # ---------------------------------------------------------------- 오버레이 (config overlay)
-LABEL_TOKENS = ("name", "conf", "cls", "id", "depth", "range", "gps", "alt", "ned")
+LABEL_TOKENS = ("name", "lead", "conf", "cls", "id", "depth", "range", "dist", "gps", "alt", "ned")
 
 
 def check_overlay_cfg(cfg):
@@ -1863,6 +1863,12 @@ def label_token(tok, d, dec):
     """검출 하나의 표시 문자열. 값이 없으면 None (그 항목을 뺀다)"""
     if tok == "name":
         return d["name"]
+    if tok == "lead":
+        # **이긴 낱말, 없으면 클래스 이름.** 가설 칸은 이름이 전부 `unconfirmed` 라
+        # 그것을 쓰면 화면에 같은 글자만 스물세 개 뜬다. 그래서 label 에서 `name` 을
+        # 빼고 이 토큰만 두면 "unconfirmed" 글자가 사라지고 낱말만 남는다 —
+        # 어느 클래스가 가설 칸인지를 여기서 하드코딩하지 않는 방법이기도 하다.
+        return d.get("lead") or (d.get("prompts") or [None])[0] or d.get("name")
     if tok == "conf":
         return "%.2f" % d["conf"]
     if tok == "cls":
@@ -1871,6 +1877,11 @@ def label_token(tok, d, dec):
         return "id%d" % d["track_id"] if d.get("track_id") is not None else None
     if tok == "depth":
         return "Z%.2fm" % d["depth_m"] if d.get("depth_m") is not None else None
+    if tok == "dist":
+        v = d.get("dist")
+        if not v:
+            return None
+        return "%.1fm" % v["value"] if v.get("space") == "metric" else "%.3f" % v["value"]
     if tok == "range":
         v = d.get("range_m", d.get("depth_m"))         # GPS 계산을 안 하면 range_m 이 없다 → Z 로
         return "%.2fm" % v if v is not None else None
@@ -1888,7 +1899,7 @@ def class_color(cls):
     return colors(int(cls), True)                      # BGR, ultralytics 와 같은 색
 
 
-def draw_dets(img, dets, ocfg, kind):
+def draw_dets(img, dets, ocfg, kind, colour_fn=None):
     """박스 + config 로 고른 라벨 줄들. overlay.min_conf 미만은 그림에서만 뺀다"""
     h, w = img.shape[:2]
     fs = float(ocfg.get("font_scale") or max(0.4, w / 1600.0))
@@ -1900,7 +1911,7 @@ def draw_dets(img, dets, ocfg, kind):
         if min_conf is not None and d["conf"] < float(min_conf):
             continue
         x1, y1, x2, y2 = [int(round(v)) for v in d["xyxy"]]
-        color = class_color(d["cls"])
+        color = colour_fn(d) if colour_fn else class_color(d["cls"])
         cv2.rectangle(img, (x1, y1), (x2, y2), color, lw)
         lines = [" ".join(t for t in (label_token(k, d, dec) for k in line) if t) for line in spec]
         lines = [s for s in lines if s]
@@ -1957,8 +1968,41 @@ def add_header(img, lines, ocfg):
 
 
 def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
-    out = draw_dets(bgr.copy(), dets, ocfg, kind)
+    # 카드를 쓰는 배치에서는 **색의 주인도 카드 쪽**이다 — 위험물 노랑, 나머지 회색.
+    # 두 곳이 색을 따로 정하면 같은 상자가 화면마다 다른 색이 된다.
+    use_cards = ((ocfg.get(kind) or {}) if isinstance(ocfg.get(kind), dict) else {}).get("cards")
+    colour_fn = None
+    if use_cards:
+        try:
+            colour_fn = lambda d: _cards_module().box_colour(d, bgr=True)
+        except Exception:
+            colour_fn = None
+    out = draw_dets(bgr.copy(), dets, ocfg, kind, colour_fn)
+    # **근거 카드.** 선언으로 켠다(`overlay.<kind>.cards`). 위험물 후보가 있는 장에만
+    # 그려지고 없으면 비용 0 이다(실측 카드 1개 8.4 ms · 3개 12.7 ms).
+    # 그리는 코드의 주인은 `hazard_overlay.py` 하나다 — 운영 화면과 검수 화면이
+    # 각자 조립하면 어느 날 둘이 다른 말을 한다.
+    if use_cards:
+        try:
+            # **카드 테두리는 박스와 같은 색이다.** 색이 다르면 어느 카드가 어느
+            # 상자인지 지시선을 따라가야 안다. 색의 주인은 여기(`class_color`)다.
+            out = _cards_module().add_cards(
+                out, bgr, dets, cues=(ocfg.get(kind) or {}).get("cues"),
+                colour_of=None)                  # 색의 주인은 카드 모듈이다
+        except Exception as exc:                 # 카드가 실패해도 오버레이는 나간다
+            log("  overlay 카드 실패: %s: %s" % (type(exc).__name__, exc))
     return add_header(out, [title if ocfg.get("title", True) else None], ocfg)
+
+
+def _cards_module(_m=[]):
+    if not _m:
+        import importlib.util as _ilu
+        sp = _ilu.spec_from_file_location("hazard_overlay",
+                                          Path(__file__).with_name("hazard_overlay.py"))
+        mod = _ilu.module_from_spec(sp)
+        sp.loader.exec_module(mod)
+        _m.append(mod)
+    return _m[0]
 
 
 def depth_overlay(bgr, depth, dets, title, vis, ocfg, rec):

@@ -72,21 +72,35 @@ def test_the_structure_cue_reads_a_lying_can_too():
     assert abs(a - b) < 0.12
 
 
-def test_the_mine_gets_no_structure_cue_because_none_was_found():
-    """**갈리지 않는 수를 근거로 내지 않는다.**
-
-    전에는 여기서 목질색을 셌는데 `material` 이 같은 것을 보고 있어 같은 사실이
-    평균에 두 번 들어갔다. 색을 안 보는 형상 단서로 바꿔 보려고 명암 기울기 셋을
-    쟀고 **셋 다 갈리지 않았다** — 하늘이 진짜 상자보다 '네모났다'(0.515 vs 0.440).
-    그래서 내지 않는다. 증거처럼 보이는데 증거가 아닌 수가 중복보다 나쁘다.
+def test_the_shape_cue_finds_a_flat_face_for_the_box():
+    """나무 상자는 **직육면체** — 긴 축에 수직인 밝기 프로파일이 평탄하다.
+    실측: 진짜 상자 0.998 · 실내 오검출 0.684 · 하천 오검출 0.368.
     """
-    wood = np.full((120, 60, 3), (150, 190, 225), np.uint8)
-    vivid = np.full((120, 60, 3), (30, 30, 240), np.uint8)
-    assert hv.HazardVerifier._structure(wood, "wooden_box_mine") is None
-    assert hv.HazardVerifier._structure(vivid, "wooden_box_mine") is None
-    # 부탄은 구성이 색 말고도 **순서**(뚜껑→어깨→몸통)를 보므로 그대로 둔다
-    assert hv.HazardVerifier._structure(_can((200, 60, 40), (40, 40, 220)),
-                                        "butane_canister") is not None
+    box = np.zeros((60, 200, 3), np.uint8)
+    box[:, 20:180] = 180                              # 평평한 면
+    noisy = (np.random.default_rng(0).integers(0, 255, (60, 200, 3))).astype(np.uint8)
+    f = hv.HazardVerifier._structure
+    assert f(box, "wooden_box_mine") > 0.8
+    assert f(box, "wooden_box_mine") > f(noisy, "wooden_box_mine")
+
+
+def test_butane_keeps_the_zone_signature_because_round_did_not_separate():
+    """**부탄의 '원통' 은 아직 못 잰다.** 둥근 음영을 재는 두 방법을 시도했고 둘 다
+    갈리지 않았다 — 2차 미분 평균은 사실 모서리 활동량이었고(합성 원통 0.098 <
+    합성 상자 0.631 로 거꾸로), 돔 상관 x (1-flat) 은 **하천 오검출이 0.230 으로
+    가장 높았다**(부탄 0.179 / 0.116).
+
+    그래서 부탄은 구성 서명(뚜껑 → 어깨 → 몸통)을 그대로 쓴다. 모양은 아니지만
+    실제로 갈리고, **갈리지 않는 수를 내는 것보다 낫다.**
+    """
+    can = _can((200, 60, 40), (40, 40, 220))
+    plain = np.full((200, 60, 3), (40, 40, 220), np.uint8)
+    f = hv.HazardVerifier._structure
+    assert f(can, "butane_canister") > f(plain, "butane_canister")
+
+
+def test_a_crop_too_small_for_a_profile_is_not_scored():
+    assert hv.HazardVerifier._structure(np.zeros((8, 8, 3), np.uint8), "wooden_box_mine") is None
 
 
 def test_a_crop_too_small_is_not_scored():

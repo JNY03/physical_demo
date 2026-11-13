@@ -638,7 +638,18 @@ overlay:
   yoloe:
     label: [[name, conf]]
   river:
-    label: [[name, conf]]         # agree 를 보려면 [[name, conf], [agree]] — results.jsonl 에는 항상 있다
+    # **이긴 낱말을 함께 쓴다.** 가설 칸은 이름이 전부 `unconfirmed` 라 그것만 쓰면
+    # 화면에 같은 글자가 스물세 개 뜬다. `lead` 는 클래스 이름과 같으면 저절로 빠진다.
+    # `name` 을 빼고 `lead` 만 둔다 — 가설 칸의 "unconfirmed" 글자가 사라지고 이긴
+    # 낱말만 남는다. lead 는 낱말이 없으면 클래스 이름으로 물러선다.
+    label: [[lead, dist]]         # 쓸 수 있는 항목: name lead conf cls id depth range dist gps alt ned
+    # **근거 카드를 오버레이에 그린다.** 위험물 후보가 있는 장에만 그려지고 없으면
+    # 비용 0 이다(실측 카드 1개 8.4 ms · 3개 12.7 ms · 전체 200 ms 대비).
+    # 끄면 위 label 한 줄만 남는 예전 화면이 된다.
+    # 그리는 코드의 주인은 `hazard_overlay.py` 하나이고 검수 도구도 그것을 불러 쓴다 —
+    # 두 화면이 같은 검출을 각자 조립하면 어느 날 둘이 다른 말을 한다.
+    cards: true
+    cues: null                    # 단서 선언 자리. null = vision/assets/hazard_cues.json
   depth:
     label: [[name, conf, range], [gps]]
     pose: true                    # 영상 위 띠에 드론 GPS·고도·자세·state 시각 차이 한 줄

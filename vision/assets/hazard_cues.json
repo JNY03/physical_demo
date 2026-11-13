@@ -1,0 +1,89 @@
+{
+ "_doc": [
+  "위험물 근거 카드의 단서 선언. tools/hazard_card.py --cues 로 준다.",
+  "단서를 끄거나(enabled) 수식의 상수를 바꿀 수 있다. **식의 모양은 코드가 소유하고",
+  "그 상수는 여기가 소유한다** — 식 자체를 문자열로 두면 무엇이 돌았는지 뒤에서",
+  "설명할 수 없고, 상수만 두면 바뀐 것이 기록에 남는다.",
+  "퍼센트는 **확률이 아니다**. 어느 단서가 약한지 보라고 둔 공통 자다."
+ ],
+ "objects": {
+  "wooden_box_mine": {
+   "shown": "wooden box mine",
+   "size_mm": [
+    140,
+    80,
+    60
+   ],
+   "_note": [
+    "**시연용 상자의 실측값**(2026-11-13 사용자 측정: 가로 14 · 세로 8 · 높이 6 cm).",
+    "실제 목함지뢰(PMD-6/KPA 형)는 200 x 90 x 45~65 mm 로 **더 크다**.",
+    "지금 이 값은 '시연 상자를 잘 맞히는' 쪽으로 size 단서를 맞춘 것이고,",
+    "실물을 찾는 배치에서는 [200, 90, 55] 로 바꿔야 한다. 그대로 두면 실물",
+    "목함지뢰가 size 에서 낮은 점수를 받는다 — 20/14 = 1.43 배다."
+   ]
+  },
+  "butane_canister": {
+   "shown": "butane canister",
+   "size_mm": [
+    210,
+    70,
+    70
+   ],
+   "_note": "세로형 카세트 부탄 실측(지름 7 · 높이 21 cm). EN 417 급 220 g 과 같은 계열."
+  }
+ },
+ "cues": {
+  "class": {
+   "enabled": true,
+   "max_candidates": 4,
+   "_formula": "pct = confidence x 100"
+  },
+  "size": {
+   "enabled": true,
+   "tolerance_octaves": 1.0,
+   "_formula": "off = |log2(실측mm / 규격mm)| ; pct = (1 - max(off_긴변, off_짧은변) / tolerance_octaves) x 100",
+   "_note": "두 축 중 **나쁜 쪽**이 점수를 정한다. 긴 변만 보면 225x194 mm 덩어리가 통과한다."
+  },
+  "material": {
+   "enabled": true,
+   "confidence_px": 64,
+   "coverage_full": 0.35,
+   "wood_saturation_penalty": 0.5,
+   "butane_livery_weight": 0.6,
+   "butane_metal_full": 0.3,
+   "_formula": [
+    "목함지뢰  cov = (목질색비율 - wood_saturation_penalty x 채도비율) / coverage_full",
+    "부탄      cov = butane_livery_weight x max(빨강,파랑)/coverage_full",
+    "                + (1-butane_livery_weight) x 무채색밝음/butane_metal_full",
+    "pct = min(1, max(0, cov)) x 100 ; confidence = min(1, 짧은변 / confidence_px)"
+   ],
+   "_note": "confidence 는 점수가 아니라 **이 줄의 무게**다. 못 묻는 crop 과 틀린 crop 은 다르다."
+  },
+  "match": {
+   "enabled": true,
+   "margin_span": 0.2,
+   "_formula": "pct = clamp(0.5 + margin / (2 x margin_span)) x 100",
+   "_note": "margin = (기준과의 최대 유사도) - (음성 기준과의 최대 유사도)."
+  },
+  "structure": {
+   "enabled": true,
+   "_note": "부탄만 난다. 목함지뢰는 독립적인 형상 단서를 못 찾아 내지 않는다."
+  },
+  "distance": {
+   "enabled": true,
+   "_note": "**점수로 세지 않는다.** 깊이 지도가 없다는 사실은 증거가 아니다. 없으면 줄도 안 난다."
+  }
+ },
+ "card": {
+  "thumbnail_below_frame_ratio": 0.02,
+  "_note": [
+   "**작아서 눈으로 못 보는 것만** 확대 crop 을 붙인다. 화면에서 이 비율보다 크게",
+   "보이는 물체는 원본에서 이미 보이므로 썸네일이 자리만 먹는다.",
+   "실측: 66점 나무 상자 486x163 px = 화면의 8.6% (붙이지 않음),",
+   "      9점 오검출 50x58 px = 0.3% (붙인다).",
+   "0 으로 두면 전부 붙이지 않고, 1 로 두면 전부 붙인다.",
+   "max_cards: 한 장에 점수 높은 것부터 이만큼만. 카드가 많으면 장면이 사라진다."
+  ],
+  "max_cards": 5
+ }
+}
