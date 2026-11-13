@@ -133,8 +133,14 @@ def find_font():
 CARD_BASE_W = 1280
 
 
+#: **사진 폭에 비례한다**(2026-11-13) — 상한을 두지 않는다. 4 배 상한이 있을 때 8000 px 사진의
+#: 카드는 폭의 25% 로 1280·3840 px(39%)보다 작아졌다. 작은 그림은 0.5 배까지 줄인다(640 px
+#: 에서 498 px 카드가 화면의 78% 를 덮었다). 글꼴은 Pen 이 8 px 아래로 내리지 않는다.
+CARD_MIN_SCALE = 0.5
+
+
 def card_scale(width):
-    return max(1.0, min(4.0, width / float(CARD_BASE_W)))
+    return max(CARD_MIN_SCALE, width / float(CARD_BASE_W))
 
 
 class Pen:
@@ -687,7 +693,8 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
 
 
 # ---------------------------------------------------------------- 자리 고르기
-#: 카드와 장애물(박스·라벨·다른 카드) 사이에 비울 틈(px)과 자리를 훑는 간격(px)
+#: 카드와 장애물(박스·라벨·다른 카드) 사이에 비울 틈(px)과 자리를 훑는 간격(px) —
+#: 기준 폭(CARD_BASE_W) 에서의 값이고 _cards_on 이 카드와 같은 배율로 키운다
 CARD_GAP, CARD_STEP = 6, 8
 #: 화면 안에 빈자리가 없을 때 덧대는 오른쪽 패널의 바탕색
 PANEL_RGB = (32, 34, 40)
@@ -746,34 +753,37 @@ def _cards_on(pil, pen, cards, obstacles):
     물체 위에 올리면 검출이 안 보인다. 둘 다 하지 않는다.
     """
     W, H = pil.size
+    # **틈·훑는 칸도 그림 폭을 따른다** — 카드 치수(pen.px)와 같은 배율이다
+    s = getattr(pen, "scale", 1.0) or 1.0
+    gap, step = max(1, int(round(CARD_GAP * s))), max(1, int(round(CARD_STEP * s)))
     occ = np.zeros((H, W), np.uint8)
     for o in obstacles:
-        _mark(occ, *o)
+        _mark(occ, *o, gap=gap)
     for k in cards:                                   # 위험물 박스는 라벨이 없어도 피한다
-        _mark(occ, *k["box"])
+        _mark(occ, *k["box"], gap=gap)
     placed, spill = {}, []
     for k in sorted(cards, key=lambda k: k["n"]):
-        spot = _free_spot(occ, k["w"], k["h"], k["box"])
+        spot = _free_spot(occ, k["w"], k["h"], k["box"], step=step)
         if spot is None:
             spill.append(k)
             continue
         placed[id(k)] = spot
-        _mark(occ, spot[0], spot[1], spot[0] + k["w"], spot[1] + k["h"])
+        _mark(occ, spot[0], spot[1], spot[0] + k["w"], spot[1] + k["h"], gap=gap)
     if spill:
         # 패널: 위에서 아래로 쌓고, 화면 높이를 넘으면 옆 열로
-        cols, col, y = [], [], CARD_GAP
+        cols, col, y = [], [], gap
         for k in spill:
             if col and y + k["h"] > H:
-                cols.append(col); col, y = [], CARD_GAP
-            col.append((k, y)); y += k["h"] + CARD_GAP
+                cols.append(col); col, y = [], gap
+            col.append((k, y)); y += k["h"] + gap
         cols.append(col)
-        x, extra_h = W + CARD_GAP, H
+        x, extra_h = W + gap, H
         for col in cols:
             cw_ = max(k["w"] for k, _ in col)
             for k, yy in col:
                 placed[id(k)] = (x, yy)
-                extra_h = max(extra_h, yy + k["h"] + CARD_GAP)
-            x += cw_ + CARD_GAP
+                extra_h = max(extra_h, yy + k["h"] + gap)
+            x += cw_ + gap
         grown = Image.new("RGB", (x, extra_h), PANEL_RGB)
         grown.paste(pil, (0, 0))
         pil = grown

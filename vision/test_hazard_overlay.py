@@ -88,3 +88,10 @@ def test_assess_compares_every_hazard_class_and_uses_min_score():
     best = max(a["scores"], key=lambda c: a["scores"][c] or -1)
     assert a["suspect"] == (best if a["scores"][best] >= a["min_score"] else None)
     assert a["cards"][best]["rows"][0][0] == "class"
+
+
+def test_card_scale_follows_photo_width():
+    # 카드는 사진 폭에 비례한다 — 상한이 없어 8000 px 사진도 1280 px 와 같은 비율이다
+    for w in (1280, 3840, 8000):
+        assert abs(ho.card_scale(w) - w / ho.CARD_BASE_W) < 1e-9
+    assert ho.card_scale(320) == ho.CARD_MIN_SCALE                    # 작은 그림은 하한까지만
