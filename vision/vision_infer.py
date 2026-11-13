@@ -126,7 +126,8 @@ sys.path.insert(0, str(HERE))
 from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
 DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",   # cam360_slice 2026-11-11 (DS 10006)
            "a2",                                                                 # a2 2026-11-12 (DS 10007, Unitree A2)
-           "pi11", "pi12")                                                        # 모듈 카메라 파이 2026-11-12 (DS 10008·10009)
+           "pi11", "pi12",                                                        # 모듈 카메라 파이 2026-11-12 (DS 10008·10009)
+           "pi13")                                                                # 모듈 카메라 파이 2026-11-13 (DS 10011)
 MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
                   "pi6": "realsense", "rs": "realsense", "d455": "realsense",
@@ -1247,6 +1248,17 @@ class _ArmYoloeFree:
         self.imgsz = int(spec.get("imgsz") or shared["imgsz"])
         self.conf = float(spec.get("conf", shared["base_conf"]))
         self.max_det = int(spec.get("max_det") or shared["max_det"])
+        # **화면을 덮는 상자는 내지 않는다**(`max_area_ratio`, 2026-11-13). 프리 어휘는
+        # 바닥·벽(tile wall · floor)을 물체처럼 크게 낸다 — 그것이 후보가 되면 단서
+        # 점수가 장면 전체의 색을 재게 된다. 텍스트 arm 의 상한(area_bands)과 따로 둔다.
+        mar = spec.get("max_area_ratio")
+        self.max_area_ratio = float(mar) if mar is not None else None
+        # **장면 낱말**(`scene_words`): 바닥·벽·방 같은 **장소** 이름이 화면의 큰 부분
+        # (`scene_min_area` 이상)을 덮으면 물체가 아니라 장면이다 — 버린다. 크기만으로는
+        # 가까이 다가간 물체와 구분할 수 없어 **이름과 크기를 함께** 본다. 작은 상자는
+        # 장면 낱말이어도 남긴다(작은 '물' 조각에 물체가 숨어 있을 수 있다).
+        self.scene_words = {str(w).lower() for w in (spec.get("scene_words") or [])}
+        self.scene_min_area = float(spec.get("scene_min_area", 0.10))
         self.name = weight.name
         self.free_vocab = True          # 텍스트 문구를 쓰지 않는다 — 어휘는 가중치 안에 있다
         known = set(shared.get("classes") or owners)
@@ -1258,6 +1270,9 @@ class _ArmYoloeFree:
                                  "없습니다: %s" % self.unconfirmed)
         self.vocab_map = self._read_map(spec.get("vocab_map"), known)
         vocab = {str(v).lower() for v in (self.model.names or {}).values()}
+        if vocab and self.scene_words - vocab:
+            raise SystemExit("river arm yoloe_free.scene_words 에 내장 어휘에 없는 이름이 "
+                             "있습니다: %s" % ", ".join(sorted(self.scene_words - vocab)))
         if vocab:
             unknown = sorted(n for n in self.vocab_map if n not in vocab)
             if unknown:
@@ -1298,9 +1313,17 @@ class _ArmYoloeFree:
                                device=self.device, verbose=False)[0]
         names = self.model.names or {}
         out = []
+        H, W = bgr.shape[:2]
+        cap = self.max_area_ratio * W * H if self.max_area_ratio else None
         if r.boxes is not None and len(r.boxes):
             for b in r.boxes:
+                x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+                area = (x2 - x1) * (y2 - y1)
+                if cap is not None and area > cap:
+                    continue
                 free = str(names.get(int(b.cls), int(b.cls))).lower()
+                if free in self.scene_words and area >= self.scene_min_area * W * H:
+                    continue                       # 장소 이름이 화면을 덮었다 — 장면이다
                 cls = self.vocab_map.get(free, self.unconfirmed)
                 if cls is None:
                     continue
@@ -1456,6 +1479,16 @@ class RiverRunner:
                 "depth_track", Path(__file__).with_name("depth_track.py"))
             _m = _ilu.module_from_spec(_sp); _sp.loader.exec_module(_m)
             self.depth = _m.DepthTracker(dspec, log=log)
+
+        # **점수로 견준다**(`assess`, 2026-11-13). 후보(위험물 이름 + 가설 칸)마다 위험물
+        # 클래스 전부에 대해 같은 단서를 재고, 가장 높은 클래스가 하한 이상이면 그 이름으로
+        # 의심한다. 검출기가 댄 낱말은 단서 하나일 뿐이다. 식의 주인은 hazard_overlay.assess.
+        self.assess = bool(cfg.get("assess", False))
+        # **부품은 전체에 접는다**(`nest_ratio`, 2026-11-13). 부탄 통 안의 뚜껑·라벨·마개가
+        # 따로 잡혀 한 물체에 상자가 여럿 겹쳤다. 작은 상자가 큰 상자 안에 이 비율 이상
+        # 들어가 있으면 **큰 것 하나만** 남긴다. null = 끔.
+        nr = cfg.get("nest_ratio")
+        self.nest_ratio = float(nr) if nr else None
 
         self.hypothesis = {a.unconfirmed for _, a in self.arms
                            if getattr(a, "unconfirmed", None)}
@@ -1616,6 +1649,38 @@ class RiverRunner:
         빈 집합으로 두면 min_prompts 1 이 그 검출을 말없이 버린다."""
         return det.get("prompt") or det["cls_name"]
 
+    def _drop_nested(self, dets):
+        """큰 상자 안에 `nest_ratio` 이상 들어간 작은 상자를 지운다(큰 것이 전체다).
+
+        **예외 하나**: 작은 쪽이 **다른 위험물로 의심**되면 남긴다. 큰 '나무 토막' 상자가
+        옆의 부탄 통을 통째로 덮은 장이 실제로 있었다 — 크기만 보고 지우면 그 통을 놓친다.
+        """
+        def area(b):
+            return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+        def sus(d):
+            return (d.get("assess") or {}).get("suspect")
+        order = sorted(dets, key=lambda d: -area(d["xyxy"]))
+        keep, dropped = [], 0
+        for d in order:
+            b, a = d["xyxy"], area(d["xyxy"])
+            gone = False
+            for big in keep:
+                B = big["xyxy"]
+                iw = min(b[2], B[2]) - max(b[0], B[0])
+                ih = min(b[3], B[3]) - max(b[1], B[1])
+                if iw <= 0 or ih <= 0 or a <= 0:
+                    continue
+                if iw * ih / a >= self.nest_ratio and (not sus(d) or sus(d) == sus(big)):
+                    gone = True
+                    break
+            if gone:
+                dropped += 1
+            else:
+                keep.append(d)
+        kept = set(map(id, keep))
+        return [d for d in dets if id(d) in kept], dropped
+
     def _merge(self, raw, img_area):
         """같은 클래스가 merge_iou 이상 겹치면 하나로 보고 **어느 arm·문구가** 말했는지 모은다.
 
@@ -1752,6 +1817,17 @@ class RiverRunner:
         # 거리가 먼저다 — 검증 근거에 거리를 쓸 수 있어야 한다
         depth_ms = self.depth(bgr, dets) if self.depth else 0.0
         verify_ms = self.verifier(bgr, dets) if self.verifier else 0.0
+        assess_ms = 0.0
+        if self.assess:
+            a0 = time.perf_counter()
+            cards = _cards_module()
+            for d in dets:
+                if d["name"] in cards.HAZARD or d["name"] in self.hypothesis:
+                    d["assess"] = cards.assess(d, bgr)
+            assess_ms = round((time.perf_counter() - a0) * 1000, 1)
+        nested = 0
+        if self.nest_ratio:
+            dets, nested = self._drop_nested(dets)
         ms = (time.perf_counter() - t0) * 1000
         return {"infer_ms": round(ms, 1), "arms": list(self.arm_names),
                 "arm_ms": per_arm_ms, "missing_arms": [m[0] for m in self.missing],
@@ -1765,6 +1841,8 @@ class RiverRunner:
                 "area_cap": self.area_cap,
                 "dropped_by_area": by_area,
                 "verify_ms": verify_ms,
+                "assess_ms": assess_ms,
+                "nested_dropped": nested, "nest_ratio": self.nest_ratio,
                 "depth_ms": depth_ms,
                 "depth_space": getattr(self.depth, "space", None) if self.depth else None,
                 "verify_reused": getattr(self.verifier, "last_reused", 0) if self.verifier else 0,
@@ -1899,8 +1977,11 @@ def class_color(cls):
     return colors(int(cls), True)                      # BGR, ultralytics 와 같은 색
 
 
-def draw_dets(img, dets, ocfg, kind, colour_fn=None):
-    """박스 + config 로 고른 라벨 줄들. overlay.min_conf 미만은 그림에서만 뺀다"""
+def draw_dets(img, dets, ocfg, kind, colour_fn=None, drawn=None):
+    """박스 + config 로 고른 라벨 줄들. overlay.min_conf 미만은 그림에서만 뺀다.
+
+    `drawn` 에 목록을 주면 그린 박스·라벨 띠의 (x1, y1, x2, y2) 를 담는다 — 근거 카드가
+    그 자리를 피해 놓이도록(카드가 검출을 가리지 않게) 넘겨주는 용도다."""
     h, w = img.shape[:2]
     fs = float(ocfg.get("font_scale") or max(0.4, w / 1600.0))
     lw = int(ocfg.get("line_width") or max(1, round(w / 640)))
@@ -1908,12 +1989,18 @@ def draw_dets(img, dets, ocfg, kind, colour_fn=None):
     dec = int(ocfg.get("gps_decimals", 6))
     spec = label_spec(ocfg, kind)
     for d in dets or []:
-        if min_conf is not None and d["conf"] < float(min_conf):
+        if (min_conf is not None and d["conf"] < float(min_conf)
+                and not (d.get("assess") or {}).get("suspect")):   # 점수로 의심한 것은 늘 그린다
             continue
         x1, y1, x2, y2 = [int(round(v)) for v in d["xyxy"]]
         color = colour_fn(d) if colour_fn else class_color(d["cls"])
         cv2.rectangle(img, (x1, y1), (x2, y2), color, lw)
-        lines = [" ".join(t for t in (label_token(k, d, dec) for k in line) if t) for line in spec]
+        if drawn is not None:
+            drawn.append((x1, y1, x2, y2))
+        if d.get("_label") is not None:                 # 부르는 쪽이 정한 라벨(river 판정)
+            lines = [d["_label"]] if d["_label"] else []
+        else:
+            lines = [" ".join(t for t in (label_token(k, d, dec) for k in line) if t) for line in spec]
         lines = [s for s in lines if s]
         if not lines:
             continue
@@ -1927,6 +2014,8 @@ def draw_dets(img, dets, ocfg, kind, colour_fn=None):
             x = min(max(0, x1), max(0, w - tw - 4))
             cv2.rectangle(img, (x, y), (x + tw + 4, y + lh), color, -1)
             cv2.putText(img, s, (x + 2, y + lh - 4), cv2.FONT_HERSHEY_SIMPLEX, fs, text_color, 1, cv2.LINE_AA)
+            if drawn is not None:
+                drawn.append((x, y, x + tw + 4, y + lh))
             y += lh
     return img
 
@@ -1977,7 +2066,28 @@ def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
             colour_fn = lambda d: _cards_module().box_colour(d, bgr=True)
         except Exception:
             colour_fn = None
-    out = draw_dets(bgr.copy(), dets, ocfg, kind, colour_fn)
+    if any(d.get("assess") for d in dets or []):
+        # **판정을 그린다**(2026-11-13). 의심한 위험물은 "이름 거리 점수", 그 밖은 이긴
+        # 낱말만. 근거(단서별 점수)는 그림에 넣지 않는다 — 웹 화면(/vision/view)에서
+        # 마우스를 올리면 카드로 보인다.
+        cards = _cards_module()
+        hz = tuple(int(v) for v in cards.HAZARD_RGB[::-1])
+        ot = tuple(int(v) for v in cards.OTHER_RGB[::-1])
+        marked = []
+        for d in dets:
+            a = d.get("assess") or {}
+            sus = a.get("suspect")
+            if sus:
+                dist = cards.fmt_distance(d.get("dist"))
+                text = "  ".join(s for s in (cards.SHOWN.get(sus, sus), dist,
+                                             "%d" % round(a["score"])) if s)
+            else:
+                text = d.get("lead") or (d.get("prompts") or [None])[0] or d.get("name") or ""
+            marked.append(dict(d, _label=text, _colour=hz if sus else ot))
+        dets = marked
+        colour_fn = lambda d: d.get("_colour") or ot
+    drawn = []                                   # 그린 박스·라벨 자리 — 카드가 피한다
+    out = draw_dets(bgr.copy(), dets, ocfg, kind, colour_fn, drawn)
     # **근거 카드.** 선언으로 켠다(`overlay.<kind>.cards`). 위험물 후보가 있는 장에만
     # 그려지고 없으면 비용 0 이다(실측 카드 1개 8.4 ms · 3개 12.7 ms).
     # 그리는 코드의 주인은 `hazard_overlay.py` 하나다 — 운영 화면과 검수 화면이
@@ -1988,7 +2098,8 @@ def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
             # 상자인지 지시선을 따라가야 안다. 색의 주인은 여기(`class_color`)다.
             out = _cards_module().add_cards(
                 out, bgr, dets, cues=(ocfg.get(kind) or {}).get("cues"),
-                colour_of=None)                  # 색의 주인은 카드 모듈이다
+                colour_of=None,                  # 색의 주인은 카드 모듈이다
+                obstacles=drawn)                 # **카드는 그려진 박스·라벨을 가리지 않는다**
         except Exception as exc:                 # 카드가 실패해도 오버레이는 나간다
             log("  overlay 카드 실패: %s: %s" % (type(exc).__name__, exc))
     return add_header(out, [title if ocfg.get("title", True) else None], ocfg)

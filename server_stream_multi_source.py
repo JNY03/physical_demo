@@ -70,6 +70,10 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   GET  /              원본 영상 + 비전 결과를 한 화면에
   GET  /stream        그 소스 영상을 브라우저로 본다 (MJPEG)
   GET  /vision?model=yoloe   비전 오버레이 (MJPEG). vision_infer.py live 가 Redis 에 넣은 것을 보여 준다
+  GET  /vision/frame?model=river[&since=<seq>&wait=<초>&image=0]
+                             최신 오버레이 한 장 + 같은 장의 검출(river 는 근거 카드 assess 포함) JSON.
+                             image=0 이면 검출만 — 가시화 앱이 MJPEG 위에 카드를 얹을 때 쓴다 (2026-11-13)
+  GET  /vision/view?model=river   위 둘로 그린 독립 화면 — 물체에 마우스 → 카드 · 클릭 → 고정 · ✕ 닫기
   GET  /health        받은 개수 · 연결 상태 · 비전 모델별 결과 수/지연 (JSON)
 
 Redis Stream (최근 --maxlen 개만 유지, 기본 300)
@@ -514,6 +518,177 @@ class RedisSink:
 
 
 # ---------------------------------------------------------------- 비전 결과 보기 (vision_infer.py live 가 Redis 에 넣은 것)
+#: /vision/frame 이 넘기는 검출 칸 — 화면이 그리는 데 쓰는 것만(근거 카드 포함)
+VIEW_DET_KEYS = ("bbox", "label", "lead", "confidence", "track_id", "dist", "assess", "votes", "arms")
+
+
+def view_result(res):
+    """비전 결과에서 웹 화면(/vision/view)이 쓰는 칸만 남긴다."""
+    return {"n": res.get("n"), "width": res.get("width"), "height": res.get("height"),
+            "model": res.get("model"),
+            "detections": [{k: d.get(k) for k in VIEW_DET_KEYS if k in d}
+                           for d in (res.get("detections") or [])]}
+
+
+#: GET /vision/view — 비전 오버레이 + **근거 카드**(2026-11-13). 물체 위에 마우스를 올리면
+#: 카드가 보이고, 클릭하면 그 물체 옆에 고정되며(track_id 로 따라간다) ✕ 로 닫는다.
+#: 오버레이 그림에는 "이름 거리 점수" 만 있고 카드는 여기서만 보인다 — 카드가 검출을
+#: 가리지 않게 하려는 것이다. 데이터는 /vision/frame(그림 + 같은 장의 검출) 하나에서 온다.
+VISION_VIEW_HTML = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__SRC__ 비전</title>
+<style>
+:root{--bg:#111;--panel:#181b21;--line:#2c313a;--fg:#e6e6e6;--mute:#9aa3b2;--haz:#ffc83c;--oth:#969ba5;
+--hi:#5aa0ff;--mid:#ff963c;--lo:#ff6e64;--bar:#3a3e46}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 system-ui,"Malgun Gothic",sans-serif}
+header{display:flex;gap:10px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line)}
+header .m{color:var(--mute)} header select{background:#222;color:var(--fg);border:1px solid var(--line)}
+main{display:flex;gap:10px;padding:8px;align-items:flex-start}
+#stage{position:relative;flex:1 1 auto;min-width:0;cursor:crosshair}
+#img{display:block;width:100%;height:auto;user-select:none}
+#marks{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+.mk{position:absolute;border:3px solid var(--hi);border-radius:2px;box-shadow:0 0 0 1px #000a}
+.mk.pin{border-style:dashed}
+.card{background:var(--panel);border:2px solid var(--oth);border-radius:6px;padding:9px 11px;width:340px}
+.pinned{position:absolute;z-index:5;box-shadow:0 4px 14px #000c}
+.card.haz{border-color:var(--haz)}
+.card h3{margin:0 0 4px;font-size:15px;display:flex;gap:8px;align-items:baseline}
+.card h3 .nm{color:var(--oth)} .card.haz h3 .nm{color:var(--haz)}
+.card h3 .x{margin-left:auto;cursor:pointer;color:var(--mute);border:0;background:none;font-size:17px;line-height:1}
+.card h3 .x:hover{color:#fff}
+.sc.hi{color:var(--hi)} .sc.mid{color:var(--mid)} .sc.lo{color:var(--lo)}
+.cmp{color:var(--mute);margin-bottom:6px}
+.row{display:grid;grid-template-columns:72px 70px 40px 1fr;gap:6px;align-items:center}
+.bar{height:9px;background:var(--bar);border-radius:2px;overflow:hidden}.bar i{display:block;height:100%;background:#fff}
+.pct{text-align:right;font-variant-numeric:tabular-nums}.txt{color:var(--mute);overflow-wrap:anywhere}
+.kv{display:grid;grid-template-columns:72px 1fr;gap:6px}.kv .txt{grid-column:2}
+.gone{opacity:.55}.gone h3::after{content:"이 장에서 안 보임";font-size:11px;color:var(--mute)}
+#tip{position:fixed;z-index:9;pointer-events:none;display:none}
+.hint{color:var(--mute);font-size:12px}
+</style></head><body>
+<header><b>__SRC__</b><span class="m">비전</span><select id="model"></select>
+<span class="hint">물체 위에 마우스 → 근거 카드 · 클릭 → 고정 · ✕ 닫기</span><span id="st" class="m" style="margin-left:auto"></span></header>
+<main><div id="stage"><img id="img" alt=""><div id="marks"></div></div></main>
+<div id="tip"></div>
+<script>
+(function(){
+var MODEL=__MODEL__, seq=-1, cur=null, natW=0, natH=0, mouse=null, hoverKey=null;
+var pins=new Map();                          // key → {el, det}
+var SHOWN={wooden_box_mine:"목함지뢰 (wooden box mine)",butane_canister:"부탄가스 (butane canister)"};
+var CUE={class:"이름",material:"재질",structure:"모양",match:"기준 사진",size:"크기",distance:"거리"};
+var img=document.getElementById("img"), marks=document.getElementById("marks"),
+    tip=document.getElementById("tip"),
+    st=document.getElementById("st"), sel=document.getElementById("model"),
+    stage=document.getElementById("stage");
+if(/[?&]embed=1/.test(location.search)){document.querySelector("header").style.display="none"}
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function keyOf(d,i){return d.track_id!=null?"t"+d.track_id:"i"+i+"@"+seq}
+function band(){return cur&&cur.height?Math.max(0,natH-cur.height):0}
+function dist(d){var v=d.dist;if(!v)return"";if(typeof v==="number")return v.toFixed(1)+" m";
+  if(v.space==="metric")return v.value.toFixed(1)+" m";return v.value.toFixed(3)+" (상대 깊이)"}
+function cls(s){return s>=60?"hi":(s>=40?"mid":"lo")}
+function title(d){var a=d.assess;if(a&&a.suspect)return SHOWN[a.suspect]||a.suspect;return d.lead||d.label||"?"}
+function cardHTML(d,closable){
+  var a=d.assess,h="",haz=!!(a&&a.suspect);
+  var x=closable?'<button class="x" title="닫기">✕</button>':"";
+  if(!a){
+    h+='<h3><span class="nm">'+esc(title(d))+'</span>'+x+'</h3>';
+    h+='<div class="kv"><span>이름</span><span class="txt">'+esc(d.label)+'</span>'+
+       '<span>확신</span><span class="txt">'+(d.confidence!=null?(+d.confidence).toFixed(2):"-")+'</span>'+
+       (dist(d)?'<span>거리</span><span class="txt">'+esc(dist(d))+'</span>':"")+'</div>';
+    return {html:h,haz:false};
+  }
+  var best=a.suspect;
+  if(!best){var ks=Object.keys(a.scores);best=ks.sort(function(p,q){return(a.scores[q]||-1)-(a.scores[p]||-1)})[0]}
+  var c=a.cards[best]||{rows:[]};
+  h+='<h3><span class="nm">'+esc(haz?SHOWN[best]||best:(d.lead||d.label))+'</span>'+
+     (c.score!=null?'<span class="sc '+cls(c.score)+'">'+Math.round(c.score)+'/100</span>':"")+x+'</h3>';
+  var cmp=Object.keys(a.scores).map(function(k){return esc((SHOWN[k]||k).split(" (")[0])+" "+(a.scores[k]==null?"-":a.scores[k].toFixed(1))}).join(" · ");
+  h+='<div class="cmp">'+cmp+' · 하한 '+a.min_score+(haz?"":" → <b>의심 아님</b> (아래는 가장 높은 "+esc((SHOWN[best]||best).split(" (")[0])+" 기준)")+'</div>';
+  c.rows.forEach(function(r){
+    if(r[1]==null){h+='<div class="kv"><span>'+esc(CUE[r[0]]||r[0])+'</span><span class="txt">'+esc(r[2])+'</span></div>';return}
+    h+='<div class="row"><span>'+esc(CUE[r[0]]||r[0])+'</span><span class="bar"><i style="width:'+Math.max(0,Math.min(100,r[1]))+'%"></i></span>'+
+       '<span class="pct">'+Math.round(r[1])+'%</span><span class="txt">'+esc(r[2])+'</span></div>';
+  });
+  if(dist(d)&&!c.rows.some(function(r){return r[0]==="distance"}))h+='<div class="kv"><span>거리</span><span class="txt">'+esc(dist(d))+'</span></div>';
+  if(c.source)h+='<div class="kv"><span>출처</span><span class="txt">'+esc(c.source)+'</span></div>';
+  return {html:h,haz:haz};
+}
+function hitAt(px,py){                        // 이미지 좌표 → 가장 작은 박스
+  if(!cur)return null;var best=null,ba=1e18;
+  (cur.detections||[]).forEach(function(d,i){var b=d.bbox;if(!b)return;
+    if(px>=b[0]&&px<=b[2]&&py>=b[1]&&py<=b[3]){var ar=(b[2]-b[0])*(b[3]-b[1]);if(ar<ba){ba=ar;best={d:d,i:i}}}});
+  return best;
+}
+function toImg(ev){var r=img.getBoundingClientRect();if(!r.width||!natW)return null;
+  return {x:(ev.clientX-r.left)*natW/r.width,y:(ev.clientY-r.top)*natH/r.height-band(),cx:ev.clientX,cy:ev.clientY}}
+function placeTip(cx,cy){var w=tip.offsetWidth,h=tip.offsetHeight,vw=innerWidth,vh=innerHeight;
+  var x=cx+18,y=cy+18;if(x+w>vw-8)x=cx-w-18;if(y+h>vh-8)y=vh-h-8;tip.style.left=Math.max(8,x)+"px";tip.style.top=Math.max(8,y)+"px"}
+function showTip(){
+  if(!mouse){tip.style.display="none";hoverKey=null;return}
+  var p=hitAt(mouse.x,mouse.y);
+  if(!p){tip.style.display="none";hoverKey=null;stage.style.cursor="crosshair";return}
+  hoverKey=keyOf(p.d,p.i);stage.style.cursor="pointer";
+  var c=cardHTML(p.d,false);tip.innerHTML='<div class="card'+(c.haz?" haz":"")+'">'+c.html+'</div>';
+  tip.style.display="block";placeTip(mouse.cx,mouse.cy);
+}
+function drawMarks(){
+  marks.innerHTML="";if(!cur||!natW)return;var bd=band();
+  (cur.detections||[]).forEach(function(d,i){var k=keyOf(d,i);if(k!==hoverKey&&!pins.has(k))return;var b=d.bbox;
+    var e=document.createElement("div");e.className="mk"+(pins.has(k)?" pin":"");
+    e.style.left=(b[0]/natW*100)+"%";e.style.top=((b[1]+bd)/natH*100)+"%";
+    e.style.width=((b[2]-b[0])/natW*100)+"%";e.style.height=((b[3]-b[1])/natH*100)+"%";marks.appendChild(e)});
+}
+function boxPx(d){var r=img.getBoundingClientRect(),s=stage.getBoundingClientRect(),b=d.bbox,k=r.width/natW,bd=band();
+  return {x1:r.left-s.left+b[0]*k,y1:r.top-s.top+(b[1]+bd)*k,x2:r.left-s.left+b[2]*k,y2:r.top-s.top+(b[3]+bd)*k}}
+function layoutPins(){                       // 고정 카드: 물체 옆(오른쪽 → 왼쪽 → 아래 → 위), 서로 안 겹치게
+  if(!natW)return;var W=stage.clientWidth,H=stage.clientHeight,placed=[],G=8;
+  function clash(r){return placed.some(function(q){return!(r.x+r.w<=q.x||q.x+q.w<=r.x||r.y+r.h<=q.y||q.y+q.h<=r.y)})}
+  pins.forEach(function(p){var b=boxPx(p.det),w=p.el.offsetWidth,h=p.el.offsetHeight;
+    var cand=[{x:b.x2+G,y:b.y1},{x:b.x1-w-G,y:b.y1},{x:b.x1,y:b.y2+G},{x:b.x1,y:b.y1-h-G}].map(function(c){
+      return {x:Math.max(0,Math.min(c.x,W-w)),y:Math.max(0,Math.min(c.y,H-h)),w:w,h:h}});
+    var pick=null;for(var i=0;i<cand.length&&!pick;i++)if(!clash(cand[i]))pick=cand[i];
+    if(!pick){pick=cand[0];for(var n=0;n<40&&clash(pick);n++)pick={x:pick.x,y:Math.min(H-h,pick.y+24),w:w,h:h}}
+    placed.push(pick);p.el.style.left=pick.x+"px";p.el.style.top=pick.y+"px"})}
+function renderPin(k){var p=pins.get(k);var c=cardHTML(p.det,true);
+  p.el.className="card pinned"+(c.haz?" haz":"")+(p.seen?"":" gone");p.el.innerHTML=c.html;
+  p.el.querySelector(".x").onclick=function(ev){ev.stopPropagation();p.el.remove();pins.delete(k);hoverKey=null;drawMarks()};
+  p.el.onclick=function(ev){ev.stopPropagation()};p.el.onmousemove=function(ev){ev.stopPropagation();tip.style.display="none"};
+  p.el.onmouseenter=function(){hoverKey=k;drawMarks()};p.el.onmouseleave=function(){hoverKey=null;drawMarks()};}
+function updatePins(){var seen={};(cur.detections||[]).forEach(function(d,i){seen[keyOf(d,i)]=d});
+  pins.forEach(function(p,k){if(seen[k]){p.det=seen[k];p.seen=true}else p.seen=false;renderPin(k)});layoutPins()}
+stage.addEventListener("mousemove",function(ev){mouse=toImg(ev);showTip();drawMarks()});
+stage.addEventListener("mouseleave",function(){mouse=null;showTip();drawMarks()});
+stage.addEventListener("click",function(ev){var m=toImg(ev);if(!m)return;var p=hitAt(m.x,m.y);if(!p)return;
+  var k=keyOf(p.d,p.i);if(pins.has(k))return;
+  var el=document.createElement("div");stage.appendChild(el);pins.set(k,{el:el,det:p.d,seen:true});renderPin(k);layoutPins();
+  tip.style.display="none";drawMarks()});
+addEventListener("resize",layoutPins);
+function loop(){
+  var u="/vision/frame?since="+seq+"&wait=5"+(MODEL?"&model="+encodeURIComponent(MODEL):"");
+  fetch(u,{cache:"no-store"}).then(function(r){if(r.status===204)return null;
+    if(!r.ok)return r.json().then(function(j){st.textContent=j.detail||("HTTP "+r.status);return null});return r.json()})
+  .then(function(j){
+    if(j){seq=j.seq;if(!MODEL)MODEL=j.model;
+      if(sel.options.length!==(j.models||[]).length){sel.innerHTML=(j.models||[]).map(function(m){return"<option>"+esc(m)+"</option>"}).join("")}
+      sel.value=j.model;
+      var im=new Image();im.onload=function(){natW=im.naturalWidth;natH=im.naturalHeight;cur=j;img.src=im.src;
+        updatePins();if(mouse)showTip();drawMarks()};
+      im.src="data:image/jpeg;base64,"+j.image_b64;
+      st.textContent="#"+(j.n==null?"-":j.n)+" · 검출 "+((j.detections||[]).length);
+    }
+    setTimeout(loop,j?0:500);
+  }).catch(function(){st.textContent="연결 끊김 — 다시 시도";setTimeout(loop,1500)});
+}
+sel.onchange=function(){MODEL=sel.value;seq=-1;pins.forEach(function(p){p.el.remove()});pins.clear();
+  history.replaceState(null,"","?model="+encodeURIComponent(MODEL))};
+loop();
+})();
+</script></body></html>
+"""
+
+
 class VisionView:
     """vision_stream:<소스>:<모델> 을 읽어 모델마다 최신 오버레이와 요약을 들고 있는다 (/vision · /health · 보고용).
     비전이 안 돌거나 Redis 가 없어도 받기·저장·흘리기에는 아무 영향이 없다 (따로 도는 스레드, 따로 연결)."""
@@ -524,6 +699,7 @@ class VisionView:
         self.ids = {}                            # 읽는 키 → 마지막 항목 ID
         self.cv = threading.Condition()
         self.latest = {}                         # (소스, 모델) → (번호, JPEG)
+        self.result = {}                         # (소스, 모델) → (번호, 결과 요약) — 같은 번호의 오버레이와 짝
         self.info = {}                           # (소스, 모델) → 요약
         self.seq = 0
         if redis is None:
@@ -553,6 +729,7 @@ class VisionView:
             if jpg:
                 self.seq += 1
                 self.latest[(src, model)] = (self.seq, jpg)
+                self.result[(src, model)] = (self.seq, view_result(res))
                 self.cv.notify_all()
 
     def _run(self):
@@ -968,6 +1145,13 @@ def make_handler(src, vision=None):
                 return self._mjpeg()
             if path == "/vision":
                 return self._vision(parse_qs(query).get("model", [None])[0])
+            if path == "/vision/frame":
+                return self._vision_frame(parse_qs(query))
+            if path == "/vision/view":
+                model = parse_qs(query).get("model", [""])[0]
+                page = VISION_VIEW_HTML.replace("__SRC__", src.name).replace(
+                    "__MODEL__", json.dumps(model))
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/state":
                 return self._json(200, src.state_snapshot())
             if path == "/frame":
@@ -1036,6 +1220,42 @@ def make_handler(src, vision=None):
             self.send_header("X-State", json.dumps(state, separators=(",", ":")))
             self.end_headers()
             self.wfile.write(img)
+
+        def _vision_frame(self, q):
+            """최신 비전 오버레이 한 장 + **같은 장의** 검출(근거 카드 포함) JSON.
+            since 를 주면 그보다 새 장이 올 때까지 wait 초(최대 10) 기다린다 — /vision/view 가 쓴다.
+            image=0 이면 검출만(가시화 앱이 MJPEG 위에 카드를 얹을 때)"""
+            if vision is None or vision.err == "redis 패키지가 없음":
+                return self._json(503, {"status": "error", "detail": "Redis 를 못 써서 비전 결과를 못 읽음"})
+            models = vision.models(src.name)
+            model = (q.get("model") or [""])[0] or (models[0] if models else None)
+            if model is None:
+                return self._json(404, {"status": "error", "source": src.name, "models": models,
+                                        "detail": "비전 결과 없음 — vision_infer.py 가 이 소스를 처리하고 있어야 함"})
+            try:
+                since = int((q.get("since") or ["-1"])[0])
+                wait = max(0.0, min(10.0, float((q.get("wait") or ["2"])[0])))
+            except ValueError:
+                since, wait = -1, 2.0
+            deadline = time.time() + wait
+            seq, img = vision.wait_latest(src.name, model, since, 0)
+            while (img is None or seq == since) and time.time() < deadline and not STOP.is_set():
+                seq, img = vision.wait_latest(src.name, model, since, min(1.0, deadline - time.time()))
+            if img is None or seq == since:
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            with vision.cv:
+                rseq, res = vision.result.get((src.name, model), (None, {}))
+            out = dict(res if rseq == seq else {}, seq=seq, model=model, models=models,
+                       source=src.name, overlay_bytes=len(img))
+            # image=0 이면 그림을 빼고 검출만 준다 — 그림은 /vision MJPEG 로 이미 보고 있는
+            # 화면(가시화)이 카드만 얹을 때 쓴다
+            if (q.get("image") or ["1"])[0] != "0":
+                out["image_b64"] = base64.b64encode(img).decode("ascii")
+            return self._json(200, out)
 
         def _vision(self, model):
             """비전 오버레이 MJPEG. model 을 안 주면 결과가 있는 첫 모델"""

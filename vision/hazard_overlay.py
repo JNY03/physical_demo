@@ -260,8 +260,13 @@ def colour_cue(crop):
         return float((m & lit).sum()) / max(1, lit.size)
 
     red, blue = frac(BUTANE_RED), frac(BUTANE_BLUE)
-    wood = float(((h >= 10) & (h <= 30) & (sat >= 25) & (sat < 130) & (val >= 110)).mean())
-    chrome = float(((sat < 60) & (val >= 120)).mean())      # 도색 안 된 금속
+    # 나무: 따뜻한 노랑~주황 색조(H 15~35)에 **채도가 낮아도** 받는다(2026-11-13).
+    # 예전 규칙(S 25 이상)은 밝은 원목을 못 봤다 — pi13 실측 원목 상자 S 중앙 13~26,
+    # 그 규칙으로 wood 0.01~0.02. 새 규칙: 상자 0.34 · 0.15, 부탄 통 0.03 · 0.05, 바닥 0.
+    warm = (h >= 15) & (h <= 35)
+    wood = float((warm & (sat >= 8) & (sat <= 80) & (val >= 100)).mean())
+    # 도색 안 된 금속: 무채색에 밝다. **따뜻한 색조는 뺀다** — 밝은 원목이 금속으로 잡혔다
+    chrome = float(((sat < 40) & (val >= 120) & ~warm).mean())
     return {"red": red, "blue": blue, "both": min(red, blue),
             "wood": wood, "chrome": chrome, "lit": float(lit.mean())}
 
@@ -344,6 +349,9 @@ def grounds(det, W, H, bands, metres, colour=None):
             # 인쇄된 금속: 채도 높은 도색 + 도색 안 된 돔/바닥
             lw = float(cue("material", "butane_livery_weight", 0.6))
             mf = float(cue("material", "butane_metal_full", 0.30))
+            # 도색 띠는 안 보일 때가 있다(가려짐·뒷면·먼지) — 맨 금속 항을 **도색에 묶지
+            # 않는다**. 대신 금속 규칙에서 따뜻한 색조를 빼 밝은 원목이 금속이 되지 않게 했고
+            # (colour_cue), 화면을 덮는 바닥 상자는 프리 arm 의 max_area_ratio 가 막는다.
             cov = lw * max(colour["red"], colour["blue"]) / full + (1 - lw) * colour["chrome"] / mf
             txt = "livery %.2f · bare metal %.2f" % (max(colour["red"], colour["blue"]),
                                                      colour["chrome"])
@@ -385,17 +393,79 @@ def grounds(det, W, H, bands, metres, colour=None):
     if metres is not None and cue_on("distance"):
         rows.append(("distance", None, fmt_distance(metres), False, 1.0))
 
-    # **확신으로 가중한 평균.** 못 잰 줄은 빠지고, 덜 믿을 줄은 덜 센다.
-    # 단서끼리의 중요도는 가중하지 않는다 — 어느 쪽이 더 중한지 정할 근거가 없다.
+    # **중요도 가중 평균**(2026-11-13). 무게는 설정(`decision.weights`)이 정하고, 못 잰
+    # 줄(pct None)은 빠진 뒤 **남은 무게로 다시 나눈다** — 못 잰 것을 0 점으로 세지 않는다.
     # **중요도 순으로 세운다.** match 와 size 는 선언(기준 사진·규격)에 기대는 단서라
     # 뒤에 둔다 — 선언이 현장과 어긋나면 먼저 흔들리는 쪽이다.
     order = {"class": 0, "material": 1, "structure": 2, "match": 3, "size": 4,
              "distance": 8, "source": 9}
     rows.sort(key=lambda r: order.get(r[0], 5))
-    scored = [(r[1], r[4]) for r in rows if r[1] is not None]
-    wsum = sum(c for _p, c in scored)
-    score = (sum(p * c for p, c in scored) / wsum) if wsum else None
+    w = weights()
+    scored = [(r[1], w.get(r[0], 0.0)) for r in rows if r[1] is not None]
+    wsum = sum(x for _p, x in scored)
+    score = (sum(p * x for p, x in scored) / wsum) if wsum > 0 else None
     return score, rows, src
+
+
+#: 단서 중요도. **설정(`decision.weights`)이 이긴다** — 이것은 설정이 없을 때의 값이다.
+#: **검출기가 댄 이름(class)을 덜 믿는다** — 도메인이 바뀌면 낱말이 먼저 흔들리고, 이름을
+#: 못 받은 후보는 늘 0 이다. 물체 자체에서 재는 단서(match·material·structure)를 더 믿는다.
+#:   match 0.30      기준 사진 대비 pos − neg. 음성 기준을 빼서 "무엇과도 비슷한" crop 을 깎는다
+#:   material 0.25   색 규칙(나무: 따뜻한 저채도 · 부탄: 도색 + 맨 금속)
+#:   structure 0.20  모양(상자: 평평한 면, 부탄: 뚜껑·어깨·몸통 — 부탄 쪽은 아직 약하다)
+#:   class 0.15      검출기가 **그 클래스 낱말로** 부른 확신
+#:   size            **뺐다**(2026-11-13). 비스듬한 물체에서 박스가 실물보다 커져 실제 물체에서도
+#:                   거의 늘 0 이었다 — 무게가 없으면 계산하더라도 점수에 들어가지 않는다
+#: 무게의 합이 1 일 필요는 없다 — 잰 단서의 무게 합으로 나눈다.
+DEFAULT_WEIGHTS = {"match": 0.30, "material": 0.25, "structure": 0.20, "class": 0.15}
+
+
+def weights():
+    w = (CFG.get("decision") or {}).get("weights")
+    return {k: float(v) for k, v in (w or DEFAULT_WEIGHTS).items() if not str(k).startswith("_")}
+
+
+# ---------------------------------------------------------------- 판정 (점수로 견준다)
+def min_score():
+    """위험물로 **의심**한다고 말할 점수 하한. 설정(`decision.min_score`)이 정한다."""
+    return float((CFG.get("decision") or {}).get("min_score", 50.0))
+
+
+def assess(det, clean_bgr, wh=None):
+    """후보 하나를 **위험물 클래스 전부에 대해 같은 단서로** 재고 점수로 견준다.
+
+    이름(검출기가 댄 낱말)은 단서 하나(`class`)일 뿐이다 — "나무" 라고 불리지 않았다고
+    목함지뢰 비교에서 빠지지 않고, "부탄" 이라고 불렸다고 부탄으로 정해지지 않는다.
+    가장 높은 클래스의 점수가 `min_score()` 이상이면 그 클래스로 **의심**한다.
+
+    돌려주는 것: {"scores": {클래스: 점수}, "suspect": 클래스|None, "score": 최고점,
+    "min_score": 하한, "cards": {클래스: {"score", "rows": [[단서, %, 설명]], "source"}}}
+    """
+    if not CFG:
+        load_cues()                      # 하한·무게·규격을 설정에서 — 카드를 안 그려도 읽는다
+    H, W = clean_bgr.shape[:2] if wh is None else (wh[1], wh[0])
+    x1, y1, x2, y2 = [int(v) for v in det["xyxy"]]
+    crop = clean_bgr[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+    colour = colour_cue(crop)
+    name = det.get("name") or det.get("cls")
+    by = det.get("verify_by") or {}
+    scores, cards = {}, {}
+    for cls in HAZARD:
+        d = dict(det, cls=cls,
+                 # 검출기가 **이 클래스로** 불렀을 때만 그 확신이 class 단서다
+                 conf=float(det.get("conf") or 0.0) if name == cls else 0.0,
+                 verify=by.get(cls) if by else (det.get("verify") if name == cls else None))
+        sc, rows, src = grounds(d, W, H, None, det.get("dist"), colour=colour)
+        scores[cls] = None if sc is None else round(float(sc), 1)
+        cards[cls] = {"score": scores[cls],
+                      "rows": [[k, None if p is None else round(float(p), 1), body]
+                               for k, p, body, _w, _c in rows],
+                      "source": ", ".join("%s(%s)" % (k, v) for k, v in src.items())}
+    best = max((c for c in scores if scores[c] is not None), key=lambda c: scores[c],
+               default=None)
+    top = scores.get(best) if best else None
+    return {"scores": scores, "suspect": best if (top is not None and top >= min_score()) else None,
+            "score": top, "min_score": min_score(), "cards": cards}
 
 
 # ---------------------------------------------------------------- draw
@@ -445,6 +515,7 @@ def render(image_path, dets, pen, bands, depth_dir, zip_sess=None):
     pil = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     dr = ImageDraw.Draw(pil)
     big_first = sorted(dets, key=lambda d: -(d["xyxy"][2]-d["xyxy"][0])*(d["xyxy"][3]-d["xyxy"][1]))
+    obstacles = [tuple(int(v) for v in d["xyxy"]) for d in dets]
     for d in big_first:
         x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
         c = box_colour(d)
@@ -459,10 +530,11 @@ def render(image_path, dets, pen, bands, depth_dir, zip_sess=None):
         ly = y1 - 26 if y1 > 28 else y1 + 2
         dr.rectangle([x1, ly, x1 + tw + 11, ly + 25], fill=(55, 55, 55) if faint else c)
         pen.t(dr, (x1 + 5, ly + 2), text, 18, (232, 232, 232) if faint else (10, 12, 16))
+        obstacles.append((x1, ly, x1 + tw + 11, ly + 25))
 
-    taken = []
-    for rank, d in haz:
-        _draw_one_card(pil, dr, pen, d, clean, (W, H), rank, taken, scale, bands)
+    cards = [k for k in (_build_card(pen, d, clean, (W, H), rank, scale, bands)
+                         for rank, d in haz) if k is not None]
+    pil = _cards_on(pil, pen, cards, obstacles)
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 
@@ -492,10 +564,11 @@ def _pick_cards(haz, clean, wh, scale, bands):
     return [(rank, d) for rank, (_s, _i, d) in reversed(list(enumerate(top, 1)))]
 
 
-def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
-                   colour_of=None):
-    """카드 하나. `render()` 와 `add_cards()` 가 **같은 코드로** 그린다 —
-    운영 화면과 검수 화면이 달라지지 않게 하는 유일한 방법이다.
+def _build_card(pen, d, clean, wh, n, scale=1.0, bands=None, colour_of=None):
+    """카드 하나의 **내용과 크기**만 정한다(그리지 않는다).
+
+    자리를 고르려면 모든 카드의 크기를 먼저 알아야 한다 — 그래서 재는 일과 그리는
+    일을 나눈다. `render()` 와 `add_cards()` 가 **같은 코드로** 만든다.
     """
     W, H = wh
     P = pen.px                                      # 치수 하나를 배율로
@@ -507,7 +580,7 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
     pad = max(5, int(0.08 * max(x2 - x1, y2 - y1)))
     crop = clean[max(0, y1-pad):min(H, y2+pad), max(0, x1-pad):min(W, x2+pad)]
     if crop.size == 0:
-        return
+        return None
     # **작아서 눈으로 못 보는 것만** 확대해 붙인다. 원본에서 이미 보이는 물체에
     # 썸네일을 또 넣으면 카드가 자리만 먹고, 카드가 커지면 가리는 장면도 넓어진다.
     seen_ratio = ((x2 - x1) * (y2 - y1)) / float(W * H)
@@ -549,10 +622,24 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
         # 이어지는 줄은 **첫 줄과 같은 자리**에서 시작한다
         lines += [(None, pct, extra, warn) for extra in wrapped[1:]]
     chh = max(PADS + P(30) + th_ + PADS, PADS + P(30) + len(lines) * LINES + PADS)
-    cx, cy = place((x1, y1, x2, y2), (card_w, chh), W, H, taken)
-    taken.append((cx, cy, card_w, chh))
-    dr.line([(x1 + (x2-x1)//2, y1 + (y2-y1)//2), (cx + card_w//2, cy + chh//2)],
-            fill=c, width=1)
+    return {"n": n, "d": d, "c": c, "box": (x1, y1, x2, y2), "crop": crop,
+            "w": card_w, "h": chh, "score": score, "lines": lines}
+
+
+def _paint_card(pil, dr, pen, k, cx, cy):
+    """`_build_card` 가 정한 카드를 (cx, cy) 에 그린다. 지시선은 박스 가장자리에서
+    카드 가장자리로 — 가운데끼리 이으면 선이 물체를 가로지른다."""
+    P = pen.px                                      # 치수 하나를 배율로(_build_card 와 같은 펜)
+    PADS, LINES = P(PAD), P(LINE)
+    BODY_X, BODY_X_BARE = P(248), P(100)
+    d, c, n, score, crop, lines = k["d"], k["c"], k["n"], k["score"], k["crop"], k["lines"]
+    x1, y1, x2, y2 = k["box"]
+    card_w, chh = k["w"], k["h"]
+    bx = x2 if cx >= x2 else (x1 if cx + card_w <= x1 else (x1 + x2) // 2)
+    by = y2 if cy >= y2 else (y1 if cy + chh <= y1 else (y1 + y2) // 2)
+    kx = cx if cx >= x2 else (cx + card_w if cx + card_w <= x1 else cx + card_w // 2)
+    ky = cy if cy >= y2 else (cy + chh if cy + chh <= y1 else cy + chh // 2)
+    dr.line([(bx, by), (kx, ky)], fill=c, width=max(2, P(2)))
     dr.rectangle([cx, cy, cx + card_w, cy + chh], fill=(18, 20, 24), outline=c, width=2)
     head = "%d  %s" % (n, SHOWN.get(d["cls"], d["cls"]))
     pen.t(dr, (cx + PADS, cy + PADS - P(3)), head, 21, c)
@@ -587,12 +674,123 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
         y += LINES
 
 
+def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
+                   colour_of=None):
+    """옛 진입점(카드 하나, 옛 `place()`). 새 코드는 `_cards_on()` 을 쓴다 —
+    이것은 박스를 피하지 않는다."""
+    k = _build_card(pen, d, clean, wh, n, scale, bands, colour_of)
+    if k is None:
+        return
+    cx, cy = place(k["box"], (k["w"], k["h"]), wh[0], wh[1], taken)
+    taken.append((cx, cy, k["w"], k["h"]))
+    _paint_card(pil, dr, pen, k, cx, cy)
 
+
+# ---------------------------------------------------------------- 자리 고르기
+#: 카드와 장애물(박스·라벨·다른 카드) 사이에 비울 틈(px)과 자리를 훑는 간격(px)
+CARD_GAP, CARD_STEP = 6, 8
+#: 화면 안에 빈자리가 없을 때 덧대는 오른쪽 패널의 바탕색
+PANEL_RGB = (32, 34, 40)
+
+
+def _free_spot(occ, cw, ch, box, step=CARD_STEP):
+    """`occ`(점유 지도)에서 cw x ch 가 **하나도 겹치지 않는** 자리 중 `box` 에 가장
+    가까운 왼쪽 위 좌표. 없으면 None.
+
+    `step` px 칸으로 줄인 지도에서 센다(칸 안에 한 점이라도 차 있으면 찬 칸) — 보수적
+    이라 겹침을 놓치지 않고, 720p 에서 카드 하나 1 ms 안팎이다. 모든 후보를 누적합으로
+    한 번에 센다."""
+    H, W = occ.shape
+    if cw > W or ch > H:
+        return None
+    gh, gw = -(-H // step), -(-W // step)
+    pad = np.zeros((gh * step, gw * step), np.uint8)
+    pad[:H, :W] = occ
+    pad[H:, :] = 1                                    # 화면 밖 칸은 쓸 수 없다
+    pad[:, W:] = 1
+    g = pad.reshape(gh, step, gw, step).max(axis=(1, 3)).astype(np.int32)
+    kw, kh = -(-cw // step), -(-ch // step)
+    if kw > gw or kh > gh:
+        return None
+    sat = np.zeros((gh + 1, gw + 1), np.int32)
+    sat[1:, 1:] = g.cumsum(0).cumsum(1)
+    Y, X = np.mgrid[0:gh - kh + 1, 0:gw - kw + 1]
+    s = sat[Y + kh, X + kw] - sat[Y, X + kw] - sat[Y + kh, X] + sat[Y, X]
+    free = s == 0
+    if not free.any():
+        return None
+    X, Y = X * step, Y * step
+    x1, y1, x2, y2 = box
+    # 카드 사각형과 박스 사이의 **빈 거리**(겹치면 0) — 가까울수록 짝이 잘 보인다
+    gx = np.maximum(0, np.maximum(x1 - (X + cw), X - x2))
+    gy = np.maximum(0, np.maximum(y1 - (Y + ch), Y - y2))
+    dist = np.where(free, gx * gx + gy * gy, np.inf)
+    i = np.unravel_index(int(np.argmin(dist)), dist.shape)
+    return int(X[i]), int(Y[i])
+
+
+def _mark(occ, x1, y1, x2, y2, gap=CARD_GAP):
+    H, W = occ.shape
+    xa, ya = max(0, int(x1) - gap), max(0, int(y1) - gap)
+    xb, yb = min(W, int(x2) + gap), min(H, int(y2) + gap)
+    if xb > xa and yb > ya:
+        occ[ya:yb, xa:xb] = 1
+
+
+def _cards_on(pil, pen, cards, obstacles):
+    """카드를 **박스·라벨·다른 카드 어느 것과도 겹치지 않게** 놓고 그린다.
+
+    `obstacles` 는 화면에 그려진 것(검출 박스와 그 라벨)의 (x1, y1, x2, y2) 목록이다.
+    점수 1 등부터 자리를 고르고(좋은 자리를 먼저 가진다), 화면 안에 빈자리가 없는
+    카드는 **오른쪽에 덧댄 패널**에 놓는다 — 카드를 빼면 위험물을 숨기게 되고,
+    물체 위에 올리면 검출이 안 보인다. 둘 다 하지 않는다.
+    """
+    W, H = pil.size
+    occ = np.zeros((H, W), np.uint8)
+    for o in obstacles:
+        _mark(occ, *o)
+    for k in cards:                                   # 위험물 박스는 라벨이 없어도 피한다
+        _mark(occ, *k["box"])
+    placed, spill = {}, []
+    for k in sorted(cards, key=lambda k: k["n"]):
+        spot = _free_spot(occ, k["w"], k["h"], k["box"])
+        if spot is None:
+            spill.append(k)
+            continue
+        placed[id(k)] = spot
+        _mark(occ, spot[0], spot[1], spot[0] + k["w"], spot[1] + k["h"])
+    if spill:
+        # 패널: 위에서 아래로 쌓고, 화면 높이를 넘으면 옆 열로
+        cols, col, y = [], [], CARD_GAP
+        for k in spill:
+            if col and y + k["h"] > H:
+                cols.append(col); col, y = [], CARD_GAP
+            col.append((k, y)); y += k["h"] + CARD_GAP
+        cols.append(col)
+        x, extra_h = W + CARD_GAP, H
+        for col in cols:
+            cw_ = max(k["w"] for k, _ in col)
+            for k, yy in col:
+                placed[id(k)] = (x, yy)
+                extra_h = max(extra_h, yy + k["h"] + CARD_GAP)
+            x += cw_ + CARD_GAP
+        grown = Image.new("RGB", (x, extra_h), PANEL_RGB)
+        grown.paste(pil, (0, 0))
+        pil = grown
+    dr = ImageDraw.Draw(pil)
+    for k in cards:                                   # 낮은 점수부터 — 1 등이 맨 위
+        _paint_card(pil, dr, pen, k, *placed[id(k)])
+    return pil
 
 
 # ---------------------------------------------------------------- vision 진입점
-def add_cards(canvas, clean_bgr, dets, cues=None, font=None, colour_of=None, _state={}):
+def add_cards(canvas, clean_bgr, dets, cues=None, font=None, colour_of=None, obstacles=None,
+              _state={}):
     """이미 박스가 그려진 `canvas` 위에 **카드만** 올린다.
+
+    카드는 `obstacles`(그려진 박스·라벨의 x1, y1, x2, y2)와 겹치지 않는 자리에 놓이고,
+    화면 안에 자리가 없으면 오른쪽에 패널을 덧대 그 위에 놓는다 — 그래서 돌려주는
+    그림이 `canvas` 보다 **넓을 수 있다**.
 
     `canvas` 는 머리 띠가 붙기 전이어야 좌표가 맞는다. 위험물 후보가 없으면 아무것도
     하지 않고 그대로 돌려준다 — 비용 0.
@@ -615,9 +813,15 @@ def add_cards(canvas, clean_bgr, dets, cues=None, font=None, colour_of=None, _st
         _state["pen"], _state["scale"] = Pen(Path(font) if font else find_font(), sc), sc
     pen = _state["pen"]
     pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-    dr = ImageDraw.Draw(pil)
-    taken = []
-    for rank, det in _pick_cards(haz, clean_bgr, (W, H), 1.0, None):
-        _draw_one_card(pil, dr, pen, det, clean_bgr, (W, H), rank, taken,
-                       colour_of=colour_of)
+    # **카드는 그려진 것을 가리지 않는다.** 부르는 쪽이 그린 박스·라벨 자리를 주면
+    # 그것을 피하고, 안 주면 모든 검출 박스와 그 위 라벨 띠(어림)를 피한다
+    if obstacles is None:
+        obstacles = []
+        for d in dets or []:
+            x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
+            obstacles += [(x1, y1, x2, y2), (x1, max(0, y1 - 30), max(x2, x1 + 180), y1)]
+    cards = [k for k in (_build_card(pen, det, clean_bgr, (W, H), rank, colour_of=colour_of)
+                         for rank, det in _pick_cards(haz, clean_bgr, (W, H), 1.0, None))
+             if k is not None]
+    pil = _cards_on(pil, pen, cards, obstacles)
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)

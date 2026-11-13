@@ -90,6 +90,11 @@ class HazardVerifier:
 
     def __init__(self, spec, log=print):
         self.classes = tuple(spec.get("classes") or ())
+        # **이름이 아직 없는 후보도 잰다**(`candidates`, 예: unconfirmed). 위험물 이름을
+        # 받은 것만 재면 "나무라고 불리지 않은 나무 상자" 는 아예 비교되지 않는다.
+        # 후보마다 **위험물 클래스 전부**에 대해 잰다(`verify_by`) — 점수로 견주려면
+        # 같은 단서를 모든 클래스에 대해 같은 방식으로 재야 한다.
+        self.candidates = tuple(spec.get("candidates") or ())
         self.encoders, self.missing = [], []
         for m in spec.get("models") or []:
             try:
@@ -209,10 +214,11 @@ class HazardVerifier:
         return self.bank.get("%s/%s" % (enc_name, cls))
 
     def __call__(self, bgr, dets):
-        """위험물 후보에 `verify` 를 붙인다. 후보가 없으면 비용 0."""
+        """후보에 `verify_by`(위험물 클래스마다의 근거)와 `verify`(자기 이름의 근거)를
+        붙인다. 후보가 없으면 비용 0."""
         if not self.ready:
             return 0.0
-        want = [d for d in dets if d["name"] in self.classes]
+        want = [d for d in dets if d["name"] in self.classes or d["name"] in self.candidates]
         if not want:
             return 0.0
         t0 = time.perf_counter()
@@ -225,6 +231,9 @@ class HazardVerifier:
             i = (x2 - x1) * (y2 - y1)
             return i / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - i)
 
+        def own(d):
+            d["verify"] = (d.get("verify_by") or {}).get(d["name"])
+
         # 확신이 높은 것부터 본다 — 상한에 걸려 잘릴 때 **약한 것이 잘리도록**
         want.sort(key=lambda d: -d["conf"])
         crops, keep, reused = [], [], 0
@@ -233,55 +242,64 @@ class HazardVerifier:
             x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(W, x2), min(H, y2)
-            hit = next((v for cls, box, v in self._last
-                        if cls == d["name"] and iou(box, (x1, y1, x2, y2)) >= self.cache_iou), None)
+            # 캐시는 **자리로만** 찾는다 — 근거는 클래스마다 다 들고 있으므로 이름이
+            # 바뀌어도(가설 → 위험물) 다시 잴 필요가 없다
+            hit = next((v for box, v in self._last
+                        if iou(box, (x1, y1, x2, y2)) >= self.cache_iou), None)
             if hit is not None:
-                d["verify"] = dict(hit, cached=True)
+                d["verify_by"] = {c: dict(v, cached=True) for c, v in hit.items()}
+                own(d)
                 reused += 1
                 continue
             c = bgr[y1:y2, x1:x2]
             if c.size == 0 or min(c.shape[:2]) < 8:
-                d["verify"] = None                   # 너무 작아 **재지 않는다** (0 이 아니다)
+                d["verify_by"] = None                # 너무 작아 **재지 않는다** (0 이 아니다)
+                own(d)
                 continue
             if len(crops) >= self.max_per_frame:
-                d["verify"] = None                   # 이 장의 예산을 넘었다 — 다음 장에서 본다
+                d["verify_by"] = None                # 이 장의 예산을 넘었다 — 다음 장에서 본다
+                own(d)
                 continue
             crops.append(c)
             keep.append(d)
         if not crops:
+            self.last_reused = reused
             return round((time.perf_counter() - t0) * 1000, 1)
-        per_model = {}
+        per = {}                                     # (id(d), cls) → {모델: 근거}
         # 프로토타입이 없으면 인코더를 **돌리지 않는다** — 돌려도 견줄 것이 없고
         # 그 비용은 그대로 든다
         for enc in (self.encoders if self.learned else ()):
             emb = enc(crops)                         # 한 프레임의 후보를 한 번에
+            neg = self._protos(enc.name, "_negative")
             for i, d in enumerate(keep):
-                pos = self._protos(enc.name, d["name"])
-                neg = self._protos(enc.name, "_negative")
-                if pos is None:
-                    continue
-                p = float((emb[i] @ pos.T).max())
                 n = float((emb[i] @ neg.T).max()) if neg is not None and len(neg) else 0.0
-                per_model.setdefault(id(d), {})[enc.name] = {"pos": round(p, 4),
-                                                             "neg": round(n, 4),
-                                                             "margin": round(p - n, 4)}
+                for cls in self.classes:
+                    pos = self._protos(enc.name, cls)
+                    if pos is None:
+                        continue
+                    p = float((emb[i] @ pos.T).max())
+                    per.setdefault((id(d), cls), {})[enc.name] = {
+                        "pos": round(p, 4), "neg": round(n, 4), "margin": round(p - n, 4)}
         for i, d in enumerate(keep):
-            rows = per_model.get(id(d)) or {}
-            if self.structure:
-                st = self._structure(crops[i], d["name"])
-                if st is not None:
-                    # 학습하지 않은 신호다. margin 과 자릿수를 맞춰 넣되 **출처를 남긴다**
-                    rows["structure"] = {"pos": st, "neg": 0.0, "margin": round(st - 0.15, 4),
-                                         "learned": False}
-            if not rows:
-                d["verify"] = None
-                continue
-            margins = [r["margin"] for r in rows.values()]
-            d["verify"] = {"margin": round(float(np.mean(margins)), 4),
+            by = {}
+            for cls in self.classes:
+                rows = per.get((id(d), cls)) or {}
+                if self.structure:
+                    st = self._structure(crops[i], cls)
+                    if st is not None:
+                        # 학습하지 않은 신호다. margin 과 자릿수를 맞춰 넣되 **출처를 남긴다**
+                        rows["structure"] = {"pos": st, "neg": 0.0, "margin": round(st - 0.15, 4),
+                                             "learned": False}
+                if not rows:
+                    continue
+                margins = [r["margin"] for r in rows.values()]
+                by[cls] = {"margin": round(float(np.mean(margins)), 4),
                            "agree": int(sum(m > 0 for m in margins)),
                            "models": len(margins), "per_model": rows, "cached": False}
-        self._last = [(d["name"], tuple(int(v) for v in d["xyxy"]), d["verify"])
-                      for d in want if d.get("verify")]
+            d["verify_by"] = by or None
+            own(d)
+        self._last = [(tuple(int(v) for v in d["xyxy"]), d["verify_by"])
+                      for d in want if d.get("verify_by")]
         ms = round((time.perf_counter() - t0) * 1000, 1)
         self.last_reused = reused
         return ms

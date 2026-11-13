@@ -70,6 +70,7 @@ devices:
   # 아니다. 보정판으로 재서 넣는다 (AI-S-08 — 사전정보와 측정값을 구분한다)
   pi11:   {fov_x_deg: null}
   pi12:   {fov_x_deg: null}
+  pi13:   {fov_x_deg: null}
 
 models:
   # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
@@ -239,7 +240,10 @@ models:
       # **가설 칸만 예외다.** 이 값은 자료에서 고른 것이 아니라 사람 앞에 몇 개를 올릴지의
       # 운영값이다 — arm 하한 0.05 로 두면 프리 프롬프트가 내는 장당 72.5 상자의 상당수가
       # 그대로 검수 대기로 간다. 올리면 후보가 줄고 내리면 놓치는 것이 줄어든다.
-      unconfirmed: 0.25
+      # **0.25 → 0.10**(2026-11-13). 이제 가설 칸은 사람 앞에 바로 가지 않고 **점수로
+      # 걸러진다**(assess) — 후보를 더 내고 단서 점수가 위험물을 고르게 한다(재현율 우선).
+      # 그림에는 의심한 것과 확신 0.25(overlay.min_conf) 이상만 그려진다.
+      unconfirmed: 0.10
       # **부탄만 엄하게.** 다섯 클래스에 하한을 두지 않는다는 위 규칙의 예외이고,
       # 고른 자리를 적는다 — 0.05 는 dev2 에서 오검출 장당 0.680 이었다.
       butane_canister: 0.10
@@ -280,11 +284,21 @@ models:
     # 옮긴 것이고, 현장이 다르면 배포 프로파일에서 다시 적는다(AI-C-15).
     area_bands:
       - {upto: 0.01, conf: 0.05}  # 멀리 — 하천 GT 전부(최대 0.006)가 여기. 오늘 값 그대로
-      - {upto: 0.40, conf: 0.10}  # 근접 — 실내 GT 전부(0.010~0.386)가 여기
+      - {upto: 0.90, conf: 0.10}  # 근접 — 실내 GT 전부(0.010~0.386)가 여기. **상한 0.40 → 0.90**
+                                  # (2026-11-13): 가까이 다가가면 물체가 화면 대부분을 채운다.
+                                  # **거의 화면 전체**(90% 초과)를 덮는 상자만 장면 검출로 버린다
     # max_area_ratio 는 area_bands 와 함께 적을 수 없다(상한의 주인이 둘이 된다).
-    # 마지막 band 의 upto 가 상한이다.
+    # 마지막 band 의 upto 가 상한이다 — 텍스트 arm·프리 arm 모두에 걸린다.
     max_det: 100
     imgsz: 1920                   # arm 마다 imgsz 로 덮을 수 있다
+    assess: true                  # **점수로 견준다**(2026-11-13). 후보(위험물 이름 + unconfirmed)
+                                  # 마다 위험물 클래스 전부에 대해 같은 단서(match·material·
+                                  # structure·class — size 는 뺐다)를 **중요도 무게로** 재고, 가장 높은
+                                  # 클래스가 하한 이상이면 그 이름으로 의심한다. 하한은
+                                  # vision/assets/hazard_cues.json decision.min_score
+    nest_ratio: 0.7               # **부품은 전체에 접는다**(2026-11-13). 작은 상자가 큰 상자 안에
+                                  # 이 비율 이상 들어가면 큰 것 하나만 남긴다(부탄 통 안의 뚜껑·
+                                  # 라벨·마개). 작은 쪽이 **다른** 위험물로 의심되면 남긴다. null = 끔
     on_missing_arm: degrade       # arm 이 둘이 됐다 — 한쪽 가중치가 없는 기계에서는 그
                                   # arm 만 빼고 돈다(AI-C-05). **빠진 사실은 기록에
                                   # 남는다**(`missing_arms` · `min_arms_applied`) —
@@ -320,7 +334,7 @@ models:
       max_age: 30                 # 이보다 오래 나른 값은 **버린다** — 모르면 모른다고 한다
       percentile: 40              # 상자 안 depth 의 이 백분위를 물체 거리로 본다
       iou_match: 0.5              # track_id 가 없을 때의 차선책
-      classes: [wooden_box_mine, butane_canister]
+      classes: [wooden_box_mine, butane_canister, unconfirmed]   # unconfirmed 도 — 크기 단서에 거리가 필요하다
 
     # **위험물 후보 검증 — 라벨 없이, 학습 없이.**
     # 운영 영상에 이 두 물체의 정답이 사실상 없다(하천 부탄 0 · 실내 1 은 오라벨).
@@ -339,9 +353,10 @@ models:
     verify:
       enabled: true
       classes: [butane_canister, wooden_box_mine]
+      candidates: [unconfirmed]   # 이름 없는 후보도 위 두 클래스 **모두에 대해** 잰다(assess 가 견준다)
       prototypes: /home/khw67/data_stream/models/butane_ref/prototypes.npz
       threads: 8
-      max_per_frame: 6            # 이 장의 예산. 넘으면 **확신 낮은 쪽**이 다음 장으로
+      max_per_frame: 12            # 이 장의 예산. 넘으면 **확신 낮은 쪽**이 다음 장으로
       cache_iou: 0.7              # 앞 장과 이만큼 겹치는 같은 클래스는 다시 재지 않는다
       structure: true             # 학습하지 않은 구조 서명을 함께 센다(설명 가능한 신호)
       models:
@@ -380,6 +395,19 @@ models:
         weight: /home/khw67/data_stream/models/yoloe-11s-seg-pf.pt
         imgsz: 1280               # 측정한 자리다(1920 은 113.6 ms 로 +39 ms)
         conf: 0.05
+        # max_area_ratio: 이 arm 만의 크기 상한(선택). **두지 않는다** — 가까운 물체는 화면
+        # 대부분을 채울 수 있다. 전체 화면 상자는 위 area_bands 상한(0.90)이 막는다.
+        # **장면 낱말**(2026-11-13): 이 이름이 화면의 scene_min_area 이상을 덮으면 버린다.
+        # pi13 실내 192장에서 크기로만 거르면 'studio shot'(화면 64%) · 'restroom'(64%) ·
+        # 'kitchen floor'(46%) 가 장당 2개씩 위험물로 의심됐다. 실제 물체는 최대 17%.
+        # 이름과 크기를 **함께** 봐서 가까운 물체(이름이 물체 이름)는 크기와 상관없이 남긴다.
+        # 넣지 않은 것: wood floor · hardwood floor · tile · concrete · sand · mud(물체
+        # 재질과 겹친다), close-up · texture · pattern · surface(가까운 물체에 붙을 수 있다)
+        scene_words: [studio shot, restroom, kitchen floor, tile wall, floor, wall, room,
+                      bathroom, bedroom, living room, kitchen, office, hallway, corridor,
+                      ceiling, road, sky, field, grass, lawn, indoor, outdoor, scene, landscape,
+                      carpet, pavement, river, water, lake, sea, beach, shore, stream, forest]
+        scene_min_area: 0.10
         # 프리 어휘 이름 → 우리 클래스. **재질을 말하는 이름만 넣는다.** 같은 나무판에
         # 프리 어휘가 붙인 이름은 breadbox 7 · hassock 6 · plywood 5 · podium 4 ·
         # harpsichord 2 였다 — 이 중 재질을 말하는 것은 plywood 뿐이고, 모양 이름은
@@ -648,7 +676,9 @@ overlay:
     # 끄면 위 label 한 줄만 남는 예전 화면이 된다.
     # 그리는 코드의 주인은 `hazard_overlay.py` 하나이고 검수 도구도 그것을 불러 쓴다 —
     # 두 화면이 같은 검출을 각자 조립하면 어느 날 둘이 다른 말을 한다.
-    cards: true
+    cards: false                  # **그림에 카드를 넣지 않는다**(2026-11-13) — 카드가 검출을 가렸다.
+                                  # 오버레이는 "이름 거리 점수" 만, 근거 카드는 웹 /vision/view 에서
+                                  # 마우스를 올리면 보인다(클릭 고정 · X 닫기)
     cues: null                    # 단서 선언 자리. null = vision/assets/hazard_cues.json
   depth:
     label: [[name, conf, range], [gps]]
