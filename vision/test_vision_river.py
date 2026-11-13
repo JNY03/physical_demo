@@ -18,7 +18,7 @@ vi = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vi)
 
 IMG = np.zeros((100, 100, 3), np.uint8)
-CLASSES = ["styrofoam_box", "water_jug", "butane_canister", "beverage_can", "wooden_box"]
+CLASSES = ["styrofoam_box", "water_jug", "butane_canister", "beverage_can", "wooden_box_mine"]
 PROMPTS = ["styrofoam box", "plastic water jug", "butane gas canister",
            "beverage can", "wooden block"]
 
@@ -264,7 +264,10 @@ def test_the_shipped_config_tunes_nothing_on_the_labelled_data():
     free = river["arms"][1]
     hypothesis = free["unconfirmed_class"]
     classes = [c for c in river["classes"] if c != hypothesis]
-    assert len(classes) == 5
+    # **표적은 둘, 합쳐지는 캔까지 셋이다**(2026-11-13). 스티로폼·물통은 클래스에서
+    # 내려갔지만 **어휘에서 사라지지 않았다** — decoys 로 남아 표를 붙잡는다.
+    assert set(classes) == {"wooden_box_mine", "butane_canister", "beverage_can"}
+    assert {"styrofoam box", "plastic water jug"} <= set(river["decoys"])
     assert set(river["prompts"]) == set(river["classes"])
     # **가설 칸에는 텍스트 문구가 없다**(null). 있으면 그 낱말이 어휘 전체 argmax 에서
     # 표를 가져가 진짜 물체를 지운다
@@ -281,9 +284,12 @@ def test_the_shipped_config_tunes_nothing_on_the_labelled_data():
     if len(river["arms"]) == 1:
         assert river["min_arms"] == 1 and river["min_prompts"] == 1
     vi.check_overlay_cfg(data)          # overlay 설정이 river 를 받아들인다
-    # 다섯 클래스에는 튜닝된 임계값이 없다 — 라벨이 전부 test 라 고를 자료가 없다.
-    # 가설 칸의 0.25 는 자료에서 고른 값이 아니라 검수 대기 줄의 길이를 정하는 운영값이다
-    assert set(river["class_conf"]) == {hypothesis}
+    # 라벨 219장에서 고른 값은 설정에 없다. 지금 하한을 가진 둘은 **그 자료로 고른
+    # 것이 아니다** — 가설 칸의 0.25 는 검수 대기 줄의 길이를 정하는 운영값이고,
+    # 부탄의 0.10 은 웹 수집본(dev1)과 실내 판정(dev2)에서 골랐다
+    # (prereg_butane_strict.md). 나머지 **넷은 비어 있어야 한다.**
+    assert set(river["class_conf"]) <= {hypothesis, "butane_canister"}
+    assert not ({"beverage_can", "wooden_box_mine"} & set(river["class_conf"]))
     assert not river["prompt_conf"]
     # 설정이 실제로 서는지 — 가짜 arm 으로 바꿔 끼워 세운다 (가중치 없이)
     spun = vi.RiverRunner(dict(river, arms=[
@@ -292,7 +298,10 @@ def test_the_shipped_config_tunes_nothing_on_the_labelled_data():
     ]), "cpu")
     assert spun.min_prompts == 1
     assert spun.hypothesis == {hypothesis}
-    assert {spun.threshold(c) for c in classes} == {river["conf"]}
+    # 부탄만 자기 하한(dev 에서 고름)을 가지고 **나머지 넷은 전역 conf 그대로**다
+    plain = [c for c in classes if c != "butane_canister"]
+    assert {spun.threshold(c) for c in plain} == {river["conf"]}
+    assert spun.threshold("butane_canister") >= river["conf"]
     # 트래킹은 켜져 있되 **거르지 않아야** 한다 — 거르면 재현율이 0.640 → 0.024 다
     river_track = data["stabilize"]["river"]
     assert river_track["enabled"] is True
@@ -304,7 +313,7 @@ VOCAB = {"styrofoam_box": ["styrofoam box", "white foam box"],
          "water_jug": ["plastic water jug", "water container"],
          "butane_canister": ["butane gas canister"],
          "beverage_can": ["beverage can"],
-         "wooden_box": ["wooden block"]}
+         "wooden_box_mine": ["wooden block"]}
 
 
 def pdet(cls, conf, xyxy, prompt):
@@ -317,7 +326,7 @@ def test_many_prompts_expand_to_one_vocabulary_but_keep_class_order():
                        "water container", "butane gas canister", "beverage can",
                        "wooden block"]
     assert owners == ["styrofoam_box", "styrofoam_box", "water_jug", "water_jug",
-                      "butane_canister", "beverage_can", "wooden_box"]
+                      "butane_canister", "beverage_can", "wooden_box_mine"]
     # 평면 목록(옛 모양)도 그대로 받는다
     assert vi._expand_vocab(CLASSES, PROMPTS) == (PROMPTS, CLASSES)
 
@@ -480,9 +489,9 @@ def test_an_arm_that_reports_no_prompt_still_counts_as_one():
 def test_the_record_carries_the_vocabulary_and_threshold_shape():
     arms = [{"kind": "fake", "name": "a", "dets": []}]
     meta, _dets = vi.RiverRunner(cfg(arms, prompts=VOCAB, min_arms=1, conf=0.05,
-                                     class_conf={"wooden_box": 0.15}), "cpu")(IMG)
+                                     class_conf={"wooden_box_mine": 0.15}), "cpu")(IMG)
     assert meta["prompts_declared"] == 7 and meta["min_prompts"] == 1
-    assert meta["class_conf"] == {"wooden_box": 0.15} and meta["prompt_conf"] == {}
+    assert meta["class_conf"] == {"wooden_box_mine": 0.15} and meta["prompt_conf"] == {}
     assert meta["conf"] == 0.05 and meta["prompt"] == "text"
 
 
@@ -525,7 +534,7 @@ def test_class_conf_of_a_merged_class_uses_the_target_name():
 
 
 def test_a_merge_chain_or_self_merge_or_unknown_name_is_refused():
-    for bad, msg in (({"beverage_can": "butane_canister", "butane_canister": "wooden_box"}, "사슬"),
+    for bad, msg in (({"beverage_can": "butane_canister", "butane_canister": "wooden_box_mine"}, "사슬"),
                      ({"beverage_can": "beverage_can"}, "자기 자신"),
                      ({"soda": "butane_canister"}, "classes 에 없는")):
         with pytest.raises(SystemExit) as e:
@@ -706,7 +715,7 @@ def test_the_shipped_config_tracks_without_filtering():
 # ---------------------------------------------------------------- 미끼 문구
 def test_decoy_prompts_enter_the_vocabulary_but_never_leave_as_detections():
     """열린어휘 탐지기는 어휘 전체의 argmax 로 이름 하나를 붙인다. 배경에 실제로 있는
-    것을 어휘에 넣어 두면 둔치의 판자가 `wooden_box` 가 아니라 `wooden plank` 로 불려
+    것을 어휘에 넣어 두면 둔치의 판자가 `wooden_box_mine` 가 아니라 `wooden plank` 로 불려
     **사라진다**. 넣은 것이 어휘에 들어갔는지, 결과에서 빠지는지 둘 다 본다."""
     prompts, owners = vi._expand_vocab(CLASSES, PROMPTS, ["driftwood", "rock"])
     assert prompts[-2:] == ["driftwood", "rock"]
@@ -750,18 +759,18 @@ def names_over(policy, seq, **over):
 
 
 def test_raw_policy_changes_nothing():
-    seq = ["styrofoam_box", "wooden_box", "styrofoam_box"]
+    seq = ["styrofoam_box", "wooden_box_mine", "styrofoam_box"]
     assert names_over("raw", seq) == seq
 
 
 def test_hysteresis_needs_k_consecutive_disagreements_to_switch():
     """한 장짜리 반대는 이름을 바꾸지 못한다 — 그것이 깜빡임의 정체다."""
-    seq = ["styrofoam_box", "wooden_box", "styrofoam_box", "styrofoam_box"]
+    seq = ["styrofoam_box", "wooden_box_mine", "styrofoam_box", "styrofoam_box"]
     assert names_over("hyst-2", seq) == ["styrofoam_box"] * 4
     # 두 장 연속이면 바뀐다
-    seq = ["styrofoam_box", "wooden_box", "wooden_box", "wooden_box"]
+    seq = ["styrofoam_box", "wooden_box_mine", "wooden_box_mine", "wooden_box_mine"]
     assert names_over("hyst-2", seq) == ["styrofoam_box", "styrofoam_box",
-                                         "wooden_box", "wooden_box"]
+                                         "wooden_box_mine", "wooden_box_mine"]
 
 
 def test_the_frame_s_own_name_is_never_thrown_away():
@@ -769,17 +778,17 @@ def test_the_frame_s_own_name_is_never_thrown_away():
     프레임별 진실이 필요한 소비자는 label_raw 를 본다."""
     ls = vi.LabelStabilizer({"label_policy": "hyst-2", "iou_match": 0.3})
     ls.update([lsdet("styrofoam_box", 0.5, (10, 10, 30, 30))], 0.0)
-    out = ls.update([lsdet("wooden_box", 0.5, (10, 10, 30, 30), cls=4)], 0.066)[0]
-    assert out["name"] == "styrofoam_box" and out["label_raw"] == "wooden_box"
+    out = ls.update([lsdet("wooden_box_mine", 0.5, (10, 10, 30, 30), cls=4)], 0.066)[0]
+    assert out["name"] == "styrofoam_box" and out["label_raw"] == "wooden_box_mine"
     assert out["cls"] == CLASSES.index("styrofoam_box")
 
 
 def test_an_unsettled_name_is_marked_and_carries_its_candidates():
     ls = vi.LabelStabilizer({"label_policy": "hyst-2", "iou_match": 0.3, "label_margin": 0.9})
     ls.update([lsdet("styrofoam_box", 0.5, (10, 10, 30, 30))], 0.0)
-    out = ls.update([lsdet("wooden_box", 0.5, (10, 10, 30, 30), cls=4)], 0.066)[0]
+    out = ls.update([lsdet("wooden_box_mine", 0.5, (10, 10, 30, 30), cls=4)], 0.066)[0]
     assert out["label_stable"] is False
-    assert set(out["label_candidates"]) == {"styrofoam_box", "wooden_box"}
+    assert set(out["label_candidates"]) == {"styrofoam_box", "wooden_box_mine"}
 
 
 def test_a_forgotten_track_does_not_lend_its_name_to_a_later_object():
@@ -788,8 +797,8 @@ def test_a_forgotten_track_does_not_lend_its_name_to_a_later_object():
     ls.update([lsdet("styrofoam_box", 0.9, (10, 10, 30, 30))], 0.0)
     for i in range(1, 5):
         ls.update([], i * 0.066)                        # 한참 안 보인다
-    out = ls.update([lsdet("wooden_box", 0.9, (10, 10, 30, 30), cls=4)], 0.4)[0]
-    assert out["name"] == "wooden_box"
+    out = ls.update([lsdet("wooden_box_mine", 0.9, (10, 10, 30, 30), cls=4)], 0.4)[0]
+    assert out["name"] == "wooden_box_mine"
 
 
 def test_an_unknown_label_policy_is_refused():
@@ -811,39 +820,39 @@ def test_a_free_name_maps_to_our_class_and_the_rest_stay_unconfirmed():
     """지도에 있는 이름만 우리 클래스가 된다. 나머지는 **버리지 않고** 가설로 남는다
     — 1 위를 고르지 않는 것이 요점이다(AI-S-04)."""
     m = vi._ArmYoloeFree._read_map(
-        {"wooden_box": ["plywood", "WOOD"], "water_jug": ["jug"]},
-        {"wooden_box", "water_jug", "unconfirmed"})
-    assert m == {"plywood": "wooden_box", "wood": "wooden_box", "jug": "water_jug"}
+        {"wooden_box_mine": ["plywood", "WOOD"], "water_jug": ["jug"]},
+        {"wooden_box_mine", "water_jug", "unconfirmed"})
+    assert m == {"plywood": "wooden_box_mine", "wood": "wooden_box_mine", "jug": "water_jug"}
 
 
 def test_one_free_name_cannot_point_at_two_classes():
     """한 이름이 두 클래스를 가리키면 어느 쪽도 믿을 수 없다."""
     with pytest.raises(SystemExit) as e:
-        vi._ArmYoloeFree._read_map({"wooden_box": ["crate"], "styrofoam_box": ["crate"]},
-                                   {"wooden_box", "styrofoam_box"})
+        vi._ArmYoloeFree._read_map({"wooden_box_mine": ["crate"], "styrofoam_box": ["crate"]},
+                                   {"wooden_box_mine", "styrofoam_box"})
     assert "crate" in str(e.value)
 
 
 def test_a_vocab_map_class_must_be_declared():
     with pytest.raises(SystemExit) as e:
-        vi._ArmYoloeFree._read_map({"metal_drum": ["barrel"]}, {"wooden_box"})
+        vi._ArmYoloeFree._read_map({"metal_drum": ["barrel"]}, {"wooden_box_mine"})
     assert "metal_drum" in str(e.value)
 
 
 def test_an_empty_vocab_map_is_refused():
     """지도 없이 세우면 **모든 검출이 unconfirmed** 가 되어 아무것도 못 가린다."""
     with pytest.raises(SystemExit):
-        vi._ArmYoloeFree._read_map(None, {"wooden_box"})
+        vi._ArmYoloeFree._read_map(None, {"wooden_box_mine"})
 
 
 def test_no_prompts_means_the_class_name_is_the_prompt():
     """프리 프롬프트만 쓰는 구성은 텍스트 문구가 없다. 적지 않으면 클래스 이름이
     문구다 — 빈 dict 는 그대로 거절한다(비워 둔 것과 안 적은 것은 다른 뜻이다)."""
-    prompts, owners = vi._expand_vocab(["wooden_box", "unconfirmed"], None)
-    assert prompts == ["wooden_box", "unconfirmed"]
-    assert owners == ["wooden_box", "unconfirmed"]
+    prompts, owners = vi._expand_vocab(["wooden_box_mine", "unconfirmed"], None)
+    assert prompts == ["wooden_box_mine", "unconfirmed"]
+    assert owners == ["wooden_box_mine", "unconfirmed"]
     with pytest.raises(SystemExit):
-        vi._expand_vocab(["wooden_box"], {})
+        vi._expand_vocab(["wooden_box_mine"], {})
 
 
 # --- 가설 칸: 자리는 내고 이름은 고르지 않는다 (2026-11-12) ------------------
@@ -920,3 +929,180 @@ def test_the_free_only_profile_also_stands():
         {"kind": "fake", "name": "free", "dets": [], "free_vocab": True,
          "unconfirmed_class": free["unconfirmed_class"]}]), "cpu")
     assert spun.hypothesis == {free["unconfirmed_class"]}
+
+
+# ------------------------------------------------- 크기별 하한 (area_bands)
+# 상수 하나(max_area_ratio 0.08)는 **그 상수를 고른 현장에서만** 맞았다. 하천 GT 는
+# 가장 큰 것이 화면의 0.006 이라 한 번도 켜지지 않았고, 실내 근접에서는 나무 상자
+# 정답의 88% 가 그 위라 잡고도 버렸다(2026-11-13 실측). 버리는 기준을 **얼마나
+# 확신해야 받는가**로 바꾼다.
+BANDS = [{"upto": 0.02, "conf": 0.05}, {"upto": 0.40, "conf": 0.30}]
+SMALL = (10.0, 10.0, 20.0, 20.0)        # 100 px² = 화면의 0.01
+BIG = (10.0, 10.0, 60.0, 60.0)          # 2500 px² = 화면의 0.25
+HUGE = (0.0, 0.0, 90.0, 90.0)           # 8100 px² = 화면의 0.81
+
+
+def banded(dets, **over):
+    over.setdefault("area_bands", BANDS)
+    return cfg([arm("a", dets)], min_arms=1, conf=0.05, max_area_ratio=None, **over)
+
+
+def test_a_big_box_needs_more_confidence_than_a_small_one():
+    """같은 0.10 인데 작은 것은 받고 큰 것은 받지 않는다 — 멀리 있는 흐릿한 물체와
+    코앞의 흐릿한 물체는 같은 사실이 아니다."""
+    r = vi.RiverRunner(banded([det("water_jug", 0.10, SMALL),
+                               det("water_jug", 0.10, BIG)]), "cpu")
+    info, dets = r(IMG)
+    assert [d["xyxy"] for d in dets] == [list(SMALL)]
+    assert info["dropped_by_area"] == 1
+
+
+def test_a_big_box_with_enough_confidence_is_kept():
+    """예전에는 0.08 을 넘는다는 이유만으로 **확신과 무관하게** 버렸다."""
+    r = vi.RiverRunner(banded([det("wooden_box_mine", 0.50, BIG)]), "cpu")
+    _info, dets = r(IMG)
+    assert len(dets) == 1 and dets[0]["name"] == "wooden_box_mine"
+
+
+def test_a_box_above_the_last_band_is_a_scene_detection():
+    """마지막 upto 가 상한이다 — 아무리 확신해도 화면을 통째로 가리킨 것은 받지 않는다."""
+    r = vi.RiverRunner(banded([det("water_jug", 0.99, HUGE)]), "cpu")
+    _info, dets = r(IMG)
+    assert dets == []
+
+
+def test_a_declared_class_threshold_beats_the_size_band():
+    """위험물에 낮은 하한을 적어 두면 코앞의 큰 위험물도 그 하한으로 받는다.
+    크기가 덮어쓰면 재현율을 위해 적은 값이 조용히 무효가 된다."""
+    c = banded([det("wooden_box_mine", 0.10, BIG), det("water_jug", 0.10, BIG)],
+               class_conf={"wooden_box_mine": 0.05})
+    _info, dets = vi.RiverRunner(c, "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["wooden_box_mine"]
+
+
+def test_area_bands_and_max_area_ratio_cannot_both_be_declared():
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([arm("a", [])], min_arms=1, area_bands=BANDS), "cpu")
+    assert "상한의 주인이 둘" in str(e.value)
+
+
+def test_area_bands_must_be_declared_in_increasing_order():
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(banded([], area_bands=[{"upto": 0.4, "conf": 0.3},
+                                              {"upto": 0.02, "conf": 0.05}]), "cpu")
+    assert "커지는 차례" in str(e.value)
+
+
+def test_a_band_below_arm_conf_is_refused():
+    """arm 이 먼저 버리는 값을 적으면 아무 일도 하지 않는다 — 조용히 통과시키지 않는다."""
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(banded([], area_bands=[{"upto": 0.4, "conf": 0.01}]), "cpu")
+    assert "arm_conf" in str(e.value)
+
+
+def test_without_bands_the_old_area_cap_still_cuts():
+    """선언하지 않은 배치는 **지금까지와 똑같이** 돈다."""
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.9, BIG)])], min_arms=1), "cpu")
+    info, dets = r(IMG)
+    assert dets == [] and info["area_bands"] == [] and info["area_cap"] == 0.08
+
+
+def test_the_shipped_config_does_not_retune_the_far_regime():
+    """출고 설정은 크기별 하한을 쓴다. **첫 칸의 하한은 전역 conf 와 같아야 한다** —
+    멀리 있는 구간(하천 GT 가 전부 여기)의 작동점을 건드리지 않았다는 뜻이고, 그래야
+    이 변경이 '근접 구간을 더한 것' 으로만 설명된다. 글자가 아니라 그 관계를 고정한다."""
+    import yaml
+    river = yaml.safe_load(Path(__file__).with_name("vision_config.yaml")
+                           .read_text(encoding="utf-8"))["models"]["river"]
+    bands = river["area_bands"]
+    assert "max_area_ratio" not in river, "상한의 주인이 둘이 되면 안 된다"
+    assert len(bands) >= 2 and bands[0]["conf"] == river["conf"]
+    assert [b["upto"] for b in bands] == sorted(b["upto"] for b in bands)
+    # 하천 GT 의 가장 큰 상자(0.006)와 실내 GT 의 가장 작은 상자(0.010) 사이에 칸이 갈려야
+    # 두 현장이 서로 다른 하한을 받는다. 그 사이가 아니면 한쪽이 다른 쪽 자를 쓴다.
+    assert 0.006 < bands[0]["upto"] < 0.010 or bands[0]["upto"] == 0.01
+    # 실내 GT 의 가장 큰 것(0.386)이 상한 안에 들어야 한다
+    assert bands[-1]["upto"] > 0.386
+
+
+# ------------------------------------------------- 이긴 낱말 (lead)
+def test_a_detection_says_which_word_won():
+    """가설 칸은 이름이 전부 `unconfirmed` 다. 어느 낱말이 그 자리를 이겼는지를
+    남기지 않으면 **사람이 볼 것이 아무것도 없다** — 화면에 'unconfirmed' 만 23 개 뜬다."""
+    r = vi.RiverRunner(cfg([arm("a", [det("water_jug", 0.9, BOX)], prompts=["jug"]),
+                            arm("b", [det("water_jug", 0.4, BOX)], prompts=["bottle"])],
+                           min_arms=1), "cpu")
+    _info, dets = r(IMG)
+    assert len(dets) == 1
+    # 문구를 돌려주지 않는 가짜 arm 은 클래스 이름으로 센다(_said). 확신이 높은 쪽이 이긴다
+    assert dets[0]["lead"] == "water_jug"
+    assert dets[0]["lead"] in dets[0]["prompts"]
+
+
+def test_the_winning_word_is_the_most_confident_one():
+    a = {"kind": "fake", "name": "a",
+         "dets": [{"cls_name": "wooden_box_mine", "conf": 0.3, "xyxy": list(BOX), "prompt": "plank"}]}
+    b = {"kind": "fake", "name": "b",
+         "dets": [{"cls_name": "wooden_box_mine", "conf": 0.8, "xyxy": list(BOX), "prompt": "plywood"}]}
+    _info, dets = vi.RiverRunner(cfg([a, b], min_arms=1), "cpu")(IMG)
+    assert dets[0]["lead"] == "plywood"
+    assert dets[0]["prompts"] == ["plank", "plywood"]
+
+
+# ------------------------------------------------- 클래스별 근거 요구 (class_rules)
+# 부탄 오검출은 **작고 흐릿하다** — 실측 최소변 중앙 32 px(실내)·14 px(하천)에
+# 89~100% 가 64 px 미만. 확신값만 올리면 큰 오검출은 남고 작은 진짜가 죽는다.
+TINY = (10.0, 10.0, 14.0, 14.0)         # 최소변 4 px
+MID = (10.0, 10.0, 34.0, 34.0)          # 최소변 24 px (면적 상한 0.08 안)
+
+
+def test_a_class_can_require_a_minimum_size():
+    c = cfg([arm("a", [det("butane_canister", 0.9, TINY), det("butane_canister", 0.9, MID)])],
+            min_arms=1, class_rules={"butane_canister": {"min_short_px": 20}})
+    info, dets = vi.RiverRunner(c, "cpu")(IMG)
+    assert [d["xyxy"] for d in dets] == [list(MID)]
+    assert info["dropped_by_class_rule"] == 1
+
+
+def test_a_class_can_require_two_arms_while_others_need_one():
+    """위험물만 엄하게 한다 — 나머지 클래스의 작동점은 그대로다."""
+    c = cfg([arm("a", [det("butane_canister", 0.9, BOX), det("water_jug", 0.9, MID)]),
+             arm("b", [det("water_jug", 0.8, MID)])],
+            min_arms=1, class_rules={"butane_canister": {"min_arms": 2}})
+    _info, dets = vi.RiverRunner(c, "cpu")(IMG)
+    assert [d["name"] for d in dets] == ["water_jug"]
+
+
+def test_a_class_rule_does_not_touch_other_classes():
+    c = cfg([arm("a", [det("water_jug", 0.9, TINY)])], min_arms=1,
+            class_rules={"butane_canister": {"min_short_px": 20, "min_arms": 2}})
+    _info, dets = vi.RiverRunner(c, "cpu")(IMG)
+    assert len(dets) == 1 and dets[0]["name"] == "water_jug"
+
+
+def test_a_class_rule_cannot_own_the_confidence_floor():
+    """하한의 주인은 class_conf 다. 둘이 가지면 어느 쪽이 이겼는지 설명할 수 없다."""
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([arm("a", [])], min_arms=1,
+                           class_rules={"butane_canister": {"conf": 0.3}}), "cpu")
+    assert "class_conf" in str(e.value)
+
+
+def test_an_unknown_class_in_class_rules_is_refused():
+    with pytest.raises(SystemExit) as e:
+        vi.RiverRunner(cfg([arm("a", [])], min_arms=1,
+                           class_rules={"nope": {"min_arms": 2}}), "cpu")
+    assert "없는 클래스" in str(e.value)
+
+
+def test_the_shipped_config_only_tightens_the_hazard_it_measured():
+    """부탄에만 건 규칙이 다른 클래스로 새지 않았는지. 재현율을 위해 **의도적으로
+    비워 둔** 나머지 넷의 하한이 조용히 생기면 앞 측정들이 전부 다른 작동점의 것이 된다."""
+    import yaml
+    river = yaml.safe_load(Path(__file__).with_name("vision_config.yaml")
+                           .read_text(encoding="utf-8"))["models"]["river"]
+    assert set(river["class_rules"]) == {"butane_canister"}
+    assert set(river["class_conf"]) == {"unconfirmed", "butane_canister"}
+    # 측정이 min_arms 2 를 재현율 0.029 로 떨어뜨렸다. 되살아나면 시험이 막는다
+    assert not river["class_rules"]["butane_canister"].get("min_arms")
+    assert river["merge_classes"] == {"beverage_can": "butane_canister"}

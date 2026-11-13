@@ -153,16 +153,23 @@ models:
   # butane_canister 0.286. 부탄은 위험물인데 일곱 중 둘이다 — 이 작동점을 위험물
   # 경보의 **유일한** 근거로 쓰면 안 된다.
   river:
-    classes: [styrofoam_box, water_jug, butane_canister, beverage_can, wooden_box,
-              unconfirmed]
+    # **표적은 둘뿐이다** (2026-11-13): 목함지뢰(`wooden_box_mine`)와 부탄가스.
+    # 스티로폼·물통은 표적이 아니다. 그러나 **어휘에서 빼지 않는다** — 열린어휘
+    # 탐지기는 어휘 전체의 argmax 로 한 박스에 이름 하나를 붙이므로, 그 낱말을 없애면
+    # 스티로폼 상자의 표가 `wooden_box_mine` 으로 넘어온다(미끼 측정에서 본 현상).
+    # 그래서 `decoys` 로 내려 **잡되 버린다.** 출력에는 나오지 않는다.
+    #
+    # `wooden_box` → `wooden_box_mine` 개명. **문구는 바꾸지 않았다** — `wooden ammunition box`
+    # 안은 이미 쟀고 **졌다**(dev 위험물 점수 0.4886 → 0.4646 · 나무 재현율 0.579 →
+    # 0.526, prereg_hazard_precision.md). 문구는 탐지기 손잡이이고 이름은 사람이 읽는
+    # 것이다. 둘을 같이 바꾸면 앞 측정과의 연결이 끊긴다.
+    classes: [wooden_box_mine, butane_canister, beverage_can, unconfirmed]
     # 클래스 → 찾을 문구들. 평면 목록(클래스당 1개)도 받는다. 같은 문구를 두 클래스가
     # 쓰면 거절한다 — 돌아온 문구로 클래스를 되짚을 수 없다.
     prompts:
-      styrofoam_box:   ["styrofoam box"]
-      water_jug:       ["plastic water jug"]
       butane_canister: ["butane gas canister"]
       beverage_can:    ["beverage can"]
-      wooden_box:      ["wooden block"]
+      wooden_box_mine:        ["wooden block"]
       unconfirmed:                  # **null — 텍스트 문구를 두지 않는다.** 아래 프리
                                     # 프롬프트 arm 만 채우는 가설 칸이다. 문구를 주면 그
                                     # 낱말이 어휘 전체 argmax 에서 표를 빼앗아 진짜 물체를
@@ -195,11 +202,35 @@ models:
     # **진짜 물체의 표**를 빼앗았다 — 강물에 뜬 스티로폼이 water foam/plastic sheet 로
     # 넘어간 것이다. 사전 등록한 세 결과 중 3번(재현율이 깎인다)이고 규칙대로 되돌린다.
     # 측정 local/webset/eval_web.json(dev) · local/consensus/eval_shipped.json(test)
-    decoys: []
+    decoys: ["styrofoam box", "plastic water jug",
+             # 표적이 아닌 것들. **잡되 버린다** — 어휘에 남겨야 이들의 표가
+             # 목함지뢰·부탄으로 넘어오지 않는다.
+             "cardboard box", "wooden plank", "driftwood", "plastic sheet",
+             "rock", "concrete wall", "grass", "soil"]
     conf: 0.05                    # **전역 하한 하나.** 운영자가 정하는 값이고 자료에서 고른
                                   # 값이 아니다 — 라벨 219장은 전부 test 라 거기서 고르면
                                   # 그 다섯 기기의 값이 된다(아래 머리글). 기본은 재현율
                                   # 우선(위험물을 놓치지 않는 쪽)으로 arm 하한과 같게 둔다
+    # **부탄만 엄하게.** 요구(2026-11-13): "부탄가스 오검출이 많음."
+    # 격자 돌리기 전에 오검출의 모양부터 쟀더니 **작고 흐렸다** — 최소변 중앙 32 px
+    # (실내)·14 px(하천), 89~100% 가 64 px 미만, conf 중앙 0.18. 확신값만 올리면 큰
+    # 오검출은 남고 작은 진짜가 같이 죽으므로 **크기와 하한을 따로** 건다.
+    #
+    # 측정 local/consensus/eval_butane_strict.json · 사전 등록 prereg_butane_strict.md
+    #   dev2 실내 부탄 오검출 **장당 0.680 → 0.040** (검출 17 → 1)
+    #   dev1 웹 부탄 재현율 0.600 → 0.543 (사전 등록 하한 0.500 안) · 정밀도 0.525 → 0.613
+    #   dev1 헛발화율(부탄 없는 그림 145장) 0.131 → 0.083
+    # 안동 219장(test)은 열지 않았다.
+    #
+    # **재 보고 버린 두 가지** — 그럴듯했지만 숫자가 아니라고 했다:
+    #   min_arms 2(두 arm 동의 요구): 재현율 0.600 → **0.029**. 열린 어휘는 한 박스에
+    #     이름 하나라 두 arm 이 같은 이름을 다는 일이 거의 없다
+    #   캔 합치기 해제: 재현율 0.600 → 0.343 인데 dev2 오검출은 0.680 그대로다.
+    #     합치기는 오검출의 원인이 아니다 — 되돌리면 놓치기만 한다
+    class_rules:
+      butane_canister:
+        min_short_px: 48          # 이보다 얇으면 부탄과 음료캔을 가를 형상이 없다.
+                                  # **놓침이 아니라 보류다** — 가까이서 다시 보면 걸린다
     class_conf:                   # 클래스별 하한. **다섯 클래스에는 쓰지 않는다** — 앞서
                                   # tune 에서 고른 값(butane .10 · wooden .15)이 있었으나
                                   # ① 주지표를 올리지 못했고(macro +0.001) ② 부탄 재현율을
@@ -209,6 +240,9 @@ models:
       # 운영값이다 — arm 하한 0.05 로 두면 프리 프롬프트가 내는 장당 72.5 상자의 상당수가
       # 그대로 검수 대기로 간다. 올리면 후보가 줄고 내리면 놓치는 것이 줄어든다.
       unconfirmed: 0.25
+      # **부탄만 엄하게.** 다섯 클래스에 하한을 두지 않는다는 위 규칙의 예외이고,
+      # 고른 자리를 적는다 — 0.05 는 dev2 에서 오검출 장당 0.680 이었다.
+      butane_canister: 0.10
     prompt_conf: {}               # 문구별 하한 — **병합 전**에 쓴다. 같은 이유로 비어 있다
     arm_conf: 0.05                # arm 각자의 하한. 어떤 임계값도 이보다 낮으면 거절한다
     min_arms: 1                   # **동의를 요구하지 않는다.** arm 이 둘이 됐지만 둘은
@@ -220,7 +254,35 @@ models:
                                   # 1 만 쓴다 — 한 모델은 한 박스에 이름 하나를 붙여서
                                   # (어휘 전체의 argmax) tune 에서 검출이 0 이었다
     merge_iou: 0.5                # 같은 클래스가 이만큼 겹치면 같은 물체. 다른 클래스는 합치지 않는다
-    max_area_ratio: 0.08          # 화면의 이 비율보다 큰 박스는 장면 검출로 버린다. null = 끔
+    # **크기별 하한 — 상수 하나가 현장을 하나로 묶고 있었다.**
+    # 전에는 `max_area_ratio: 0.08`(화면의 8% 넘는 박스는 장면 검출로 버린다) 하나였다.
+    # 그것은 "버릴 만큼 큰가" 가 아니라 **하천의 물체 크기를 가정한 값**이다. 두 현장의
+    # 정답 크기를 재니 겹치지 않았다 — 안동 하천 GT 는 가장 큰 것이 화면의 0.006 이고
+    # (51 상자, 0.08 초과 0%) 실내 근접의 나무 상자는 중앙 0.090 · 최대 0.386 이다
+    # (65 상자, 0.08 초과 **88%**). 하천에서는 한 번도 켜지지 않고 실내에서는 위험물
+    # 정답의 88% 를 **잡아 놓고 버렸다** — 오버레이에서 코앞의 나무 상자가 wooden_box
+    # 0.50(그 장면 최고값)으로 잡히고 면적 때문에 사라졌다.
+    #
+    # 그래서 기준을 **얼마나 큰가**에서 **얼마나 확신해야 받는가**로 옮긴다. 멀리 있는
+    # 흐릿한 물체와 코앞의 흐릿한 물체는 같은 사실이 아니다.
+    #   첫 칸(<=0.01)은 **오늘 값 그대로 0.05** 다 — 하천 GT 가 전부 여기 들어오므로
+    #   하천 작동점은 바뀌지 않는다. 둘째 칸이 새로 생긴 근접 구간이고, 0.40 을 넘는
+    #   박스만 장면 검출로 버린다.
+    # 적은 것이 안 적은 것을 이긴다: class_conf 를 적어 둔 클래스는 크기별 하한을 받지
+    # 않는다(위험물에 낮은 하한을 적어 두면 코앞의 큰 위험물도 그 하한으로 받는다).
+    #
+    # 측정 local/consensus/eval_area_bands.json · 사전 등록 prereg_area_bands.md
+    #   dev1 웹 수집본 180장: 위험물 점수 0.496 → **0.573** (재현율 0.558 → 0.655)
+    #   dev2 실내 판정 76상자: 위험물 재현율 0.061 → **0.500**
+    #   하천 위험(미판정 300장, 라벨 안 봄): 새로 살아나는 검출 **장당 0.010** (한도 0.5)
+    # 안동 219장(test)은 열지 않았다 — 한 번 열었고 새 구성은 새 비교다.
+    # **세 번째 현장이 또 다른 크기면 또 안 맞는다.** 상수를 없앤 것이 아니라 선언으로
+    # 옮긴 것이고, 현장이 다르면 배포 프로파일에서 다시 적는다(AI-C-15).
+    area_bands:
+      - {upto: 0.01, conf: 0.05}  # 멀리 — 하천 GT 전부(최대 0.006)가 여기. 오늘 값 그대로
+      - {upto: 0.40, conf: 0.10}  # 근접 — 실내 GT 전부(0.010~0.386)가 여기
+    # max_area_ratio 는 area_bands 와 함께 적을 수 없다(상한의 주인이 둘이 된다).
+    # 마지막 band 의 upto 가 상한이다.
     max_det: 100
     imgsz: 1920                   # arm 마다 imgsz 로 덮을 수 있다
     on_missing_arm: degrade       # arm 이 둘이 됐다 — 한쪽 가중치가 없는 기계에서는 그
@@ -229,6 +291,70 @@ models:
                                   # 텍스트 arm 이 빠지면 이름을 대는 쪽이 없어져 위험물이
                                   # 재질 낱말로만 올라오니 그 기록을 보고 판단한다
     # 런타임에 받지 않는다 (AI-C-16 폐쇄망)
+    # **거리 — 주기로 재고 트랙으로 나른다.**
+    # metric depth 는 한 장에 수십 ms 다. 매 장 돌리면 탐지기보다 비싸진다. 그런데
+    # 거리는 장마다 새로 생기는 사실이 아니라 트랙 위에서 이어진다. 그래서 `period`
+    # 장마다 재고, 사이는 트랙으로 나르며 **겉보기 크기로 고친다**(핀홀: 상자가 s 배
+    # 커졌으면 거리는 대략 d/s). 처음 보는 트랙이 있으면 주기를 **당겨서** 바로 잰다 —
+    # 새 위험물이 다음 주기까지 거리 없이 떠 있으면 안 된다.
+    #   실측(GPU): Depth-Anything-V2-Metric-Outdoor 266px **40.8 ms** · 518px 127.9 ms
+    #   주기 5 면 장당 평균 8 ms 쯤이고, 나른 값에는 **나이(age)** 가 붙어 나간다
+    # 값은 **기준을 들고 다닌다**(`space`). 상대 깊이를 미터처럼 쓰지 않는다(AI-C-02).
+    #
+    # UniDepth V2 를 쓰려면 `einops`·`timm` 을 내부에 스테이징해야 한다(런타임에 받지
+    # 않는다, AI-C-16). 그때는 kind 를 바꿔 끼우면 되고 이 파일 밖은 안 바뀐다(AI-C-04).
+    depth:
+      enabled: true
+      # **UniDepth V2 를 쓴다.** 같은 metric 인데 Depth-Anything 과 달리 **내부파라미터
+      # (fx)를 함께 낸다** — 그래야 픽셀 폭이 실물 mm 가 되고, "저게 137 mm 인가
+      # 200 mm 인가" 를 물을 수 있다. 목함지뢰를 가려내는 힘의 대부분이 그 치수다.
+      #   실측(GPU, 1080x1920): **114.1 ms** · 1.9~257.9 m · fx 952.2
+      #   Depth-Anything-Metric-Outdoor 266px 는 40.8 ms 지만 fx 가 없고,
+      #   **Outdoor 학습이라 실내에서 틀린 미터를 냈다**(코앞 상자를 5.0 m).
+      # 소스는 내부 경로에서 import 한다. `wandb` 는 학습 로깅용이라 설치하지 않고 막는다.
+      kind: unidepth              # unidepth | hf_metric | onnx_relative
+      model_id: lpiccinelli/unidepth-v2-vitb14
+      source: /home/khw67/data_stream/external/UniDepth
+      device: cuda:0
+      period: 5                   # 이 장마다 실제로 잰다. 사이는 트랙이 나른다
+      max_age: 30                 # 이보다 오래 나른 값은 **버린다** — 모르면 모른다고 한다
+      percentile: 40              # 상자 안 depth 의 이 백분위를 물체 거리로 본다
+      iou_match: 0.5              # track_id 가 없을 때의 차선책
+      classes: [wooden_box_mine, butane_canister]
+
+    # **위험물 후보 검증 — 라벨 없이, 학습 없이.**
+    # 운영 영상에 이 두 물체의 정답이 사실상 없다(하천 부탄 0 · 실내 1 은 오라벨).
+    # 지도학습이 설 자리가 없어 **one-shot 프로토타입 검색**을 쓴다 — 기준 사진에서 만든
+    # crop 을 임베딩해 두고 후보와 코사인 유사도를 잰다. 경사하강이 없다.
+    #   점수 = pos − neg (그 클래스 기준과의 최대 유사도 − 음성 기준과의 최대 유사도).
+    #   유사도 자체를 쓰면 "무엇과도 비슷한" 흐릿한 crop 이 높게 나온다.
+    # 프로토타입은 **기준 사진에서만** 만든다 — 운영 영상은 시험 자료다.
+    #
+    # 실시간: 전 화면이 아니라 **위험물 후보 crop 에만**, 한 장의 후보를 한 번에 묶어
+    # 넣고, 앞 장과 겹치는 같은 클래스는 다시 재지 않는다. 후보가 없으면 비용 0.
+    #   실측(CPU, 8스레드): clip_b32 양자화 11 ms/장(묶음 6) · 후보 0 개면 0 ms
+    #   mobileclip_s0 는 45 ms/장이라 **기본에서 뺐다** — 느린 쪽이 예산을 다 먹는다
+    #   CUDA EP 는 이 기계에서 cuBLAS 판이 안 맞아 못 선다. 서면 더 빨라진다
+    # 검증은 **검출을 지우지 않는다** — 근거만 붙인다(AI-S-04, AI-C-19).
+    verify:
+      enabled: true
+      classes: [butane_canister, wooden_box_mine]
+      prototypes: /home/khw67/data_stream/models/butane_ref/prototypes.npz
+      threads: 8
+      max_per_frame: 6            # 이 장의 예산. 넘으면 **확신 낮은 쪽**이 다음 장으로
+      cache_iou: 0.7              # 앞 장과 이만큼 겹치는 같은 클래스는 다시 재지 않는다
+      structure: true             # 학습하지 않은 구조 서명을 함께 센다(설명 가능한 신호)
+      models:
+        - name: clip_b32
+          path: /home/khw67/data_stream/models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx
+          size: 224
+          mean: [0.48145466, 0.4578275, 0.40821073]
+          std:  [0.26862954, 0.26130258, 0.27577711]
+        # 두 번째 학습 모델은 **선언만 해 두고 기본에서 끈다** — 45 ms/장이다.
+        # 지연 예산이 남는 배치에서 주석을 풀면 그대로 돈다(AI-C-05: 없으면 그것만 빠진다).
+        # - name: mobileclip_s0
+        #   path: /home/khw67/data_stream/models/mobileclip_s0/onnx/vision_model_quantized.onnx
+        #   size: 256
     arms:
       - kind: yoloe               # YOLOE-11l-seg · O365+GoldG+LVIS · MobileCLIP 텍스트 타워
         weight: /home/khw67/data_stream/models/yoloe-11l-seg.pt
@@ -259,14 +385,12 @@ models:
         # harpsichord 2 였다 — 이 중 재질을 말하는 것은 plywood 뿐이고, 모양 이름은
         # 골판지 상자·책과 구분하지 못한다(그것이 하천 wooden_box 정밀도 0.158 의 정체다).
         vocab_map:
-          wooden_box:            [wood, plywood, hardwood, plank, lumber, driftwood]
+          wooden_box_mine:              [wood, plywood, hardwood, plank, lumber, driftwood]
             # 일부러 뺀 것: log·oak·pine·redwood·bamboo — 하천변 나무에 붙어 FP 가 된다.
             #              crate — 나무일 때가 많지만 플라스틱도 crate 다(재질을 말하지 않는다)
           butane_canister:       [can, beer can, spray can, milk can]
             # 어휘 4585종에 butane·propane·canister·aerosol 이 **없다.** "캔"까지만
             # 말할 수 있고 부탄인지는 가리지 못한다. 뺀 것: cylinder·tank — 너무 넓다
-          styrofoam_box:         [foam, cooler]
-          water_jug:             [jug, bottle, glass bottle, thermos bottle, canteen, flask]
         unconfirmed_class: unconfirmed   # 지도 밖 이름은 **버리지 않고** 여기로 온다
     #
     # 4모델 동의 구성 — test micro 0.599 · 오검출/장 0.45 지만 한 장 3.33 s (48배).

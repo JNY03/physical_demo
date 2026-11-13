@@ -1,0 +1,274 @@
+"""위험물 후보 검증 — **라벨 없이, 학습 없이.**
+
+implements: AI-S-03 (근거 충분도는 confidence 와 따로), AI-S-04 (확정하지 못한 것은
+가설로), AI-E-04 (근거가 부족할 때만 보조 기능을 돌린다), AI-C-13 (자원 최소화)
+관련: AI-L-01 (학습 후보), AI-C-16 (가중치는 내부 경로), AI-C-19
+
+## 무엇을 하는가
+
+탐지기가 낸 위험물 후보(나무 상자·부탄)의 crop 을 **기준 사진에서 만든 프로토타입**과
+견준다. 경사하강이 없고 라벨이 없다 — 기준 crop 몇 장을 임베딩해 두고 코사인 유사도를
+재는 **one-shot 검색**이다.
+
+## 왜 이것이 비지도인가, 그리고 무엇을 주지 못하는가
+
+운영 영상에는 이 두 물체의 정답이 사실상 없다(하천 부탄 정답 0개, 실내 1개는 오라벨).
+그래서 지도학습이 설 자리가 없다. 대신 **라벨 없이 쓸 수 있는 불변량**에 기댄다 —
+같은 물건은 자기지도 표현 공간에서 서로 가깝다는 것 하나다.
+
+**주지 못하는 것**: "이 군집이 목함지뢰다" 는 사람이 정한다. 여기서 나오는 것은
+"기준과 얼마나 닮았는가" 뿐이고, 그래서 **검출을 지우지 않는다**(AI-S-04, AI-C-19).
+
+## 다중 모델인 이유
+
+한 임베딩이 틀리는 자리는 모델마다 다르다. 서로 다른 학습 자료를 본 인코더 둘 이상이
+같은 방향을 말할 때만 근거가 선다. 모델 목록은 **설정 데이터**이고 이 파일은 어떤
+벤더도 알지 못한다 — ONNX 세션 하나와 전처리 셋이면 무엇이든 꽂힌다(AI-C-04).
+
+## 실시간
+
+전 화면이 아니라 **위험물 후보 crop 에만** 돌고, 한 프레임의 후보를 **한 번에 묶어**
+세션에 넣는다. 후보가 없으면 비용이 0 이다. 측정값은 `verify_ms` 로 나간다(AI-O-01).
+"""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+#: 내려받지 않는다 — 없으면 그 모델만 빠진다 (AI-C-16, AI-C-05)
+_MISSING = "가중치가 없습니다"
+
+
+class _Encoder:
+    """ONNX 비전 인코더 하나. 전처리는 선언으로 받는다 — 모델마다 다르다."""
+
+    def __init__(self, spec):
+        import onnxruntime as ort
+        path = Path(spec["path"]).expanduser()
+        if not path.exists():
+            raise FileNotFoundError("%s: %s" % (_MISSING, path))
+        providers = spec.get("providers") or ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        avail = set(ort.get_available_providers())
+        # **실 1개로 두면 CPU 에서 61 ms/장이다.** 8 개로 17.5 ms, 묶으면 11 ms/장까지
+        # 내려간다(실측 2026-11-13). CUDA EP 는 이 기계에서 cuBLAS 판이 안 맞아 못 선다 —
+        # 없으면 CPU 로 서되 **얼마나 걸리는지는 기록으로 나간다**(AI-O-01).
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = int(spec.get("threads") or 8)
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.sess = ort.InferenceSession(str(path), so,
+                                         providers=[p for p in providers if p in avail])
+        self.name = str(spec.get("name") or path.parent.parent.name)
+        self.size = int(spec.get("size") or 224)
+        self.mean = np.array(spec.get("mean") or [0.0, 0.0, 0.0], np.float32).reshape(3, 1, 1)
+        self.std = np.array(spec.get("std") or [1.0, 1.0, 1.0], np.float32).reshape(3, 1, 1)
+        self.input = self.sess.get_inputs()[0].name
+        self.output = self.sess.get_outputs()[0].name
+
+    def __call__(self, crops):
+        """BGR crop 목록 → (N, D) 정규화 임베딩."""
+        batch = np.empty((len(crops), 3, self.size, self.size), np.float32)
+        for i, c in enumerate(crops):
+            rgb = cv2.cvtColor(cv2.resize(c, (self.size, self.size),
+                                          interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+            x = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+            batch[i] = (x - self.mean) / self.std
+        v = self.sess.run([self.output], {self.input: batch})[0].astype(np.float32)
+        n = np.linalg.norm(v, axis=1, keepdims=True)
+        return v / np.maximum(n, 1e-8)
+
+
+class HazardVerifier:
+    """후보 crop 과 프로토타입의 거리. **판정이 아니라 근거를 낸다.**
+
+    점수는 `pos - neg` 다 — 그 클래스 기준과의 최대 유사도에서, **음성 기준**(헷갈리는
+    물건, 예: 음료캔)과의 최대 유사도를 뺀다. 유사도 자체를 쓰면 "무엇과도 비슷한"
+    흐릿한 crop 이 높게 나온다. 차이를 쓰면 **가르는 힘**만 남는다.
+    """
+
+    def __init__(self, spec, log=print):
+        self.classes = tuple(spec.get("classes") or ())
+        self.encoders, self.missing = [], []
+        for m in spec.get("models") or []:
+            try:
+                self.encoders.append(_Encoder(m))
+            except Exception as exc:                 # 한 모델이 없어도 나머지로 돈다
+                self.missing.append((str(m.get("name") or m.get("path")), str(exc)))
+        bank = Path(str(spec.get("prototypes") or "")).expanduser()
+        self.bank = {}
+        if bank.exists():
+            z = np.load(bank, allow_pickle=False)
+            self.bank = {k: z[k] for k in z.files}
+        else:
+            self.missing.append((str(bank), _MISSING))
+        self.min_models = int(spec.get("min_models") or 1)
+        # **시간을 되사는 두 가지.** (a) 앞 장과 거의 같은 자리의 같은 클래스는 다시
+        # 임베딩하지 않는다 — 고정 카메라에서 같은 물체가 장마다 다시 계산된다.
+        # (b) 한 장에서 보는 후보 수에 상한을 둔다. 둘 다 사용자 설계 8단계
+        # ("기존 특징을 캐싱", "후보 발생 시에만")를 그대로 옮긴 것이다.
+        self.cache_iou = float(spec.get("cache_iou") or 0.7)
+        self.max_per_frame = int(spec.get("max_per_frame") or 6)
+        self._last = []                              # [(cls, xyxy, verify)]
+        self.structure = bool(spec.get("structure", True))
+        self.ready = bool(self.encoders) and bool(self.bank) and len(self.encoders) >= self.min_models
+        if log:
+            log("  verify %s · 모델 %d%s · 프로토타입 %d묶음"
+                % ("준비됨" if self.ready else "**비활성**", len(self.encoders),
+                   (" (빠짐 %d)" % len(self.missing)) if self.missing else "", len(self.bank)))
+
+    @staticmethod
+    def _structure(crop, cls):
+        """**학습하지 않은 독립 신호.** 기준 사진에서 손으로 읽은 구조를 센다.
+
+        부탄: 한쪽 끝에 **단일 채도색 뚜껑**, 그 아래 **무채색 밝은 어깨**, 몸통은
+        채도 인쇄. 음료캔은 뚜껑 구역이 없다(실측: 맨 위 칸 blue 0.14~0.16 vs 0.00).
+        목함지뢰(나무 상자): 채도가 거의 없고 밝은 목질색이 넓다(실측: 채도높음 0.02).
+        임베딩과 달리 **무엇을 보고 그렇게 말했는지 설명된다.**
+        """
+        if crop is None or crop.size == 0 or min(crop.shape[:2]) < 8:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        h, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        lit = (sat >= 80) & (val >= 60)
+        chrome = (sat < 60) & (val >= 120)
+        H = crop.shape[0]
+        if cls == "butane_canister":
+            # 긴 축을 세로로 본다 — 누운 통은 가로가 길다
+            if crop.shape[1] > H:
+                hsv = cv2.rotate(hsv, cv2.ROTATE_90_CLOCKWISE)
+                h, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+                lit = (sat >= 80) & (val >= 60)
+                chrome = (sat < 60) & (val >= 120)
+                H = hsv.shape[0]
+            k = max(1, H // 8)
+            # **양 끝을 다 본다.** 뚜껑이 위에 있다고 가정하면 뒤집힌 통이 0.71 로
+            # 떨어진다(시험이 잡았다). 강에 뜬 통은 어느 쪽이 위인지 정해져 있지 않다.
+            best = 0.0
+            for flip in (False, True):
+                hh, ll, cc = (h, lit, chrome)
+                if flip:
+                    hh, ll, cc = hh[::-1], ll[::-1], cc[::-1]
+                cap_lit = float(ll[:k].mean())
+                cap_hue = hh[:k][ll[:k]]
+                # 뚜껑은 **단일색**이다: 색상 분산이 작아야 한다
+                single = 1.0 - min(1.0, float(np.std(cap_hue)) / 30.0) if cap_hue.size else 0.0
+                shoulder = float(cc[k:2 * k].mean()) if H > 2 * k else 0.0
+                body = float(ll[2 * k:].mean()) if H > 2 * k else 0.0
+                best = max(best, min(cap_lit, single) * 0.5 + shoulder * 0.25 + body * 0.25)
+            return round(float(best), 4)
+        if cls == "wooden_box_mine":
+            # 나무는 **채도가 낮고** 옅은 목질색이 넓다(실측 채도높음 0.02).
+            # 곱셈으로 두면 채도가 조금만 높아도 점수가 **정확히 0** 이 된다 —
+            # 시험이 그 자리를 잡았다. 벌점으로 바꾸고 바닥을 둔다.
+            wood = (h >= 10) & (h <= 30) & (sat >= 25) & (sat < 130) & (val >= 110)
+            return round(max(0.0, float(wood.mean()) - 0.5 * float(lit.mean())), 4)
+        return None
+
+    def _protos(self, enc_name, cls):
+        return self.bank.get("%s/%s" % (enc_name, cls))
+
+    def __call__(self, bgr, dets):
+        """위험물 후보에 `verify` 를 붙인다. 후보가 없으면 비용 0."""
+        if not self.ready:
+            return 0.0
+        want = [d for d in dets if d["name"] in self.classes]
+        if not want:
+            return 0.0
+        t0 = time.perf_counter()
+
+        def iou(a, b):
+            x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+            x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+            if x2 <= x1 or y2 <= y1:
+                return 0.0
+            i = (x2 - x1) * (y2 - y1)
+            return i / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - i)
+
+        # 확신이 높은 것부터 본다 — 상한에 걸려 잘릴 때 **약한 것이 잘리도록**
+        want.sort(key=lambda d: -d["conf"])
+        crops, keep, reused = [], [], 0
+        H, W = bgr.shape[:2]
+        for d in want:
+            x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(W, x2), min(H, y2)
+            hit = next((v for cls, box, v in self._last
+                        if cls == d["name"] and iou(box, (x1, y1, x2, y2)) >= self.cache_iou), None)
+            if hit is not None:
+                d["verify"] = dict(hit, cached=True)
+                reused += 1
+                continue
+            c = bgr[y1:y2, x1:x2]
+            if c.size == 0 or min(c.shape[:2]) < 8:
+                d["verify"] = None                   # 너무 작아 **재지 않는다** (0 이 아니다)
+                continue
+            if len(crops) >= self.max_per_frame:
+                d["verify"] = None                   # 이 장의 예산을 넘었다 — 다음 장에서 본다
+                continue
+            crops.append(c)
+            keep.append(d)
+        if not crops:
+            return round((time.perf_counter() - t0) * 1000, 1)
+        per_model = {}
+        for enc in self.encoders:
+            emb = enc(crops)                         # 한 프레임의 후보를 한 번에
+            for i, d in enumerate(keep):
+                pos = self._protos(enc.name, d["name"])
+                neg = self._protos(enc.name, "_negative")
+                if pos is None:
+                    continue
+                p = float((emb[i] @ pos.T).max())
+                n = float((emb[i] @ neg.T).max()) if neg is not None and len(neg) else 0.0
+                per_model.setdefault(id(d), {})[enc.name] = {"pos": round(p, 4),
+                                                             "neg": round(n, 4),
+                                                             "margin": round(p - n, 4)}
+        for i, d in enumerate(keep):
+            rows = per_model.get(id(d)) or {}
+            if self.structure:
+                st = self._structure(crops[i], d["name"])
+                if st is not None:
+                    # 학습하지 않은 신호다. margin 과 자릿수를 맞춰 넣되 **출처를 남긴다**
+                    rows["structure"] = {"pos": st, "neg": 0.0, "margin": round(st - 0.15, 4),
+                                         "learned": False}
+            if not rows:
+                d["verify"] = None
+                continue
+            margins = [r["margin"] for r in rows.values()]
+            d["verify"] = {"margin": round(float(np.mean(margins)), 4),
+                           "agree": int(sum(m > 0 for m in margins)),
+                           "models": len(margins), "per_model": rows, "cached": False}
+        self._last = [(d["name"], tuple(int(v) for v in d["xyxy"]), d["verify"])
+                      for d in want if d.get("verify")]
+        ms = round((time.perf_counter() - t0) * 1000, 1)
+        self.last_reused = reused
+        return ms
+
+
+def build_bank(ref_dir, out, models, log=print):
+    """기준 crop 폴더 → 프로토타입 묶음.
+
+    폴더 구조: `<ref_dir>/<클래스>/*.png`. `_negative/` 는 **헷갈리는 물건**이다
+    (음료캔 등). 운영 영상은 **넣지 않는다** — 그것은 시험 자료다.
+    """
+    ref_dir, out = Path(ref_dir), Path(out)
+    encs = []
+    for m in models:
+        try:
+            encs.append(_Encoder(m))
+        except Exception as exc:
+            log("  건너뜀 %s: %s" % (m.get("name") or m.get("path"), exc))
+    bank = {}
+    for cls_dir in sorted(p for p in ref_dir.iterdir() if p.is_dir()):
+        files = sorted(f for f in cls_dir.iterdir() if f.suffix.lower() in (".png", ".jpg", ".jpeg"))
+        crops = [c for c in (cv2.imread(str(f)) for f in files) if c is not None]
+        if not crops:
+            continue
+        for enc in encs:
+            bank["%s/%s" % (enc.name, cls_dir.name)] = enc(crops)
+        log("  %-18s %d장" % (cls_dir.name, len(crops)))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out, **bank)
+    log("  프로토타입: %s (%d묶음)" % (out, len(bank)))
+    return bank

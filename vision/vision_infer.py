@@ -1351,6 +1351,18 @@ class RiverRunner:
         self.conf = float(cfg.get("conf", 0.25))
         self.merge_iou = float(cfg.get("merge_iou", 0.5))
         self.max_area = cfg.get("max_area_ratio")
+        # **크기에 따른 하한.** 멀리 있는 작은 물체와 코앞의 큰 물체는 같은 자로 잴 수
+        # 없다. 상수 하나로 두면 그 상수를 고른 현장에서만 맞는다 — 하천 GT 는 가장 큰
+        # 것이 화면의 0.006 인데 실내 근접의 나무 상자는 0.386 이다. `max_area_ratio`
+        # 0.08 하나로 두면 하천에서는 한 번도 켜지지 않고 실내에서는 **정답의 88% 를
+        # 버린다**(실측 2026-11-13). 그래서 "얼마나 큰가" 를 버리는 기준이 아니라
+        # **얼마나 확신해야 받는가** 의 기준으로 바꾼다. 선언하지 않으면 지금까지와
+        # 똑같이 동작한다: max_area_ratio 로 자르고 conf 하나를 쓴다.
+        self.area_bands = self._area_bands(cfg.get("area_bands"))
+        if self.area_bands and self.max_area is not None:
+            raise SystemExit("models.river: area_bands 와 max_area_ratio 를 함께 적었습니다 — "
+                             "상한의 주인이 둘이 됩니다. 마지막 band 의 upto 가 상한입니다")
+        self.area_cap = self.area_bands[-1][0] if self.area_bands else self.max_area
         self.max_det = int(cfg.get("max_det", 100))
 
         # 클래스 합침 — **병합 전**에 이름을 바꾼다. 한 물체에 캔과 부탄이 따로 붙은
@@ -1359,6 +1371,13 @@ class RiverRunner:
 
         # 클래스별·문구별 임계값. 적지 않은 자리는 conf 다. 합쳐진 클래스의 임계값은
         # **합친 뒤 이름**으로 찾는다 — 합치기 전 이름의 임계값은 아무 일도 하지 않는다.
+        # **클래스별 근거 요구.** conf 는 "얼마나 확신하나" 하나만 묻는데, 어떤
+        # 클래스는 그것으로 모자란다. 부탄은 실측에서 최소변 중앙 32 px(실내)·14 px
+        # (하천)에 89~100% 가 64 px 미만이었다 — 그 크기에는 부탄과 음료캔을 가를
+        # 형상이 없고, 확신값만 올리면 큰 오검출은 그대로 남고 작은 진짜도 같이 죽는다.
+        # 그래서 **크기와 동의**를 따로 요구할 수 있게 한다. 적지 않은 클래스는
+        # 지금까지와 똑같다.
+        self.class_rules = self._class_rules(cfg.get("class_rules"))
         self.class_conf = self._thresholds(cfg.get("class_conf"), self.classes, "class_conf")
         self.prompt_conf = self._thresholds(cfg.get("prompt_conf"), self.prompts, "prompt_conf")
 
@@ -1370,6 +1389,7 @@ class RiverRunner:
                   "classes": tuple(self.classes)}
         floor = shared["base_conf"]
         low = [(n, v) for n, v in list(self.class_conf.items()) + list(self.prompt_conf.items())
+               + [("area_band<=%g" % u, c) for u, c in self.area_bands]
                if v < floor]
         if low:
             raise SystemExit("models.river: arm_conf(%.3f) 보다 낮은 임계값은 아무 일도 하지 "
@@ -1409,6 +1429,34 @@ class RiverRunner:
         # **가설 칸** — 프리 프롬프트 arm 이 지도 밖 이름을 여기로 보낸다(AI-S-04).
         # 텍스트 문구를 가진 이름은 가설이 될 수 없다: 문구가 있으면 텍스트 arm 도
         # 그 이름을 내고, 그러면 "이름을 고르지 않았다" 가 거짓이 된다.
+        # **위험물 후보 검증** — 선언이 없으면 세우지 않는다. 한 모델이 없어도 나머지로
+        # 돌고, 전부 없으면 검증만 비활성이 된다(AI-C-05). 검출을 지우지 않는다.
+        self.verifier = None
+        vspec = cfg.get("verify") or {}
+        if vspec.get("enabled"):
+            try:
+                from hazard_verify import HazardVerifier
+            except ImportError:
+                import importlib.util as _ilu
+                _sp = _ilu.spec_from_file_location(
+                    "hazard_verify", Path(__file__).with_name("hazard_verify.py"))
+                _m = _ilu.module_from_spec(_sp); _sp.loader.exec_module(_m)
+                HazardVerifier = _m.HazardVerifier
+            self.verifier = HazardVerifier(vspec, log=log)
+            if not self.verifier.ready:
+                for name, why in self.verifier.missing:
+                    log("    verify 빠짐: %s — %s" % (name, why))
+
+        # **거리 — 주기로 재고 트랙으로 나른다.** 선언이 없으면 세우지 않는다.
+        self.depth = None
+        dspec = cfg.get("depth") or {}
+        if dspec.get("enabled"):
+            import importlib.util as _ilu
+            _sp = _ilu.spec_from_file_location(
+                "depth_track", Path(__file__).with_name("depth_track.py"))
+            _m = _ilu.module_from_spec(_sp); _sp.loader.exec_module(_m)
+            self.depth = _m.DepthTracker(dspec, log=log)
+
         self.hypothesis = {a.unconfirmed for _, a in self.arms
                            if getattr(a, "unconfirmed", None)}
         text_arms = [l for l, a in self.arms if not getattr(a, "free_vocab", False)]
@@ -1448,6 +1496,12 @@ class RiverRunner:
                (" · 클래스별 " + ", ".join("%s %.2f" % t for t in sorted(tuned.items()))) if tuned else "",
                (" · 문구별 " + ", ".join("%r %.2f" % t for t in sorted(self.prompt_conf.items())))
                if self.prompt_conf else ""))
+        if self.area_bands:
+            log("  river 크기별 하한: "
+                + " · ".join("<=%g %.2f" % b for b in self.area_bands)
+                + " (그 위는 장면 검출로 버린다)")
+        elif self.max_area:
+            log("  river 면적 상한 %.3f — 크기별 하한을 쓰지 않습니다" % float(self.max_area))
         if self.missing:
             # arm 이 빠지면 같은 min_arms 가 **다른 작동점**이 된다. 3/4 와 3/3 은
             # 다른 기준이고, 3/3 은 만장일치다 — 선언한 것보다 엄해진다. 조용히
@@ -1502,6 +1556,57 @@ class RiverRunner:
             out[canon] = float(value)
         return out
 
+    @staticmethod
+    def _area_bands(spec):
+        """`[{upto, conf}, ...]` — 화면에서 차지하는 비율이 upto 이하인 상자에 요구하는
+        하한. 마지막 upto 를 넘는 상자는 **장면 검출**로 버린다(옛 max_area_ratio 의 일).
+        upto 는 커지는 차례여야 한다 — 뒤섞이면 어느 칸이 이겼는지 설명할 수 없다."""
+        out = []
+        for i, band in enumerate(spec or []):
+            if not isinstance(band, dict) or "upto" not in band or "conf" not in band:
+                raise SystemExit("models.river.area_bands[%d] 는 {upto, conf} 입니다: %r" % (i, band))
+            upto, conf = float(band["upto"]), float(band["conf"])
+            if not 0 < upto <= 1:
+                raise SystemExit("models.river.area_bands[%d].upto 는 0 초과 1 이하입니다: %g" % (i, upto))
+            if out and upto <= out[-1][0]:
+                raise SystemExit("models.river.area_bands 의 upto 는 커지는 차례여야 합니다: "
+                                 "%g 뒤에 %g" % (out[-1][0], upto))
+            out.append((upto, conf))
+        return out
+
+    def _class_rules(self, spec):
+        """`{클래스: {min_short_px, min_arms}}` — 그 클래스를 받기 위한 **추가** 조건.
+        conf 는 class_conf 가 소유하므로 여기서 다시 받지 않는다(주인을 둘로 두지 않는다)."""
+        out = {}
+        known = {c.strip().lower(): c for c in self.classes}
+        for key, rule in (spec or {}).items():
+            canon = known.get(str(key).strip().lower())
+            if canon is None:
+                raise SystemExit("models.river.class_rules 에 없는 클래스가 있습니다: %r "
+                                 "(가능: %s)" % (key, ", ".join(self.classes)))
+            if not isinstance(rule, dict):
+                raise SystemExit("models.river.class_rules.%s 는 {min_short_px, min_arms} "
+                                 "입니다: %r" % (canon, rule))
+            if "conf" in rule:
+                # 먼저 묻는다 — "모르는 항목" 으로 떨어뜨리면 어디에 적어야 하는지를
+                # 말해 주지 못한다
+                raise SystemExit("models.river.class_rules.%s.conf 는 두지 않습니다 — "
+                                 "하한의 주인은 class_conf 입니다" % canon)
+            bad = set(rule) - {"min_short_px", "min_arms"}
+            if bad:
+                raise SystemExit("models.river.class_rules.%s 에 모르는 항목: %s "
+                                 "(가능: min_short_px, min_arms)" % (canon, ", ".join(sorted(bad))))
+            out[canon] = {"min_short_px": float(rule.get("min_short_px") or 0),
+                          "min_arms": int(rule.get("min_arms") or 0)}
+        return out
+
+    def area_threshold(self, area_ratio):
+        """그 크기의 상자에 요구하는 하한. 상한 밖이면 None — 받지 않는다."""
+        for upto, conf in self.area_bands:
+            if area_ratio <= upto:
+                return conf
+        return None
+
     def threshold(self, cls_name):
         return self.class_conf.get(cls_name, self.conf)
 
@@ -1520,7 +1625,7 @@ class RiverRunner:
         kept = []
         for det in sorted(raw, key=lambda d: -d["conf"]):
             x1, y1, x2, y2 = det["xyxy"]
-            if self.max_area and (x2 - x1) * (y2 - y1) > float(self.max_area) * img_area:
+            if self.area_cap and (x2 - x1) * (y2 - y1) > float(self.area_cap) * img_area:
                 continue                               # 장면 전체를 가리킨 검출
             dup = None
             for other in kept:
@@ -1532,6 +1637,11 @@ class RiverRunner:
             if dup is None:
                 kept.append({"cls_name": det["cls_name"], "conf": det["conf"],
                              "xyxy": det["xyxy"], "arms": {det["arm"]},
+                             # **이긴 낱말.** raw 는 conf 내림차순이므로 묶음을 연 것이
+                             # 가장 확신이 높은 검출이다. `prompts` 는 집합이라 누가
+                             # 이겼는지가 사라진다 — 가설 칸은 이름이 전부 `unconfirmed`
+                             # 라서 이 낱말이 없으면 사람이 볼 것이 아무것도 없다
+                             "lead": self._said(det),
                              "prompts": {self._said(det)},
                              "merged_from": ({det["merged_from"]} if det.get("merged_from")
                                              else set())})
@@ -1572,16 +1682,39 @@ class RiverRunner:
                     folded += 1
                 raw.append(dict(det, arm=label))
         img_area = float(bgr.shape[0] * bgr.shape[1])
-        dets = []
+        dets, by_area, by_rule = [], 0, 0
         for group in self._merge(raw, img_area):
+            # **적은 것이 안 적은 것을 이긴다.** class_conf 는 운영자가 그 클래스를
+            # 두고 한 말이고 크기별 하한은 아무 말이 없는 자리의 기본값이다. 위험물에
+            # 낮은 class_conf 를 적어 두면 코앞의 큰 위험물도 그 낮은 하한으로 받는다 —
+            # 크기가 그것을 덮으면 재현율을 위해 적은 값이 조용히 무효가 된다.
+            bar, declared = self.threshold(group["cls_name"]), group["cls_name"] in self.class_conf
+            if self.area_bands:
+                x1, y1, x2, y2 = group["xyxy"]
+                band = self.area_threshold((x2 - x1) * (y2 - y1) / img_area)
+                if band is None:
+                    continue                           # 상한 밖 (상자는 _merge 에서 이미 걸린다)
+                if not declared:
+                    bar = band
+            rule = self.class_rules.get(group["cls_name"])
+            if rule:
+                x1, y1, x2, y2 = group["xyxy"]
+                if min(x2 - x1, y2 - y1) < rule["min_short_px"]:
+                    by_rule += 1                       # 볼 수 없는 크기다
+                    continue
+                if len(group["arms"]) < rule["min_arms"]:
+                    by_rule += 1                       # 한 arm 만으로는 올리지 않는다
+                    continue
             if (len(group["arms"]) < self.min_arms
                     or len(group["prompts"]) < self.min_prompts
-                    or group["conf"] < self.threshold(group["cls_name"])):
+                    or group["conf"] < bar):
+                by_area += bar > self.conf and group["conf"] >= self.conf and not declared
                 continue
             dets.append({"cls": self.classes.index(group["cls_name"]), "name": group["cls_name"],
                          "conf": round(float(group["conf"]), 4),
                          "xyxy": [round(float(v), 1) for v in group["xyxy"]],
                          "agree": len(group["arms"]), "arms": sorted(group["arms"]),
+                         "lead": group["lead"],
                          "prompts": sorted(group["prompts"])})
             if group.get("merged_from"):
                 # 어느 이름으로 잡혀 합쳐졌는지 남긴다 — 합침을 되돌려 보려면 필요하고,
@@ -1606,6 +1739,10 @@ class RiverRunner:
                 dets = keep
         dets.sort(key=lambda d: (-d["agree"], -d["conf"]))
         del dets[self.max_det:]
+        # **잘라낸 뒤에 검증한다** — 내보내지 않을 상자를 임베딩할 이유가 없다(AI-C-13)
+        # 거리가 먼저다 — 검증 근거에 거리를 쓸 수 있어야 한다
+        depth_ms = self.depth(bgr, dets) if self.depth else 0.0
+        verify_ms = self.verifier(bgr, dets) if self.verifier else 0.0
         ms = (time.perf_counter() - t0) * 1000
         return {"infer_ms": round(ms, 1), "arms": list(self.arm_names),
                 "arm_ms": per_arm_ms, "missing_arms": [m[0] for m in self.missing],
@@ -1613,6 +1750,17 @@ class RiverRunner:
                 "min_arms_declared": self.min_arms_declared,
                 "min_arms_applied": self.min_arms,
                 "unanimous": self.min_arms == len(self.arms), "conf": self.conf,
+                # 어느 작동점의 숫자인지 뒤에서 알 수 있어야 한다. 조용히 바뀌면
+                # 같은 설정 이름의 두 측정이 다른 것을 잰 것이 된다
+                "area_bands": [{"upto": u, "conf": c} for u, c in self.area_bands],
+                "area_cap": self.area_cap,
+                "dropped_by_area": by_area,
+                "verify_ms": verify_ms,
+                "depth_ms": depth_ms,
+                "depth_space": getattr(self.depth, "space", None) if self.depth else None,
+                "verify_reused": getattr(self.verifier, "last_reused", 0) if self.verifier else 0,
+                "class_rules": {k: dict(v) for k, v in self.class_rules.items()},
+                "dropped_by_class_rule": by_rule,
                 "class_conf": dict(self.class_conf), "prompt_conf": dict(self.prompt_conf),
                 "min_prompts": self.min_prompts, "prompts_declared": len(self.prompts),
                 "prompt_dropped": dropped, "merge_classes": dict(self.merge_classes),
