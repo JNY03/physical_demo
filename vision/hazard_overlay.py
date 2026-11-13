@@ -128,12 +128,27 @@ def find_font():
     raise SystemExit("no usable font; pass --font")
 
 
+#: 카드 치수는 이 폭을 기준으로 적혀 있다. 더 큰 그림에서는 같은 비율로 키운다 —
+#: 8000 px 사진에 680 px 카드를 그리면 **읽을 수 없다**(실측에서 그랬다).
+CARD_BASE_W = 1280
+
+
+def card_scale(width):
+    return max(1.0, min(4.0, width / float(CARD_BASE_W)))
+
+
 class Pen:
-    def __init__(self, path):
-        self.f = {s: ImageFont.truetype(str(path), s) for s in (17, 18, 21, 24)}
+    def __init__(self, path, scale=1.0):
+        self.path, self.scale = path, float(scale)
+        self.f = {s: ImageFont.truetype(str(path), max(8, int(round(s * self.scale))))
+                  for s in (17, 18, 21, 24)}
 
     def w(self, t, s):
         return self.f[s].getbbox(t)[2]
+
+    def px(self, v):
+        """카드 치수 하나를 이 펜의 배율로."""
+        return int(round(v * self.scale))
 
     def t(self, d, xy, text, s, fill):
         d.text(xy, text, font=self.f[s], fill=fill)
@@ -424,6 +439,9 @@ def render(image_path, dets, pen, bands, depth_dir, zip_sess=None):
         d["_m"] = m
     haz = _pick_cards([d for d in dets if d["cls"] in HAZARD], clean, (W, H), scale, bands)
 
+    # 검수 CLI 가 1 배로 만든 펜을 줘도 **그림 폭에 맞춰 다시 센다**
+    if abs(getattr(pen, "scale", 1.0) - card_scale(W)) > 1e-6:
+        pen = Pen(pen.path, card_scale(W))
     pil = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     dr = ImageDraw.Draw(pil)
     big_first = sorted(dets, key=lambda d: -(d["xyxy"][2]-d["xyxy"][0])*(d["xyxy"][3]-d["xyxy"][1]))
@@ -480,6 +498,8 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
     운영 화면과 검수 화면이 달라지지 않게 하는 유일한 방법이다.
     """
     W, H = wh
+    P = pen.px                                      # 치수 하나를 배율로
+    PADS, LINES = P(PAD), P(LINE)
     x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
     # **테두리는 박스와 같은 색.** 두 색이 다르면 어느 카드가 어느 상자인지
     # 지시선을 따라가야 알 수 있다
@@ -493,14 +513,14 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
     seen_ratio = ((x2 - x1) * (y2 - y1)) / float(W * H)
     want_thumb = seen_ratio < float(card_opt("thumbnail_below_frame_ratio", 0.02))
     if want_thumb:
-        tw_ = THUMB_W
-        th_ = max(28, min(int(crop.shape[0] * tw_ / crop.shape[1]), 140))
+        tw_ = P(THUMB_W)
+        th_ = max(P(28), min(int(crop.shape[0] * tw_ / crop.shape[1]), P(140)))
         crop = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (tw_, th_),
                           interpolation=cv2.INTER_CUBIC)
-        card_w, cw = CARD_W, CARD_W - THUMB_W - 3 * PAD
+        card_w, cw = P(CARD_W), P(CARD_W - THUMB_W - 3 * PAD)
     else:
         crop, th_ = None, 0
-        card_w = cw = CARD_W - THUMB_W - PAD
+        card_w = cw = P(CARD_W - THUMB_W - PAD)
     # grounds must read the **original** pixels. Measuring on an enlarged canvas
     # would print a size the camera never saw.
     score, rows, src = grounds(dict(d, xyxy=[v / scale for v in d["xyxy"]]),
@@ -512,9 +532,9 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
                     ", ".join("%s(%s)" % (cue, who) for cue, who in src.items()),
                     False, 1.0)]
     lines = []
-    BODY_X, BODY_X_BARE = 248, 100      # 막대가 있는 줄 / 없는 줄의 글자 시작
+    BODY_X, BODY_X_BARE = P(248), P(100)   # 막대가 있는 줄 / 없는 줄의 글자 시작
     for key, pct, body, warn, _conf in rows:
-        room = cw - (BODY_X if pct is not None else BODY_X_BARE) - 14
+        room = cw - (BODY_X if pct is not None else BODY_X_BARE) - P(14)
         words, line = body.split(" "), ""
         wrapped = []
         for word in words:
@@ -528,24 +548,24 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
         lines.append((key, pct, wrapped[0], warn))
         # 이어지는 줄은 **첫 줄과 같은 자리**에서 시작한다
         lines += [(None, pct, extra, warn) for extra in wrapped[1:]]
-    chh = max(PAD + 30 + th_ + PAD, PAD + 30 + len(lines) * LINE + PAD)
+    chh = max(PADS + P(30) + th_ + PADS, PADS + P(30) + len(lines) * LINES + PADS)
     cx, cy = place((x1, y1, x2, y2), (card_w, chh), W, H, taken)
     taken.append((cx, cy, card_w, chh))
     dr.line([(x1 + (x2-x1)//2, y1 + (y2-y1)//2), (cx + card_w//2, cy + chh//2)],
             fill=c, width=1)
     dr.rectangle([cx, cy, cx + card_w, cy + chh], fill=(18, 20, 24), outline=c, width=2)
     head = "%d  %s" % (n, SHOWN.get(d["cls"], d["cls"]))
-    pen.t(dr, (cx + PAD, cy + PAD - 3), head, 21, c)
+    pen.t(dr, (cx + PADS, cy + PADS - P(3)), head, 21, c)
     if score is not None:
         # **맨 위에 평균부터.** 아래 줄들이 그 평균이 어디서 왔는지를 말한다
-        pen.t(dr, (cx + PAD + pen.w(head, 21) + 10, cy + PAD - 3),
+        pen.t(dr, (cx + PADS + pen.w(head, 21) + P(10), cy + PADS - P(3)),
               "score %d/100" % round(score), 21,
               SCORE_HIGH if score >= 60 else
               (SCORE_MID if score >= 40 else SCORE_LOW))
     if crop is not None:
-        pil.paste(Image.fromarray(crop), (cx + PAD, cy + PAD + 28))
-    tx = cx + (THUMB_W + 2 * PAD if crop is not None else PAD)
-    y = cy + PAD + 28
+        pil.paste(Image.fromarray(crop), (cx + PADS, cy + PADS + P(28)))
+    tx = cx + (P(THUMB_W) + 2 * PADS if crop is not None else PADS)
+    y = cy + PADS + P(28)
     for key, pct, body, warn in lines:
         # **세부 단서는 모두 흰색.** 색으로 미리 판정해 주지 않는다 — 어느 줄이
         # 약한지는 퍼센트가 말하고, 색이 또 말하면 두 번 말하는 것이다
@@ -554,17 +574,17 @@ def _draw_one_card(pil, dr, pen, d, clean, wh, n, taken, scale=1.0, bands=None,
         if pct is not None:
             # **막대로 보여 준다.** 숫자는 정확하고 막대는 한눈에 들어온다 —
             # 카드가 여럿일 때 어느 단서가 약한지는 눈이 먼저 찾는다
-            bx, by, bw, bh = tx + 100, y + 6, 78, 11
+            bx, by, bw, bh = tx + P(100), y + P(6), P(78), P(11)
             dr.rectangle([bx, by, bx + bw, by + bh], fill=(58, 62, 70))
             fill = int(bw * min(1.0, max(0.0, pct / 100.0)))
             if fill > 0:
                 dr.rectangle([bx, by, bx + fill, by + bh], fill=(255, 255, 255))
             if key:
-                pen.t(dr, (bx + bw + 10, y), "%3d%%" % round(pct), 17, (255, 255, 255))
+                pen.t(dr, (bx + bw + P(10), y), "%3d%%" % round(pct), 17, (255, 255, 255))
         # 부가 설명은 **회색** — 값이 아니라 그 값이 어디서 왔는지의 설명이다
         pen.t(dr, (tx + (BODY_X if pct is not None else BODY_X_BARE), y),
               body, 17, (160, 168, 180))
-        y += LINE
+        y += LINES
 
 
 
@@ -588,11 +608,12 @@ def add_cards(canvas, clean_bgr, dets, cues=None, font=None, colour_of=None, _st
            for d in (dets or []) if (d.get("name") or d.get("cls")) in HAZARD]
     if not haz:
         return canvas
-    if "pen" not in _state:
-        load_cues(cues)
-        _state["pen"] = Pen(Path(font) if font else find_font())
-    pen = _state["pen"]
     H, W = clean_bgr.shape[:2]
+    sc = card_scale(W)
+    if _state.get("scale") != sc:                   # 그림 폭이 바뀌면 펜을 다시 세운다
+        load_cues(cues)
+        _state["pen"], _state["scale"] = Pen(Path(font) if font else find_font(), sc), sc
+    pen = _state["pen"]
     pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
     dr = ImageDraw.Draw(pil)
     taken = []
