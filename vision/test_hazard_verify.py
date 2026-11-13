@@ -24,13 +24,19 @@ def stub(classes=("butane_canister",), **over):
     return hv.HazardVerifier(spec, log=None)
 
 
-def test_without_models_or_prototypes_it_stands_down_quietly():
-    """가중치가 없는 기계에서 **세우기를 막지 않는다** — 검증만 빠진다(AI-C-05)."""
+def test_without_models_or_prototypes_only_the_learned_half_stands_down():
+    """가중치가 없는 기계에서 **세우기를 막지 않고**, 쓸 수 있는 근거는 계속 쓴다.
+
+    예전에는 준비 판정이 하나여서 프로토타입이 없으면 **프로토타입이 필요 없는**
+    구조 단서까지 같이 꺼졌다. 의존하지 않는 것이 의존하는 것 때문에 죽던 자리다.
+    """
     v = stub()
-    assert v.ready is False
+    assert v.learned is False               # 배운 쪽(match)은 못 선다
+    assert v.ready is True                  # 안 배운 쪽(structure)은 선다
     dets = [{"name": "butane_canister", "conf": 0.5, "xyxy": [0, 0, 20, 60]}]
-    assert v(np.zeros((100, 100, 3), np.uint8), dets) == 0.0
-    assert "verify" not in dets[0]          # 점수를 **지어내지 않는다**
+    v(np.zeros((100, 100, 3), np.uint8), dets)
+    per = (dets[0].get("verify") or {}).get("per_model", {})
+    assert "clip_b32" not in per            # 기준이 없으면 match 를 **지어내지 않는다**
 
 
 def test_a_frame_with_no_hazard_costs_nothing():
@@ -81,3 +87,37 @@ def test_a_crop_too_small_is_not_scored():
 
 def test_an_unknown_class_gets_no_structure_score():
     assert hv.HazardVerifier._structure(np.zeros((80, 40, 3), np.uint8), "styrofoam_box") is None
+
+
+# ------------------------------------------- 프로토타입이 없어도 structure 는 산다
+def test_structure_survives_without_a_prototype_bank():
+    """`structure` 는 기준 사진에서 읽은 규칙이라 프로토타입이 **필요 없다**.
+    준비 판정을 하나로 두면 npz 없는 기계에서 쓸 수 있는 근거까지 꺼진다(AI-C-05)."""
+    v = hv.HazardVerifier({"classes": ["butane_canister"], "models": [],
+                           "prototypes": "/nope.npz", "structure": True}, log=None)
+    assert v.learned is False and v.ready is True
+    img = np.zeros((200, 60, 3), np.uint8)
+    img[:25] = (200, 60, 40); img[25:50] = (200, 200, 200); img[50:] = (40, 40, 220)
+    d = {"name": "butane_canister", "conf": 0.5, "xyxy": [0, 0, 60, 200]}
+    v(img, [d])
+    assert d["verify"] is not None
+    assert set(d["verify"]["per_model"]) == {"structure"}
+    assert d["verify"]["per_model"]["structure"]["learned"] is False
+
+
+def test_without_prototypes_there_is_no_match_row():
+    """match 는 기준과의 거리다 — 기준이 없으면 **정의 자체가 없다.** 지어내지 않는다."""
+    v = hv.HazardVerifier({"classes": ["butane_canister"], "models": [],
+                           "prototypes": "/nope.npz", "structure": True}, log=None)
+    d = {"name": "butane_canister", "conf": 0.5, "xyxy": [0, 0, 60, 200]}
+    v(np.full((200, 60, 3), 90, np.uint8), [d])
+    assert "clip_b32" not in (d["verify"] or {}).get("per_model", {})
+
+
+def test_turning_structure_off_without_a_bank_disables_the_stage():
+    v = hv.HazardVerifier({"classes": ["butane_canister"], "models": [],
+                           "prototypes": "/nope.npz", "structure": False}, log=None)
+    assert v.ready is False
+    d = {"name": "butane_canister", "conf": 0.5, "xyxy": [0, 0, 60, 200]}
+    assert v(np.zeros((200, 60, 3), np.uint8), [d]) == 0.0
+    assert "verify" not in d

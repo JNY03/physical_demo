@@ -112,11 +112,24 @@ class HazardVerifier:
         self.max_per_frame = int(spec.get("max_per_frame") or 6)
         self._last = []                              # [(cls, xyxy, verify)]
         self.structure = bool(spec.get("structure", True))
-        self.ready = bool(self.encoders) and bool(self.bank) and len(self.encoders) >= self.min_models
+        # **의존하지 않는 것이 의존하는 것 때문에 죽지 않게 한다.**
+        # `structure` 는 기준 사진에서 손으로 읽은 규칙이라 프로토타입이 **필요 없다**.
+        # 그런데 준비 판정을 하나로 두면 npz 가 없는 기계에서 구조 단서까지 같이 꺼진다 —
+        # 그 기계는 쓸 수 있는 근거를 가지고도 못 쓰게 된다(AI-C-05 의 격리가 뜻하는 것이
+        # 바로 이것이다). 그래서 **배운 쪽과 안 배운 쪽을 따로 센다.**
+        self.learned = (bool(self.encoders) and bool(self.bank)
+                        and len(self.encoders) >= self.min_models)
+        self.ready = self.learned or self.structure
         if log:
-            log("  verify %s · 모델 %d%s · 프로토타입 %d묶음"
-                % ("준비됨" if self.ready else "**비활성**", len(self.encoders),
-                   (" (빠짐 %d)" % len(self.missing)) if self.missing else "", len(self.bank)))
+            parts = []
+            if self.learned:
+                parts.append("match(모델 %d · 프로토타입 %d묶음)" % (len(self.encoders), len(self.bank)))
+            if self.structure:
+                parts.append("structure(프로토타입 불필요)")
+            log("  verify %s%s%s"
+                % (" + ".join(parts) if parts else "**비활성**",
+                   "" if self.learned else " · **match 없음**",
+                   (" · 빠짐 %d" % len(self.missing)) if self.missing else ""))
 
     @staticmethod
     def _structure(crop, cls):
@@ -212,7 +225,9 @@ class HazardVerifier:
         if not crops:
             return round((time.perf_counter() - t0) * 1000, 1)
         per_model = {}
-        for enc in self.encoders:
+        # 프로토타입이 없으면 인코더를 **돌리지 않는다** — 돌려도 견줄 것이 없고
+        # 그 비용은 그대로 든다
+        for enc in (self.encoders if self.learned else ()):
             emb = enc(crops)                         # 한 프레임의 후보를 한 번에
             for i, d in enumerate(keep):
                 pos = self._protos(enc.name, d["name"])
