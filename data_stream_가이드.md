@@ -99,6 +99,7 @@ python server_stream_multi_source.py --on pi11 pi12 pi13       # 모듈 카메�
 | 10008 | pi11 | pi11 `:8090/stream/1` (상태 없음 — pi11 에 브로커가 없다) |
 | 10009 | pi12 | pi12 `:8090/stream/1` (상태 없음 — pi12 에 브로커가 없다) |
 | 10011 | pi13 | pi13 `:8090/stream/1` (상태 없음 — pi13 에 브로커가 없다). **10010 은 비워 둔다** — 개발 기계에서 다른 프로그램이 쓰고 있었다 |
+| 10012 | drone2 | ds5 `:8890/api/frame?cam=0` + MQTT `:1883` (둘째 드론 x500-002 · drone 과 같은 drone-agent. 리얼센스와 같은 기기) |
 
 - 10초마다 소스별 수신 속도(장/초, 건/초)가 찍힌다. 종료는 `Ctrl+C`.
 - 브라우저 확인: `http://localhost:10002/` (영상 + 비전), `/stream` (원본), `/health` (상태 JSON).

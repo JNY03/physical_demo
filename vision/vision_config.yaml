@@ -61,6 +61,8 @@ devices:
   # defaults.devices 에는 넣지 않았다 — 필요할 때 --devices cam360_slice 로 켠다.
   cam360_slice: {fov_x_deg: 90.0}
   drone:  {fov_x_deg: meta}
+  # 둘째 드론 (DS 10012, ds5 x500-002). drone 과 같은 drone-agent 라 meta 에 camera.hfov_deg 가 온다
+  drone2: {fov_x_deg: meta}
   robot1: {fov_x_deg: null}
   robot2: {fov_x_deg: null}
   # Unitree A2 (DS 10007). 1920x1080, 가로 시야 모름 — 확인 전까지 null. defaults.devices 에는 아직 안 넣음

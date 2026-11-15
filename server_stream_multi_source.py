@@ -10,6 +10,8 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
   드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
   /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
+2026-11-15 · 둘째 드론 drone2(10012). ds5 의 drone-agent(x500-002)가 pi3 와 같은 모양(:8890/api/frame · MQTT 1883)으로
+  내므로 drone_video_loop · start_mqtt 를 그대로 쓴다. ds5 는 리얼센스(10005)와 같은 기기다 — 포트가 달라 겹치지 않는다.
 2026-11-13 · 모듈 카메라 파이 셋째 pi13(10011 — 10010 은 다른 프로그램이 쓰고 있었다). pi11·pi12 와 같은 기기·같은 파일이다.
 2026-11-12 · 모듈 카메라 파이 둘 pi11(10008) · pi12(10009). CSI 라 /dev/video* 가 베이어 RAW 이고
   cv2.VideoCapture 로 못 받는다 — 파이 쪽 rpicam-vid 가 MJPEG 로 내므로 robot_video_loop 를 그대로 쓴다.
@@ -56,6 +58,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
                   이미 쓰고 있었다(127.0.0.1:10010). 번호의 구멍은 공짜고 충돌은 서버를 못 띄운다.
                   pi11·pi12 와 같다. 리본이 접촉 불량이면 센서가 아예 안 보이거나
                   보이고도 스트리밍만 실패한다 — picam_work/README.md 의 증상 표를 본다.
+  10012 drone2  영상: ds5 :8890/api/frame?cam=0 롱폴            상태: ds5 MQTT :1883 전체 구독
+                  둘째 드론(x500-002). drone 과 같은 drone-agent · 같은 모양이다. ds5 는 리얼센스(10005)도
+                  내는 기기라 주소가 같다 — 리얼센스는 :8090, 드론은 :8890 이라 겹치지 않는다.
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
@@ -214,9 +219,10 @@ except ImportError:
 # ---------------------------------------------------------------- 고정값
 SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
            "realsense": 10005, "cam360_slice": 10006, "a2": 10007,
-           "pi11": 10008, "pi12": 10009, "pi13": 10011}
+           "pi11": 10008, "pi12": 10009, "pi13": 10011,
+           "drone2": 10012}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
-           "drone": "drone", "robot1": "robot1", "robot2": "robot2",
+           "drone": "drone", "drone2": "drone2", "x500-002": "drone2", "robot1": "robot1", "robot2": "robot2",
            "realsense": "realsense", "pi6": "realsense", "ds5": "realsense", "rs": "realsense",
            "d455": "realsense",
            "cam360_slice": "cam360_slice", "slice": "cam360_slice",
@@ -227,7 +233,9 @@ ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
 PICAM_SOURCES = ("pi11", "pi12", "pi13")
 #: MQTT 로 상태를 받는 소스. 여기 없는 소스는 영상만 받는다 — 브로커가 없는 기기에
 #: 붙으러 가면 끝없이 재접속만 하고 로그가 그 경고로 덮인다.
-STATE_SOURCES = {"drone", "robot1", "robot2", "a2"}
+STATE_SOURCES = {"drone", "drone2", "robot1", "robot2", "a2"}
+#: drone-agent(/api/frame 롱폴)로 영상을 내는 드론 소스. 가져오는 쪽은 drone_video_loop 하나다.
+DRONE_SOURCES = ("drone", "drone2")
 #: 가져오지 않고 POST 로 받기만 하는 소스 (기기 주소 · 가져오기 스레드 없음).
 #: 상태가 있는지와는 상관없다 — cam360 은 받기만 하지만 POST /state 로 상태도 받는다.
 PUSH_ONLY = ("cam360", "cam360_slice")
@@ -241,6 +249,7 @@ def load_default_hosts():
     hosts = {"robot1": None,         # pi7 (go1-camview 8090 · mosquitto 1883)
              "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
              "drone": None,          # pi3 (drone-agent 8890 · mosquitto 1883)
+             "drone2": None,         # ds5 (drone-agent 8890 · mosquitto 1883 — x500-002)
              "realsense": None,      # ds5 (realsense_mjpeg.py 8090 · 상태 없음)
              "a2": None,             # pi10 (a2-bridge 카메라 8090 · mosquitto 1883/9001)
              "pi11": None,           # pi11 (picam_mjpeg.py 8090 · 브로커 없음)
@@ -1736,11 +1745,11 @@ def main():
         description="로봇·드론·360 카메라 데이터를 받아 Redis Stream 으로 흘리고 전부 파일로 저장한다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · robot2 10004 · realsense 10005 · "
-               "cam360_slice 10006 · a2 10007 · pi11 10008 · pi12 10009 · pi13 10011\n"
+               "cam360_slice 10006 · a2 10007 · pi11 10008 · pi12 10009 · pi13 10011 · drone2 10012\n"
                "자세한 설명은 파일 맨 위 주석.")
     ap.add_argument("--on", nargs="+", metavar="소스",
                     help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice a2 "
-                         "pi11 pi12 pi13 (안 주면 전부)")
+                         "pi11 pi12 pi13 drone2 (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
                     help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
@@ -1765,6 +1774,8 @@ def main():
                     help="pi13 MJPEG 경로 번호 (기본 1 — pi13 쪽은 번호를 무시한다)")
     ap.add_argument("--drone", default=DEFAULT_HOST["drone"], metavar="주소",
                     help="드론 파이(pi3) 주소. 기본 hosts.local.json / PD_HOST_* 값")
+    ap.add_argument("--drone2", default=DEFAULT_HOST["drone2"], metavar="주소",
+                    help="둘째 드론 파이(ds5, x500-002) 주소. 기본 hosts.local.json / PD_HOST_DRONE2 값")
     ap.add_argument("--robot-cam", type=int, default=1, choices=range(1, 6), metavar="번호",
                     help="로봇 카메라: 1 정면 · 2 턱 · 3 왼쪽 · 4 오른쪽 · 5 배 (기본 1)")
     ap.add_argument("--save", default=str(Path(__file__).resolve().parent / "stream_data"), metavar="폴더",
@@ -1878,7 +1889,7 @@ def main():
                 path = "/cam%d.mjpg" % DRONE_ARDUCAM_CAM
                 video = "http://%s:%d%s" % (host, DRONE_MJPEG_PORT, path)
                 pulls.append((robot_video_loop, (s, host, DRONE_ARDUCAM_CAM, DRONE_MJPEG_PORT, path), s, host))
-            elif s.name == "drone":
+            elif s.name in DRONE_SOURCES:          # drone2(ds5) 도 같은 drone-agent 다 — DRONE_ARDUCAM 은 pi3 만
                 video = "http://%s:%d/api/frame?cam=%d" % (host, DRONE_VIDEO_PORT, DRONE_CAM)
                 pulls.append((drone_video_loop, (s, host, DRONE_CAM), s, host))
             elif s.name == "realsense":

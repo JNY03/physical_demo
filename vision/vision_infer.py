@@ -127,7 +127,8 @@ from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa
 DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",   # cam360_slice 2026-11-11 (DS 10006)
            "a2",                                                                 # a2 2026-11-12 (DS 10007, Unitree A2)
            "pi11", "pi12",                                                        # 모듈 카메라 파이 2026-11-12 (DS 10008·10009)
-           "pi13")                                                                # 모듈 카메라 파이 2026-11-13 (DS 10011)
+           "pi13",                                                                # 모듈 카메라 파이 2026-11-13 (DS 10011)
+           "drone2")                                                              # 둘째 드론 ds5 x500-002 2026-11-15 (DS 10012)
 MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
                   "pi6": "realsense", "ds5": "realsense", "rs": "realsense", "d455": "realsense",
