@@ -84,3 +84,12 @@ def test_unnamed_scene_box_does_not_erase_real_can():
     label = _d([320, 250, 430, 400], "butane_canister", score=60)    # 통의 라벨
     kept, n = _run([scene, can, label])
     assert kept == [can] and n == 2                                  # 라벨만 남던 연쇄가 없다
+
+
+def test_unsuspected_big_box_does_not_swallow_objects_inside():
+    """2026-11-16: 그물 · 해먹 같은 의심 아닌 큰 상자가 안의 물체를 지우지 않는다 — 각각 남는다."""
+    net = _d([950, 210, 1220, 718])                                  # 의심 아님(크기 상한으로 거부)
+    box = _d([1050, 400, 1110, 460])                                 # 나무 상자 후보(아직 의심 아님)
+    can = _d([980, 560, 1030, 640])
+    kept, n = _run([net, box, can])
+    assert kept == [net, box, can] and n == 0

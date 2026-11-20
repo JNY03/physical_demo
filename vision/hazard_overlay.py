@@ -39,13 +39,15 @@ CFG = {}            # load_cues() 가 채운다
 
 def load_cues(path=None):
     """단서 선언을 읽는다. 없으면 코드의 기본값으로 돈다(설정 없이도 선다)."""
-    global CFG, SHOWN, REAL_MM, HAZARD
+    global CFG, SHOWN, REAL_MM, DIAG_MM, HAZARD
     p = Path(path) if path else CUES_DEFAULT
     CFG = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
     objs = CFG.get("objects") or {}
     if objs:
         SHOWN = {k: v.get("shown", k) for k, v in objs.items()}
         REAL_MM = {k: tuple(v["size_mm"][:2]) for k, v in objs.items() if v.get("size_mm")}
+        DIAG_MM = {k: float(np.sqrt(sum(float(x) ** 2 for x in v["size_mm"])))
+                   for k, v in objs.items() if v.get("size_mm")}
         HAZARD = tuple(objs)
     return CFG
 
@@ -97,6 +99,9 @@ ASPECT = {"butane_canister": 3.0, "wooden_box_mine": 2.2}
 #: 실물 치수 (long, short) mm — fx 가 있을 때 픽셀을 이것과 견준다.
 #:   목함지뢰 PMD-6 / KPA 형: 200 x 90 mm · 부탄 EN 417 급 220 g: 200 x 66 mm
 REAL_MM = {"wooden_box_mine": (200.0, 90.0), "butane_canister": (200.0, 66.0)}
+#: 규격 직육면체의 대각선(mm). 어느 방향에서 보든 물체의 겉보기 폭은 이것을 넘지 못한다 —
+#: 크기 **상한 거부**(size_veto)의 기준. load_cues() 가 objects.size_mm 에서 다시 센다.
+DIAG_MM = {"wooden_box_mine": 226.1, "butane_canister": 232.2}
 #: **These percentages are a declared mapping, not a calibrated probability.**
 #: Nothing here was fitted to labelled outcomes - there are almost none. They are a
 #: readable common scale so a person can see which cue is weak, and they must not be
@@ -269,7 +274,10 @@ def colour_cue(crop):
     # 나무: 따뜻한 노랑~주황 색조(H 15~35)에 **채도가 낮아도** 받는다(2026-11-13).
     # 예전 규칙(S 25 이상)은 밝은 원목을 못 봤다 — pi13 실측 원목 상자 S 중앙 13~26,
     # 그 규칙으로 wood 0.01~0.02. 새 규칙: 상자 0.34 · 0.15, 부탄 통 0.03 · 0.05, 바닥 0.
-    warm = (h >= 15) & (h <= 35)
+    # **H 5 부터**(2026-11-16): 리얼센스 pi6 · 흐린 날은 같은 원목 상자를 H 8~11(분홍빛)로 찍었다 —
+    # 15 부터 받는 규칙으로는 세 상자 모두 wood 0.00. 5 부터: 상자 0.12~0.23 · 스티로폼 0.08~0.11 ·
+    # 부탄·캔 0.01~0.06. 갈림이 넓지 않아 재질은 보조 단서(무게 0.10)로 둔다.
+    warm = (h >= 5) & (h <= 35)
     wood = float((warm & (sat >= 8) & (sat <= 80) & (val >= 100)).mean())
     # 도색 안 된 금속: 무채색에 밝다. **따뜻한 색조는 뺀다** — 밝은 원목이 금속으로 잡혔다
     chrome = float(((sat < 40) & (val >= 120) & ~warm).mean())
@@ -353,6 +361,15 @@ def grounds(det, W, H, bands, metres, colour=None):
     if cue_on("class"):
         votes = det.get("votes") or ({lead: det["conf"]} if lead else {})
         n = int(cue("class", "max_candidates", 4))
+        if not det["conf"] and votes:
+            # **같은 뜻의 다른 낱말**(2026-11-16, 설정 class.aliases). 프리 arm 은 우리 문구가 아니라
+            # 제 어휘로 부른다 — 또렷한 원목 상자를 'block 0.92' 라 불렀는데 이름이 'wooden block' 이
+            # 아니라서 class 가 0 이었다. 그 클래스의 별칭 낱말로 불린 확신은 그 클래스 것으로 센다.
+            al = {str(a).lower() for a in ((CFG.get("cues") or {}).get("class") or {})
+                  .get("aliases", {}).get(cls, [])}
+            hit = [v for k, v in votes.items() if str(k).lower() in al]
+            if hit:
+                det = dict(det, conf=float(max(hit)))
         cand = ", ".join("%s %.2f" % (k, v) for k, v in list(votes.items())[:n]) or "?"
         rows.append(("class", 100.0 * det["conf"], cand, False, 1.0))
         src["class"] = (arms[0] if arms else "detector").replace("_free", "")
@@ -389,7 +406,12 @@ def grounds(det, W, H, bands, metres, colour=None):
     # 틀린 crop 이 아니라 **물을 수 없는** crop 이다. 그래서 옆에서 같이 점수가 되지
     # 않고 이 줄의 **무게**가 된다.
     small = short < float(cue("appearance", "min_px", 48))   # 외형 단서를 물을 수 없는 크기
-    if colour is not None and cue_on("material") and not small:
+    # **주변 창으로 잰 작은 crop**(2026-11-16, verify.context). 글 설명은 주변과 함께 쟀으니 센다.
+    # 재질 색도 센다 — 26 px 짜리 누운 부탄도 빨간 도색 비율은 읽힌다. 무게는 아래 confidence
+    # (짧은 변 / confidence_px)가 이미 줄인다. 기준 사진(match)은 여전히 재지 않는다.
+    v0 = det.get("verify") or {}
+    ctx_ok = bool(v0.get("context")) and short >= float(cue("appearance", "context_min_px", 16))
+    if colour is not None and cue_on("material") and (not small or ctx_ok):
         full = float(cue("material", "coverage_full", 0.35))
         px = float(cue("material", "confidence_px", MATERIAL_PX))
         if cls == "butane_canister":
@@ -423,9 +445,11 @@ def grounds(det, W, H, bands, metres, colour=None):
         per = v.get("per_model") or {}
         learned = {k: r for k, r in per.items() if r.get("learned", True)}
         sem = v.get("semantic")
-        if sem is not None and cue_on("semantic") and not small:
+        if sem is not None and cue_on("semantic") and (not small or ctx_ok):
             # **글 설명 비교**: 위험물 묘사 문장 vs 장면을 모른 채 쓴 일반 문장. 확률 그대로 %.
-            rows.append(("semantic", 100.0 * float(sem), "text description", False, 1.0))
+            rows.append(("semantic", 100.0 * float(sem),
+                         "text description (with surroundings)" if v.get("context") else "text description",
+                         False, 1.0))
             src["semantic"] = "clip_text"
         if learned and cue_on("match") and not small:
             m = float(np.mean([r["margin"] for r in learned.values()]))
@@ -505,6 +529,47 @@ def min_score(cls=None):
     return float(dec.get("min_score", 50.0))
 
 
+def size_veto(det, cls):
+    """**너무 크면 그 물체가 아니다**(2026-11-16). 걸리면 사람이 읽을 이유 글, 아니면 None.
+
+    size 단서(점수)는 껐다 — 비스듬히 보면 상자가 실물보다 커져 진짜 물체도 늘 깎였다.
+    그러나 **한쪽 방향**은 선다: 직육면체를 어느 쪽에서 보든 겉보기 폭은 3D 대각선을
+    넘지 못한다. 그래서 상자의 **짧은 변**(실측 mm)이 대각선의 `max_over_diagonal` 배를
+    넘으면 그 클래스에서 뺀다. 짧은 변을 보는 것은 긴 변이 원근·배경을 더 타기 때문이다.
+
+    실측(리얼센스 pi6, 2026-11-16): 스티로폼 상자 짧은 변 455 mm = 시연 상자 대각선
+    172 mm 의 2.65 배 → 거부. 진짜 상자 116 mm(0.67 배) · 음료 캔은 실물보다 1.35 배 크게
+    재였다(metric depth 오차) — 2 배는 그 오차를 넉넉히 덮는다.
+    거리가 미터가 아니면(real_mm 없음) **묻지 않는다** — 모르는 것은 거부 근거가 아니다.
+    """
+    spec = (CFG.get("decision") or {}).get("size_veto") or {}
+    if not spec.get("enabled", False):
+        return None
+    real, diag = det.get("real_mm"), DIAG_MM.get(cls)
+    if not real or not diag:
+        return None
+    k = float(spec.get("max_over_diagonal", 2.0))
+    if float(real["short"]) <= k * diag:
+        return None
+    return "too big %.0f x %.0f cm > %.0f cm" % (real["long"] / 10.0, real["short"] / 10.0,
+                                                 k * diag / 10.0)
+
+
+def name_veto(det, cls):
+    """**검출기가 다른 것이라고 부른 것**(2026-11-16). 걸리면 사람이 읽을 이유 글, 아니면 None.
+
+    프리 arm 이 1위로 댄 낱말이 그 클래스의 `class.exclude` 목록에 있으면 그 클래스에서 뺀다.
+    리얼센스 pi6 하천: 물에 뜬 낙엽을 프리 arm 이 'autumn leave' 라 불렀는데, 주변 창 글 설명
+    (verify.context)과 갈색(재질)이 그것을 덮어 목함지뢰 46~73 점으로 의심됐다(303 장 중 74 건).
+    목록은 **물체 이름**만 넣는다 — 재질 낱말(wood · plank)이나 모양 이름(block · box)은 넣지 않는다.
+    """
+    ex = (((CFG.get("cues") or {}).get("class") or {}).get("exclude") or {}).get(cls)
+    lead = str(det.get("lead") or "").lower()
+    if ex and lead and lead in {str(x).lower() for x in ex}:
+        return "called '%s'" % lead
+    return None
+
+
 def assess(det, clean_bgr, wh=None):
     """후보 하나를 **위험물 클래스 전부에 대해 같은 단서로** 재고 점수로 견준다.
 
@@ -523,7 +588,7 @@ def assess(det, clean_bgr, wh=None):
     colour = colour_cue(crop)
     name = det.get("name") or det.get("cls")
     by = det.get("verify_by") or {}
-    scores, cards = {}, {}
+    scores, cards, gate = {}, {}, {}
     for cls in HAZARD:
         d = dict(det, cls=cls,
                  # 검출기가 **이 클래스로** 불렀을 때만 그 확신이 class 단서다
@@ -535,9 +600,41 @@ def assess(det, clean_bgr, wh=None):
                       "rows": [[k, None if p is None else round(float(p), 1), body]
                                for k, p, body, _w, _c in rows],
                       "source": ", ".join("%s(%s)" % (k, v) for k, v in src.items())}
-    best = max((c for c in scores if scores[c] is not None), key=lambda c: scores[c],
+        # **닮은꼴 감점**(2026-11-16). 요구: "비슷하게 생긴 캔도 후보이되 점수는 더 낮도록".
+        # 판정(gate)은 감점 **전** 점수로 하고, 보이는 점수만 깎는다 — 캔은 부탄 후보로 남되
+        # 진짜 부탄보다 낮게 보인다. 닮은 정도는 그 클래스 문장 대 닮은꼴 문장의 확률이다:
+        # 리얼센스 실측 진짜 부탄 47~51% · 음료 캔 97~99%. `from` 이하는 감점 없음, 1 에서 최대.
+        gate[cls] = scores[cls]
+        lk = ((by.get(cls) or {}) if by else {}).get("lookalike")
+        lspec = (CFG.get("decision") or {}).get("lookalike") or {}
+        if lk is not None and scores[cls] is not None and lspec.get("enabled", True):
+            lo = float(lspec.get("from", 0.5))
+            pen = float(lspec.get("max_penalty", 15.0)) * min(1.0, max(0.0, (lk - lo) / max(1e-6, 1 - lo)))
+            if pen > 0:
+                scores[cls] = round(max(0.0, scores[cls] - pen), 1)
+                cards[cls]["score"] = scores[cls]
+            # **새 줄을 만들지 않는다** — 가시화(viz-debugger VisionCards)는 줄 이름을 번역표에서 찾아
+            # 모르는 키는 키 글자 그대로 보인다. 이름(class) 줄 설명 뒤에 붙인다(없으면 글 설명 줄)
+            note = "%s %.0f%% -%.0f" % (lspec.get("shown", {}).get(cls, "look-alike"), 100.0 * lk, pen)
+            rows_ = cards[cls]["rows"]
+            host = next((r for r in rows_ if r[0] == "class"), None) or next(
+                (r for r in rows_ if r[0] == "semantic"), None)
+            if host is not None:
+                host[2] = "%s · %s" % (host[2], note)
+            cards[cls]["lookalike"] = {"p": round(float(lk), 4), "penalty": round(pen, 1)}
+        why, row = size_veto(det, cls), "size"
+        if not why:
+            why, row = name_veto(det, cls), "class"   # 이름 줄에 이유를 단다(크기 줄이 아니다)
+        if why and scores[cls] is not None:
+            # 0 으로 둔다(None 이 아니다) — None 은 '못 잼' 이라 평활이 옛 점수를 그대로 나른다
+            scores[cls] = gate[cls] = 0.0
+            cards[cls]["score"] = 0.0
+            cards[cls]["rows"].append([row, 0.0, why])
+            cards[cls]["vetoed"] = why
+    # 판정은 감점 전 점수(gate)로 — 닮은꼴은 후보에서 빠지지 않고 점수만 낮게 보인다
+    best = max((c for c in gate if gate[c] is not None), key=lambda c: gate[c],
                default=None)
-    top = scores.get(best) if best else None
+    top = gate.get(best) if best else None
     # **근거가 모자라면 의심하지 않는다**(min_evidence, 2026-11-13). 작은 부품(뚜껑·라벨 글자)은
     # 외형 단서가 모두 '못 잼' 이라 이름 0 · 형상 100 만 남아 점수가 50 이 됐다 — 형상 하나로
     # 위험물이라고 말한 것이다. 잰 단서 무게가 전체의 이 비율 미만이면 점수는 두되 판정은 없다.
@@ -547,9 +644,9 @@ def assess(det, clean_bgr, wh=None):
     if best:
         have = sum(w.get(r[0], 0.0) for r in cards[best]["rows"] if r[1] is not None)
     enough = have / total >= float((CFG.get("decision") or {}).get("min_evidence", 0.45))
-    return {"scores": scores,
+    return {"scores": scores, "gate_scores": gate,
             "suspect": best if (top is not None and enough and top >= min_score(best)) else None,
-            "score": top, "min_score": min_score(best), "evidence": round(have / total, 2),
+            "score": scores.get(best) if best else None, "min_score": min_score(best), "evidence": round(have / total, 2),
             "min_scores": {c: min_score(c) for c in HAZARD},
             "enough": bool(enough),
             "cards": cards}

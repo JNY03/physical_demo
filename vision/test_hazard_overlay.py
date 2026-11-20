@@ -121,3 +121,32 @@ def test_small_crop_does_not_score_appearance():
     _sc, rows, _src = ho.grounds(det, 1280, 720, None, None, colour=colour)
     got = {k for k, p, *_ in rows if p is not None}
     assert not got & {"semantic", "match", "material"}               # 20 px: 묻지 않는다(0 점 아님)
+
+
+def test_small_crop_measured_with_surroundings_scores_semantic_and_material_only():
+    """주변 창으로 잰 작은 crop(verify.context, 2026-11-16) — 글 설명·재질은 세고 기준 사진은 아니다.
+
+    리얼센스 하천 3 m 에서 누운 부탄이 83x26 px 였다. 예전에는 외형 단서가 전부 '못 잼' 이라
+    근거 비율이 모자라 의심되지 못했다.
+    """
+    ho.load_cues()
+    det = {"cls": "butane_canister", "conf": 0.0, "xyxy": [0, 0, 83, 26], "lead": "fire hose",
+           "verify": {"semantic": 0.88, "context": True,
+                      "per_model": {"clip_b32": {"margin": 0.2}}}}
+    colour = {"red": 0.5, "blue": 0.0, "both": 0.0, "wood": 0.0, "chrome": 0.3, "lit": 0.5}
+    _sc, rows, _src = ho.grounds(det, 1280, 720, None, None, colour=colour)
+    got = {k for k, p, *_ in rows if p is not None}
+    assert {"semantic", "material"} <= got
+    assert "match" not in got                                         # 기준 사진은 딱 맞는 crop 으로 만들었다
+    tiny = dict(det, xyxy=[0, 0, 40, 10])                             # context_min_px(16) 아래는 여전히 묻지 않는다
+    _sc, rows, _src = ho.grounds(tiny, 1280, 720, None, None, colour=colour)
+    assert not {k for k, p, *_ in rows if p is not None} & {"semantic", "match", "material"}
+
+
+def test_a_candidate_the_detector_called_a_leaf_is_not_a_hazard():
+    """2026-11-16: 프리 arm 이 'autumn leave' 라 부른 물에 뜬 낙엽 — 목함지뢰 · 부탄 모두에서 뺀다."""
+    ho.load_cues()
+    assert ho.name_veto({"lead": "autumn leave"}, "wooden_box_mine")
+    assert ho.name_veto({"lead": "autumn leave"}, "butane_canister")
+    assert ho.name_veto({"lead": "fire hose"}, "butane_canister") is None
+    assert ho.name_veto({"lead": "plank"}, "wooden_box_mine") is None     # 재질 낱말은 막지 않는다

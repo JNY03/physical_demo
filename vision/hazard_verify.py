@@ -183,6 +183,12 @@ class HazardVerifier:
                 te = _TextEncoder(sspec)
                 prompts = sspec.get("prompts") or {}
                 negs = list(sspec.get("negatives") or [])
+                # **닮은꼴**(confusers, 2026-11-16) — `{클래스: [문장]}`. 위험물과 헷갈리는 물건의
+                # 이름이다(부탄 ↔ 음료 캔). semantic 확률에는 **넣지 않는다** — 열로 세웠더니
+                # 진짜 부탄의 확률까지 반으로 깎여(90 → 59, 장마다 49~72) 하한 아래로 떨어진 장에서
+                # 부탄을 놓쳤다. 대신 그 클래스 문장 대 닮은꼴 문장 **둘만의** 확률(lookalike)을
+                # 따로 내고, 판정은 그대로 둔 채 **점수만 깎는다**(hazard_overlay.assess).
+                confs = {c: list(v) for c, v in (sspec.get("confusers") or {}).items() if v}
                 cls_list = [c for c in self.classes if prompts.get(c)]
                 if not cls_list or not negs:
                     raise ValueError("semantic.prompts(클래스별) 와 negatives 가 필요합니다")
@@ -190,6 +196,8 @@ class HazardVerifier:
                     "classes": cls_list,
                     "pos": {c: te(prompts[c]) for c in cls_list},
                     "neg": te(negs),
+                    "conf": {c: te(v) for c, v in confs.items() if c in cls_list},
+                    "n_conf": sum(len(v) for v in confs.values()),
                     "temp": float(sspec.get("temperature", 100.0)),
                     "n_prompts": {c: len(prompts[c]) for c in cls_list}, "n_neg": len(negs)}
                 self.sem_enc = str(sspec.get("encoder") or (self.encoders[0].name if self.encoders else ""))
@@ -200,6 +208,16 @@ class HazardVerifier:
         # **작은 crop 은 외형 단서를 재지 않는다**(`min_px`). 짧은 변이 이보다 작으면 224 로
         # 키운 CLIP 입력에 볼 것이 없다 — 틀린 확신 대신 '못 잼' 으로 둔다(하천 원거리 60 px).
         self.min_px = int(spec.get("min_px") or 0)
+        # **작은 crop 은 주변을 같이 보여 준다**(`context`, 2026-11-16). 리얼센스 pi6 하천 3 m 에서
+        # 누운 부탄(83x26 px)이 min_px 에 걸려 외형 단서를 하나도 못 재 의심되지 못했다. 같은 crop 을
+        # 물체만 딱 맞게 넣으면 글 설명 부탄 0~10% 인데, 물체 긴 변의 `scale` 배(최소 `floor_px`)
+        # 정사각형으로 주변과 함께 넣으면 69~88% 다. 그래서 짧은 변이 [context.min_px, min_px) 인
+        # crop 은 **글 설명(semantic)만** 주변 창으로 잰다 — 기준 사진(match)은 딱 맞는 crop 으로 만든
+        # 것이라 견주지 않고, 구조(structure)도 주변이 섞이므로 재지 않는다.
+        ctx = spec.get("context") or {}
+        self.ctx = ({"min_px": int(ctx.get("min_px", 16)), "scale": float(ctx.get("scale", 1.6)),
+                     "floor_px": int(ctx.get("floor_px", 64))}
+                    if ctx.get("enabled", False) and self.min_px else None)
         self.ready = self.learned or self.structure or self.semantic is not None
         if log:
             parts = []
@@ -212,9 +230,9 @@ class HazardVerifier:
             if self.structure:
                 parts.append("structure(프로토타입 불필요)")
             if self.semantic:
-                parts.append("semantic(문장 %s · 일반 %d)" % (
+                parts.append("semantic(문장 %s · 일반 %d · 닮은꼴 %d)" % (
                     "/".join("%s %d" % (c, n) for c, n in self.semantic["n_prompts"].items()),
-                    self.semantic["n_neg"]))
+                    self.semantic["n_neg"], self.semantic["n_conf"]))
             elif self.sem_why:
                 parts.append("semantic **빠짐**(%s)" % self.sem_why)
             log("  verify %s%s%s"
@@ -313,6 +331,7 @@ class HazardVerifier:
         # 확신이 높은 것부터 본다 — 상한에 걸려 잘릴 때 **약한 것이 잘리도록**
         want.sort(key=lambda d: -d["conf"])
         crops, keep, reused = [], [], 0
+        ctx_ids = set()                              # 주변 창으로 잰 crop — 글 설명만 센다
         H, W = bgr.shape[:2]
         for d in want:
             x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
@@ -328,7 +347,10 @@ class HazardVerifier:
                 reused += 1
                 continue
             c = bgr[y1:y2, x1:x2]
-            if c.size == 0 or min(c.shape[:2]) < max(8, self.min_px):
+            short = min(c.shape[:2]) if c.size else 0
+            in_ctx = (self.ctx is not None and self.semantic is not None
+                      and self.ctx["min_px"] <= short < self.min_px)
+            if c.size == 0 or (short < max(8, self.min_px) and not in_ctx):
                 d["verify_by"] = None                # 너무 작아 **재지 않는다** (0 이 아니다)
                 own(d)
                 continue
@@ -336,6 +358,12 @@ class HazardVerifier:
                 d["verify_by"] = None                # 이 장의 예산을 넘었다 — 다음 장에서 본다
                 own(d)
                 continue
+            if in_ctx:
+                s = max(self.ctx["scale"] * max(x2 - x1, y2 - y1), self.ctx["floor_px"])
+                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                c = bgr[int(max(0, cy - s / 2)):int(min(H, cy + s / 2)),
+                        int(max(0, cx - s / 2)):int(min(W, cx + s / 2))]
+                ctx_ids.add(id(d))
             crops.append(c)
             keep.append(d)
         if not crops:
@@ -356,12 +384,23 @@ class HazardVerifier:
                 L = np.stack(cols, 1) * S["temp"]
                 P = np.exp(L - L.max(1, keepdims=True))
                 P /= P.sum(1, keepdims=True)
+                look = {}                                       # 클래스 → 닮은꼴일 확률(그 클래스 문장 대 닮은꼴 문장)
+                for j, c in enumerate(S["classes"]):
+                    ce = S["conf"].get(c)
+                    if ce is None:
+                        continue
+                    L2 = np.stack([(emb @ S["pos"][c].T).max(1), (emb @ ce.T).max(1)], 1) * S["temp"]
+                    P2 = np.exp(L2 - L2.max(1, keepdims=True))
+                    look[c] = P2[:, 1] / P2.sum(1)
                 for i, d in enumerate(keep):
                     sem[id(d)] = {c: round(float(P[i, j]), 4) for j, c in enumerate(S["classes"])}
+                    sem[id(d)]["_look"] = {c: round(float(v[i]), 4) for c, v in look.items()}
             if not self.learned:
                 continue
             neg = self._protos(enc.name, "_negative")
             for i, d in enumerate(keep):
+                if id(d) in ctx_ids:
+                    continue                         # 기준 사진은 딱 맞는 crop 으로 만들었다
                 n = float((emb[i] @ neg.T).max()) if neg is not None and len(neg) else 0.0
                 for cls in self.classes:
                     pos = self._protos(enc.name, cls)
@@ -374,13 +413,14 @@ class HazardVerifier:
             by = {}
             for cls in self.classes:
                 rows = per.get((id(d), cls)) or {}
-                if self.structure:
+                if self.structure and id(d) not in ctx_ids:
                     st = self._structure(crops[i], cls)
                     if st is not None:
                         # 학습하지 않은 신호다. margin 과 자릿수를 맞춰 넣되 **출처를 남긴다**
                         rows["structure"] = {"pos": st, "neg": 0.0, "margin": round(st - 0.15, 4),
                                              "learned": False}
                 s = (sem.get(id(d)) or {}).get(cls)
+                lk = ((sem.get(id(d)) or {}).get("_look") or {}).get(cls)
                 if not rows and s is None:
                     continue
                 margins = [r["margin"] for r in rows.values()]
@@ -389,6 +429,10 @@ class HazardVerifier:
                            "models": len(margins), "per_model": rows, "cached": False}
                 if s is not None:
                     by[cls]["semantic"] = s           # 0~1, 그 클래스 문장일 확률
+                if lk is not None:
+                    by[cls]["lookalike"] = lk         # 0~1, 그 클래스보다 닮은꼴 문장에 가까울 확률
+                if id(d) in ctx_ids:
+                    by[cls]["context"] = True        # 주변 창으로 잰 글 설명이다(assess 가 작은 crop 에서도 센다)
             d["verify_by"] = by or None
             own(d)
         self._last = [(tuple(int(v) for v in d["xyxy"]), d["verify_by"])

@@ -52,7 +52,7 @@ output:
 # 파노라마에서는 거리값을 그대로 믿지 않는다.
 devices:
   cam360: {fov_x_deg: null}
-  # ds5 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림(1280x720). 깊이가 아니다 —
+  # pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림(1280x720). 깊이가 아니다 —
   # D455 는 UVC 라 컬러만 /dev/video* 로 나온다. hfov 90 은 **제원값**이고 관측이 아니다:
   # 보정 전에는 거리·좌표의 확정 근거로 쓰지 않는다(선언된 사전정보와 측정값을 구분한다).
   realsense: {fov_x_deg: 90.0}
@@ -367,6 +367,11 @@ models:
       prototypes: /home/khw67/data_stream/models/butane_ref/prototypes.npz
       threads: 8
       min_px: 48                  # crop 짧은 변이 이보다 작으면 임베딩하지 않는다(외형 단서 '못 잼')
+      # **작은 crop 은 주변과 함께**(2026-11-16). 짧은 변이 [context.min_px, min_px) 이면 물체 긴 변의
+      # scale 배(최소 floor_px) 정사각형 창으로 **글 설명만** 잰다(기준 사진·구조는 재지 않는다).
+      # 리얼센스 pi6 하천 3 m 실측: 누운 부탄(83x26 px) 글 설명 딱 맞는 crop 0~10% → 주변 창 69~88%,
+      # 캔과 헷갈림 93~99% → 18~23%. 작은 상자(46 px) 4~6% → 39~55%. 끄려면 enabled: false
+      context: {enabled: true, min_px: 16, scale: 1.6, floor_px: 64}
       max_per_frame: 12            # 이 장의 예산. 넘으면 **확신 낮은 쪽**이 다음 장으로
       cache_iou: 0.7              # 앞 장과 이만큼 겹치는 같은 클래스는 다시 재지 않는다
       structure: true             # 학습하지 않은 구조 서명을 함께 센다(설명 가능한 신호)
@@ -386,11 +391,25 @@ models:
             - a metal aerosol spray can with a plastic cap
             - a cylindrical gas cartridge for a camping stove
             - a butane gas can lying on the ground
+            # **누운 · 물에 뜬 부탄**(2026-11-16): 리얼센스 pi6 하천에서 빨간 부탄이 물 위에 누워 있었다.
+            # 아래 셋을 더해 주변 창 글 설명 62 · 20 → 88 · 69 (같은 두 crop), 캔과 헷갈림 51~72 → 18~23
+            - a red butane gas canister lying on its side
+            - a long red metal gas can floating in water
+            - a portable stove gas canister floating in a river
           wooden_box_mine:
             - a photo of a small wooden box
             - a rectangular plain wooden crate
             - a wooden box mine
             - a small wooden box lying on the ground
+            # **밝은 원목**(2026-11-16): 리얼센스 pi6 에서 또렷한 시연 상자가 글 설명 8~49 점이었다.
+            # 아래 셋을 더해 25 → 73 · 49 → 79 (같은 crop 평균). 스티로폼도 87 → 92 로 오르지만
+            # 그것은 크기 상한이 거른다
+            - a light-colored pine wood box
+            - an unpainted wooden block
+            - a small box made of plywood
+            # **물에 뜬 상자**(2026-11-16): 리얼센스 pi6 하천 — 그물 옆 물 위에 반쯤 잠긴 시연 상자
+            - a small wooden box floating in water
+            - a wooden box half submerged in a river
         negatives:
           - a photo of an object
           - a household item
@@ -406,6 +425,22 @@ models:
           - a plastic box
           - a plant
           - water
+        # **닮은꼴**(2026-11-16) — `{클래스: [문장]}`. 위험물의 **알려진 닮은꼴**이다(장면 물건이 아니다 —
+        # 탐지 어휘에도 이미 있다: beverage_can 을 부탄으로 합친다). 요구: "캔과 부탄가스 혼동" →
+        # "비슷하게 생긴 캔도 후보이되 점수는 더 낮도록".
+        # semantic 확률에는 **넣지 않는다.** 처음엔 열 하나로 넣었는데 진짜 부탄의 확률도 90 → 59 로
+        # 깎이고 장마다 49~72 로 흔들려, 하한 60 아래로 떨어진 장에서 부탄이 접기에 지워졌다.
+        # 지금은 그 클래스 문장 대 닮은꼴 문장 **둘만의** 확률(lookalike)을 내서 **점수만 깎는다**
+        # (판정은 감점 전 점수 — hazard_cues.json decision.lookalike). 실측(리얼센스 pi6 두 장면):
+        #   진짜 부탄 lookalike 47~51% · 음료 캔 97~99%
+        # 스티로폼 문장은 넣지 않는다 — 시연 상자(밝은 원목)와 CLIP 에서 가까워 진짜 상자도 깎였다.
+        # 스티로폼은 **크기**로 거른다(decision.size_veto).
+        confusers:
+          butane_canister:
+            - a soda can
+            - a beer can
+            - an aluminum beverage can
+            - a drink can
       models:
         - name: clip_b32
           # **fp32 를 GPU 에서**(2026-11-13). int8 양자화본은 CPU 에서 12 crop 542 ms 였고(GPU 에서는

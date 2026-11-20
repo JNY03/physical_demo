@@ -43,12 +43,19 @@
   },
   "appearance": {
    "min_px": 48,
-   "_note": "crop 짧은 변이 이보다 작으면 semantic·match·material 을 '못 잼' 으로 둔다(0 점이 아니다) — 원거리에서 틀린 확신을 내지 않게"
+   "_note": "crop 짧은 변이 이보다 작으면 semantic·match·material 을 '못 잼' 으로 둔다(0 점이 아니다) — 원거리에서 틀린 확신을 내지 않게",
+   "context_min_px": 16,
+   "_context": "2026-11-16 예외: verify.context 가 주변 창으로 글 설명을 잰 crop 은 짧은 변이 이 값 이상이면 semantic·material 을 센다(match 는 아니다). 리얼센스 하천 3 m 누운 부탄 26 px 가 그 자리다"
   },
   "class": {
    "enabled": true,
    "max_candidates": 4,
-   "_formula": "pct = confidence x 100"
+   "_formula": "pct = confidence x 100",
+   "aliases": {"wooden_box_mine": ["block", "wooden block", "wood block", "wooden box", "wooden crate", "crate", "cigar box"]},
+   "exclude": {"wooden_box_mine": ["autumn leave", "autumn leaves", "leaf", "leaves", "dead leaf", "fallen leaf", "maple leaf"],
+               "butane_canister": ["autumn leave", "autumn leaves", "leaf", "leaves", "dead leaf", "fallen leaf", "maple leaf"]},
+   "_exclude": "검출기(프리 arm)가 1위로 이 이름을 대면 그 클래스 점수를 0 으로 둔다(2026-11-16). 리얼센스 하천 낙엽이 주변 창 글 설명·갈색으로 목함지뢰 46~73 · 부탄 63~71 점이 됐다. 물체 이름만 넣는다 — 재질·모양 낱말은 넣지 않는다. 대가: 같은 303 장에서 진짜 부탄을 'autumn leave' 라 부른 장이 2 번 있었다(둘 다 53~55 점, 의심 아님)",
+   "_aliases": "같은 뜻의 다른 낱말(2026-11-16). 프리 arm 이 또렷한 원목 상자를 'block 0.92' 라 불렀는데 class 가 0 이었다. 후보 표(votes) 중 이 낱말로 불린 최고 확신을 그 클래스의 class 단서로 센다. 'storage box' 처럼 넓은 낱말은 넣지 않는다"
   },
   "size": {
    "enabled": false,
@@ -87,6 +94,11 @@
    "_note": "**점수로 세지 않는다.** 깊이 지도가 없다는 사실은 증거가 아니다. 없으면 줄도 안 난다."
   }
  },
+ "shape": {
+  "_note": "형상 단서 범위(코드 SHAPE_DEFAULT 를 클래스별로 덮는다). 여기 없는 클래스는 코드 값",
+  "butane_canister": {"aspect": [1.6, 4.2], "solidity_min": 0.90, "rect_fill_min": null},
+  "_butane_canister": "2026-11-16 종횡비 상한 3.4 → 4.2. 리얼센스 하천 3 m 에서 누운 부탄(물에 반쯤 잠김)의 마스크 종횡비가 3.6~3.9 였다 — 실물 21 x 7 cm(3.0)에 뚜껑과 수면선이 더해진다. 하한·볼록 채움은 코드 기본값 그대로"
+ },
  "card": {
   "thumbnail_below_frame_ratio": 0.02,
   "_note": [
@@ -117,6 +129,18 @@
    "  재현율 99~100% · 오검출 장당 0.01 (접기 전 30 에서 5.9). 쉬운 장면에서 고른 값이라 현장 자료로 다시 본다."
   ],
   "weights": {"semantic": 0.30, "match": 0.20, "shape": 0.15, "class": 0.15, "material": 0.10, "structure": 0.10},
+  "lookalike": {"enabled": true, "from": 0.5, "max_penalty": 15, "shown": {"butane_canister": "like a drink can"}},
+  "_lookalike": ["**닮은꼴 감점**(2026-11-16). 요구: '비슷하게 생긴 캔도 후보이되 점수는 더 낮도록'.",
+                 "판정(의심 여부·하한)은 감점 **전** 점수로 하고, 보이는 점수만 깎는다 — 캔은 부탄 후보로 남되 낮게 보인다.",
+                 "lookalike = 그 클래스 문장 대 닮은꼴 문장(vision_config semantic.confusers)의 확률. from 이하는 0, 1 에서 max_penalty.",
+                 "리얼센스 pi6 실측: 진짜 부탄 47~51% (감점 0~0.3) · 음료 캔 97~99% (감점 14~15)."],
+  "size_veto": {"enabled": true, "max_over_diagonal": 2.0},
+  "_size_veto": ["**너무 크면 그 물체가 아니다**(2026-11-16). 상자의 짧은 변(실측 mm, metric depth)이 규격 직육면체 대각선의",
+                 "이 배수를 넘으면 그 클래스 점수를 0 으로 둔다 — 어느 방향에서 보든 겉보기 폭은 대각선을 못 넘는다.",
+                 "size 단서(점수)를 끈 이유(비스듬하면 커진다)와 부딪히지 않는다: 한쪽(너무 큼)만 묻고 대각선이 기울기를 덮는다.",
+                 "리얼센스 pi6 실측: 스티로폼 상자 짧은 변 455 mm = 시연 상자 대각선 172 의 2.65 배(목함지뢰 47 점 오판) → 거부.",
+                 "진짜 상자 116 mm(0.67 배). metric depth 는 캔을 실물의 1.35 배로 쟀다 — 2 배는 그 오차를 덮는다.",
+                 "실물 목함지뢰 규격(200x90x55, 대각선 226)으로 바꾸면 상한도 같이 커진다(452 mm)."],
   "min_evidence": 0.45,
   "_min_evidence": "잰 단서 무게 / 전체 무게가 이보다 작으면 의심하지 않는다 — 작은 부품이 이름 0 · 형상 100 만으로 50 점이 됐다",
   "min_score": 45,

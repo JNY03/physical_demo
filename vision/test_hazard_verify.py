@@ -166,3 +166,32 @@ def test_a_declared_bank_wins_over_the_bundled_one(tmp_path):
                            "prototypes": str(mine)}, log=None)
     assert v.bank_bundled is False
     assert set(v.bank) == {"clip_b32/butane_canister"}
+
+
+def test_a_small_crop_is_measured_on_a_context_window_for_semantic_only():
+    """verify.context(2026-11-16): 짧은 변이 [context.min_px, min_px) 이면 주변 창으로 글 설명만 잰다."""
+    v = stub(min_px=48, context={"enabled": True, "min_px": 16, "scale": 1.6, "floor_px": 64})
+    seen = []
+
+    class Enc:
+        name = "clip_b32"
+
+        def __call__(self, crops):
+            seen.extend(c.shape[:2] for c in crops)
+            e = np.zeros((len(crops), 4), np.float32)
+            e[:, 0] = 1.0
+            return e
+    one = np.array([[1.0, 0, 0, 0]], np.float32)
+    v.encoders, v.learned, v.ready, v.sem_enc = [Enc()], False, True, "clip_b32"
+    v.semantic = {"classes": ["butane_canister"], "pos": {"butane_canister": one},
+                  "neg": np.array([[0, 1.0, 0, 0]], np.float32), "conf": {}, "temp": 100.0}
+    v.ctx = {"min_px": 16, "scale": 1.6, "floor_px": 64}
+    dets = [{"name": "unconfirmed", "conf": 0.2, "xyxy": [100, 100, 183, 126]},   # 83x26: 주변 창
+            {"name": "unconfirmed", "conf": 0.1, "xyxy": [10, 10, 20, 20]}]      # 10 px: 여전히 안 잰다
+    v.candidates = ("unconfirmed",)
+    v(np.zeros((300, 300, 3), np.uint8), dets)
+    assert seen and min(seen[0]) >= 64                                # 83 x 1.6 = 133 px 정사각 창
+    by = dets[0]["verify_by"]["butane_canister"]
+    assert by["context"] is True and by["semantic"] > 0.9
+    assert "structure" not in by["per_model"]                         # 주변이 섞인 창으로 구조를 재지 않는다
+    assert dets[1].get("verify_by") is None

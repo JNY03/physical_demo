@@ -131,7 +131,7 @@ DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",  
            "drone2")                                                              # 둘째 드론 ds5 x500-002 2026-11-15 (DS 10012)
 MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
-                  "pi6": "realsense", "ds5": "realsense", "rs": "realsense", "d455": "realsense",
+                  "pi6": "realsense", "rs": "realsense", "d455": "realsense",
                   "slice": "cam360_slice"}
 MODEL_ALIASES = {"yoloe-pf": "yoloe", "yoloe_pf": "yoloe",
                  "moge": "moge2_aerial", "moge2": "moge2_aerial", "moge2-aerial": "moge2_aerial",
@@ -1817,7 +1817,8 @@ class RiverRunner:
     def _drop_nested(self, dets):
         """**부품은 전체에 접는다** — 큰 상자 안에 `nest_ratio` 이상 들어간 상자를 지운다.
 
-        * 의심되지 않은 상자: 어떤 큰 상자 안에 들면 지운다(통의 라벨·마개).
+        * 의심되지 않은 상자: **의심된** 큰 상자 안에 들면 지운다(통의 라벨·마개). 의심 아닌 큰 상자
+          (그물·해먹 같은 장면 상자)는 안의 물체를 지우지 않는다 — 각각 제로샷 검출로 남는다(2026-11-16).
         * 같은 클래스로 의심된 것끼리 포개지면 **한 번에** 고른다(2026-11-13). 의심된 후보를
           (그 클래스 이름으로 불렸는가, 넓이) 순으로 세우고, 앞서 남긴 것과 포개진 것은 지운다 —
           이름 붙은 것과 전체가 부품보다 먼저 자리를 잡는다.
@@ -1836,8 +1837,12 @@ class RiverRunner:
         def sus(d):
             return (d.get("assess") or {}).get("suspect")
         gone = set()
-        for d in dets:                                # 의심 아닌 부품
-            if not sus(d) and any(o is not d and area(o["xyxy"]) > area(d["xyxy"])
+        # 의심 아닌 부품은 **의심된 위험물 안에서만** 접는다(2026-11-16). 예전에는 어떤 큰 상자든
+        # 안에 든 것을 지웠다 — 리얼센스 하천에서 그물 · 해먹(화면 1/4) 상자가 그 안의 나무 상자 ·
+        # 부탄 · 캔 후보를 장마다 17~28 개 지우고 자신은 크기 상한으로 거부됐다. 의심 아닌 물체도
+        # 각각 제로샷 검출로 남아야 한다 — 큰 상자가 전체를 대신하지 않는다.
+        for d in dets:
+            if not sus(d) and any(o is not d and sus(o) and area(o["xyxy"]) > area(d["xyxy"])
                                   and nested(d["xyxy"], o["xyxy"]) for o in dets):
                 gone.add(id(d))
         # (그 이름으로 불렸는가, 넓이) — 이름 붙은 것이 먼저, 그다음 **큰 것**(전체)이 부품보다 먼저.
@@ -2060,17 +2065,24 @@ class AssessSmoother:
             if not a or tid is None:
                 continue
             raw = a.get("scores") or {}
+            # 판정은 **감점 전 점수**(gate_scores, 닮은꼴 감점 2026-11-16)로, 보이는 점수는 감점 뒤로.
+            # 둘 다 같은 식으로 평활한다. gate 가 없는 옛 기록은 scores 를 그대로 쓴다
+            rawg = a.get("gate_scores") or raw
             m = self.mem.get(tid)
-            if m is None:
-                sm = dict(raw)
-            else:
-                sm = {}
-                for c, v in raw.items():
-                    old = m["s"].get(c)
-                    sm[c] = old if v is None else (v if old is None else
-                                                   self.alpha * v + (1 - self.alpha) * old)
-            best = max((c for c in sm if sm[c] is not None), key=lambda c: sm[c], default=None)
-            top = sm.get(best) if best else None
+
+            def ema(cur, prev):
+                if prev is None:
+                    return dict(cur)
+                out = {}
+                for c, v in cur.items():
+                    old = prev.get(c)
+                    out[c] = old if v is None else (v if old is None else
+                                                    self.alpha * v + (1 - self.alpha) * old)
+                return out
+            sm = ema(raw, m["s"] if m else None)
+            sg = ema(rawg, m.get("g") if m else None)
+            best = max((c for c in sg if sg[c] is not None), key=lambda c: sg[c], default=None)
+            top = sg.get(best) if best else None
             Ts = a.get("min_scores") or {}
             T = float(Ts.get(best, a.get("min_score") or 0))
             prev = m["sus"] if m else None
@@ -2080,15 +2092,18 @@ class AssessSmoother:
                 sus = best if top >= T - self.hyst else None
             elif top >= T:
                 sus = best
-            elif prev and sm.get(prev) is not None and sm[prev] >= float(
+            elif prev and sg.get(prev) is not None and sg[prev] >= float(
                     Ts.get(prev, a.get("min_score") or 0)) - self.hyst:
                 sus = prev
             else:
                 sus = None
-            self.mem[tid] = {"s": sm, "sus": sus, "n": self.n}
+            self.mem[tid] = {"s": sm, "g": sg, "sus": sus, "n": self.n}
+            shown = sm.get(sus or best)
             d["assess"] = dict(a, raw_scores=raw, smoothed=True, suspect=sus,
                                min_score=float(Ts.get(sus or best, a.get("min_score") or 0)),
-                               score=None if top is None else round(float(top), 1),
+                               score=None if shown is None else round(float(shown), 1),
+                               gate_scores={c: None if v is None else round(float(v), 1)
+                                            for c, v in sg.items()},
                                scores={c: None if v is None else round(float(v), 1)
                                        for c, v in sm.items()})
         for k in [k for k, v in self.mem.items() if self.n - v["n"] > self.max_missed]:
