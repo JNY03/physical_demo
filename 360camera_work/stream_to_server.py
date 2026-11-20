@@ -9,6 +9,15 @@ stream_to_server.py — pro2_auto_bg.py 의 영상판 (사진 촬영 → 실시�
   같은 /upload_pano 에 같은 equirect.jpg 를 올리므로 live.py 감시 루프가 그대로 집어간다.
   (2026-10-01 부터 같은 사진을 10001 데이터 스트림에도 보낸다 — 아래 [2026-10-01 수정])
 
+[2026-11-16 수정 — WSL 에서 카메라에 못 닿으면 Windows 를 거쳐 간다]
+  카메라가 USB 랜(192.168.100.x)에 붙어 있으면 Windows 는 닿지만 WSL(NAT)은 그쪽으로 못 나간다
+  (ping · TCP 모두 시간 초과 → 「Max retries exceeded … timed out」). Windows 관리자 PowerShell 에
+       netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=20000 connectaddress=192.168.100.124 connectport=20000
+       netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=1935  connectaddress=192.168.100.124 connectport=1935
+       New-NetFirewallRule -DisplayName "WSL 360cam proxy" -Direction Inbound -Protocol TCP -LocalPort 20000,1935 -InterfaceAlias "vEthernet (WSL (Hyper-V firewall))" -Action Allow
+  를 한 번 넣어 두면, --ip 를 안 줬을 때 카메라(:20000)에 바로 못 닿고 WSL 이면
+  Windows 쪽 주소(기본 게이트웨이, 재부팅마다 바뀐다)로 대신 붙는다. --ip 를 주면 그 주소만 쓴다.
+
 [2026-11-11 수정 — GPS · 배터리 · 온도를 상태로 보낸다]
   카메라에 GPS 수신기가 있다 (camera._queryGpsStatus: state 1 = 인식, fix_type 0 = 위치 없음).
   heartbeat 가 1초마다 받는 /osc/state 응답(배터리 · 온도 · 저장공간)과 GPS 조회 결과를 묶어
@@ -478,11 +487,52 @@ class ExtraUploader:
 
 
 # ── main ─────────────────────────────────────────────────
+def _tcp_ok(host, port=20000, timeout=2.0):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _wsl_windows_host():
+    """WSL(NAT) 이면 Windows 쪽 주소(기본 게이트웨이), 아니면 None"""
+    try:
+        with open("/proc/version") as f:
+            if "microsoft" not in f.read().lower():
+                return None
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                p = line.split()
+                if p[1] == "00000000" and int(p[3], 16) & 2:   # 기본 경로 · 게이트웨이 있음
+                    return socket.inet_ntoa(bytes.fromhex(p[2])[::-1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def resolve_camera_ip(ip):
+    """--ip 를 안 줬으면 카메라에 바로 붙어 보고, 안 되면 WSL 에서 Windows portproxy 를 거친다"""
+    if ip:
+        return ip
+    if _tcp_ok(DEF_IP):
+        return DEF_IP
+    host = _wsl_windows_host()
+    if host and _tcp_ok(host):
+        print("[연결] %s 에 바로 못 닿아 Windows portproxy(%s)를 거쳐 간다" % (DEF_IP, host))
+        return host
+    if host:
+        print("[연결] WSL 에서 %s 에 못 닿고 Windows portproxy(%s:20000)도 없다 — "
+              "파일 머리의 [2026-11-16 수정] netsh 명령을 Windows 관리자 PowerShell 에 넣는다" % (DEF_IP, host))
+    return DEF_IP
+
+
 def main():
     global CMD_URL, STATE_URL, hb_thread, _running
 
     ap = argparse.ArgumentParser(description="Pro2 실시간 스트림 → 서버 업로드")
-    ap.add_argument("--ip", default=DEF_IP)
+    ap.add_argument("--ip", default=None,
+                    help="카메라 주소 (안 주면 %s, WSL 에서 못 닿으면 Windows portproxy 를 거친다)" % DEF_IP)
     ap.add_argument("--upload", action="append", default=None, metavar="URL",
                     help="보낼 곳. 여러 번 주면 같은 사진을 모두에 보낸다. "
                          "안 주면 %s 와 %s 두 곳" % (DEF_UPLOAD, DEF_UPLOAD_STREAM))
@@ -509,6 +559,7 @@ def main():
     # 첫 번째(7866)는 예전처럼 응답을 기다리고, 두 번째(10001)부터는 따로 보낸다.
     # --upload 를 주면 기본 두 곳 대신 준 곳들로만 보낸다.
     uploads = args.upload or [DEF_UPLOAD, DEF_UPLOAD_STREAM]
+    args.ip = resolve_camera_ip(args.ip)
 
     CMD_URL   = "http://%s:20000/osc/commands/execute" % args.ip
     STATE_URL = "http://%s:20000/osc/state" % args.ip

@@ -10,8 +10,9 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
   드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
   /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
+2026-11-16 · 리얼센스를 다시 **ds5 에서 pi6 로**(10005). 별칭 ds5 는 뺐다 — ds5 에는 이제 drone2 만 있다.
 2026-11-15 · 둘째 드론 drone2(10012). ds5 의 drone-agent(x500-002)가 pi3 와 같은 모양(:8890/api/frame · MQTT 1883)으로
-  내므로 drone_video_loop · start_mqtt 를 그대로 쓴다. ds5 는 리얼센스(10005)와 같은 기기다 — 포트가 달라 겹치지 않는다.
+  내므로 drone_video_loop · start_mqtt 를 그대로 쓴다. (이때 ds5 에 리얼센스도 있었다 — 11-16 pi6 로 옮김)
 2026-11-13 · 모듈 카메라 파이 셋째 pi13(10011 — 10010 은 다른 프로그램이 쓰고 있었다). pi11·pi12 와 같은 기기·같은 파일이다.
 2026-11-12 · 모듈 카메라 파이 둘 pi11(10008) · pi12(10009). CSI 라 /dev/video* 가 베이어 RAW 이고
   cv2.VideoCapture 로 못 받는다 — 파이 쪽 rpicam-vid 가 MJPEG 로 내므로 robot_video_loop 를 그대로 쓴다.
@@ -35,8 +36,8 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   10002 drone   영상: pi3 :8890/api/frame?cam=0 (Arducam) 롱폴   상태: pi3 MQTT :1883 전체 구독
   10003 robot1  영상: pi7 :8090/stream/1 을 계속 읽는다        상태: pi7 MQTT :1883 전체 구독
   10004 robot2  영상: pi1 :8090/stream/1 을 계속 읽는다        상태: pi1 MQTT :1883 전체 구독
-  10005 realsense 영상: ds5 :8090/stream/1 을 계속 읽는다      상태: 없음 (리얼센스 쪽은 상태를 내지 않는다)
-                  ds5 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다(깊이가 아니다).
+  10005 realsense 영상: pi6 :8090/stream/1 을 계속 읽는다      상태: 없음 (리얼센스 쪽은 상태를 내지 않는다)
+                  pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다(깊이가 아니다).
                   깊이도 UVC 로는 나온다(/dev/video0 의 Z16). 다만 단위·내부/외부 파라미터·
                   두 스트림 짝맞춤이 스트림에 실려 오지 않아 librealsense 가 있어야 쓸 수 있고,
                   16비트라 이 JPEG 경로로는 못 나른다 — realsense_work/README.md 를 본다
@@ -59,8 +60,7 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
                   pi11·pi12 와 같다. 리본이 접촉 불량이면 센서가 아예 안 보이거나
                   보이고도 스트리밍만 실패한다 — picam_work/README.md 의 증상 표를 본다.
   10012 drone2  영상: ds5 :8890/api/frame?cam=0 롱폴            상태: ds5 MQTT :1883 전체 구독
-                  둘째 드론(x500-002). drone 과 같은 drone-agent · 같은 모양이다. ds5 는 리얼센스(10005)도
-                  내는 기기라 주소가 같다 — 리얼센스는 :8090, 드론은 :8890 이라 겹치지 않는다.
+                  둘째 드론(x500-002). drone 과 같은 drone-agent · 같은 모양이다.
 
 각 포트에 열리는 주소
   POST /upload_pano   360 업로드 (pano_receiver 와 같은 모양: 폼 칸 + file)
@@ -223,7 +223,7 @@ SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
            "drone2": 10012}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "drone2": "drone2", "x500-002": "drone2", "robot1": "robot1", "robot2": "robot2",
-           "realsense": "realsense", "pi6": "realsense", "ds5": "realsense", "rs": "realsense",
+           "realsense": "realsense", "pi6": "realsense", "rs": "realsense",
            "d455": "realsense",
            "cam360_slice": "cam360_slice", "slice": "cam360_slice",
            "a2": "a2", "unitree_a2": "a2",
@@ -250,7 +250,7 @@ def load_default_hosts():
              "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
              "drone": None,          # pi3 (drone-agent 8890 · mosquitto 1883)
              "drone2": None,         # ds5 (drone-agent 8890 · mosquitto 1883 — x500-002)
-             "realsense": None,      # ds5 (realsense_mjpeg.py 8090 · 상태 없음)
+             "realsense": None,      # pi6 (realsense_mjpeg.py 8090 · 상태 없음)
              "a2": None,             # pi10 (a2-bridge 카메라 8090 · mosquitto 1883/9001)
              "pi11": None,           # pi11 (picam_mjpeg.py 8090 · 브로커 없음)
              "pi12": None,           # pi12 (picam_mjpeg.py 8090 · 브로커 없음)
@@ -531,12 +531,22 @@ class RedisSink:
 VIEW_DET_KEYS = ("bbox", "label", "lead", "confidence", "track_id", "dist", "assess", "votes", "arms")
 
 
+def _view_det(d):
+    """검출 하나에서 화면이 쓰는 칸만. **후보(의심)가 아니면 근거 카드(assess)를 넘기지 않는다**
+    (2026-11-16) — 가시화는 assess 가 있는 검출마다 마우스를 올리면 카드를 띄운다. 의심 아닌
+    물체에까지 카드가 떠 화면을 가렸다. 가시화는 고치지 않고 여기서 거른다. 디스크 results.jsonl ·
+    Redis vision_stream 의 기록은 그대로다(근거를 뒤에서 볼 수 있게)."""
+    out = {k: d.get(k) for k in VIEW_DET_KEYS if k in d}
+    if not (out.get("assess") or {}).get("suspect"):
+        out.pop("assess", None)
+    return out
+
+
 def view_result(res):
     """비전 결과에서 웹 화면(/vision/view)이 쓰는 칸만 남긴다."""
     return {"n": res.get("n"), "width": res.get("width"), "height": res.get("height"),
             "model": res.get("model"),
-            "detections": [{k: d.get(k) for k in VIEW_DET_KEYS if k in d}
-                           for d in (res.get("detections") or [])]}
+            "detections": [_view_det(d) for d in (res.get("detections") or [])]}
 
 
 #: GET /vision/view — 비전 오버레이 + **근거 카드**(2026-11-13). 물체 위에 마우스를 올리면
@@ -1123,6 +1133,16 @@ class Server(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)  # HTTPServer 의 getfqdn(느릴 수 있음)을 건너뛴다
         host, port = self.server_address[:2]
         self.server_name, self.server_port = str(host), port
+
+    def handle_error(self, request, client_address):
+        """**받는 쪽이 먼저 끊은 것은 오류가 아니다**(2026-11-16). 가시화 노트북(tailnet 중계 경유)이
+        /frame 롱폴을 기다리다 끊거나 큰 장(360 파노라마 ~1 MB)을 받는 중 다음 요청으로 넘어가면
+        wfile.write 에서 BrokenPipe/ConnectionReset 이 나 10초 보고 사이에 트레이스백이 쌓였다.
+        서버는 다음 요청을 그대로 받으므로 조용히 넘기고, 그 밖의 예외만 예전처럼 찍는다."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def make_handler(src, vision=None):
@@ -1755,7 +1775,7 @@ def main():
     ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
                     help="로봇2 파이(pi1) 주소. 기본 hosts.local.json / PD_HOST_* 값")
     ap.add_argument("--realsense", default=DEFAULT_HOST["realsense"], metavar="주소",
-                    help="ds5 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
+                    help="pi6 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
     ap.add_argument("--realsense-cam", type=int, default=1, metavar="번호",
                     help="리얼센스 MJPEG 경로 번호 (기본 1 — 리얼센스 쪽은 번호를 무시한다)")
     ap.add_argument("--a2", default=DEFAULT_HOST["a2"], metavar="주소",
@@ -1893,7 +1913,7 @@ def main():
                 video = "http://%s:%d/api/frame?cam=%d" % (host, DRONE_VIDEO_PORT, DRONE_CAM)
                 pulls.append((drone_video_loop, (s, host, DRONE_CAM), s, host))
             elif s.name == "realsense":
-                # ds5 의 realsense_mjpeg.py 가 로봇과 **같은 모양**으로 낸다 — 풀러를 새로 만들지 않는다
+                # pi6 의 realsense_mjpeg.py 가 로봇과 **같은 모양**으로 낸다 — 풀러를 새로 만들지 않는다
                 cam = args.realsense_cam
                 video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, cam)
                 pulls.append((robot_video_loop, (s, host, cam), s, host))
