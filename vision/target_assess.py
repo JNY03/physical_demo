@@ -46,6 +46,39 @@ FEATURE_SPAN = 0.05       # 특징 사전 %: 하한 −0.05 → 0, 하한 → 50
 OVD_ASSOC_IOU, OVD_ASSOC_CONTAIN = 0.30, 0.7    # main ASSOCIATION_IOU_THR · CONTAINMENT_THR
 DEFAULT_MIN_EVIDENCE = 0.45
 LOOKALIKE_FROM, LOOKALIKE_MAX = 0.5, 15.0       # river decision.lookalike 와 같은 모양
+#: 비슷한 이름(중심 명사가 같은 prompt-free 이름, 예: chair ← electric chair)의 확신에 곱하는 값. **선언이다** —
+#: 같은 물건을 다르게 부른 것이지만 그 이름이 정말 그 물건인지는 확신만큼 믿지 않는다
+SIMILAR_WEIGHT = 0.7
+ARM_SHOWN = {"yoloe": "text", "yoloe_free": "free", "yolo_world": "yolo_world", "grounding_dino": "gdino"}
+
+
+def detector_support(d, ovd_boxes):
+    """탐지기 근거 — 같은 자리를 이 대상으로 부른 탐지기마다 확신 하나(비슷한 이름은 0.7 배, OVD 는 겹친 상자의 최고)를
+    noisy-OR 로 모은다: 1 − Π(1 − c). 여러 탐지기가 동의할수록 오르고, 하나만 말하면 그 확신이다.
+    → (%, 설명, OVD 최고 확신을 낸 arm 이름 또는 None)"""
+    parts = []
+    for arm, words in (d.get("_by_arm") or {}).items():
+        exact = [(w, c) for w, (c, sim) in words.items() if not sim]
+        similar = [(w, c) for w, (c, sim) in words.items() if sim]
+        if exact:
+            w, c = max(exact, key=lambda t: t[1])
+            parts.append((c, "%s %s %.2f" % (ARM_SHOWN.get(arm, arm), w, c)))
+        elif similar:
+            w, c = max(similar, key=lambda t: t[1])
+            parts.append((c * SIMILAR_WEIGHT, "%s ~%s %.2f×%.1f" % (ARM_SHOWN.get(arm, arm), w, c, SIMILAR_WEIGHT)))
+    if not parts:
+        parts.append((float(d["conf"]), "%s %.2f" % (d.get("lead") or d["name"], d["conf"])))
+    best_ovd = {}
+    for o in ovd_boxes:
+        if _iou(d["xyxy"], o["xyxy"]) >= OVD_ASSOC_IOU or _contain(d["xyxy"], o["xyxy"]) >= OVD_ASSOC_CONTAIN:
+            if o["conf"] > best_ovd.get(o["arm"], 0.0):
+                best_ovd[o["arm"]] = o["conf"]
+    for arm, c in sorted(best_ovd.items()):
+        parts.append((c, "%s %.2f" % (ARM_SHOWN.get(arm, arm), c)))
+    miss = 1.0
+    for c, _t in parts:
+        miss *= (1.0 - max(0.0, min(1.0, c)))
+    return 100.0 * (1.0 - miss), " · ".join(t for _c, t in parts), (max(best_ovd, key=best_ovd.get) if best_ovd else None)
 
 
 def _iou(a, b):
@@ -273,10 +306,10 @@ class TargetEvidence:
         def add(key, pct, text, passed=None):
             rows.append([key, None if pct is None else round(float(pct), 1), text, cues[key], passed])
 
-        # 탐지기 이름 (확신 그대로)
+        # 탐지기 — 텍스트 · prompt-free(비슷한 이름은 0.7 배) · OVD 를 noisy-OR 로
         if "class" in cues:
-            src = d.get("lead") or t.get("shown", t["name"])
-            add("class", 100.0 * float(d["conf"]), "%s %.2f" % (src, d["conf"]))
+            pct, txt, _arm = detector_support(d, ovd_boxes)
+            add("class", pct, txt)
         # 글 설명 — 대상 문장 대 일반 문장의 확률
         if "semantic" in cues:
             if p.sem is None or emb is None:
@@ -323,23 +356,13 @@ class TargetEvidence:
                 full = float(t.get("colour_full", 0.35))
                 pct = 100.0 * min(1.0, frac / full)
                 add("colour", pct, " · ".join("%s %.2f" % kv for kv in per.items()), passed=pct >= 50)
-        # OVD 동의 · 짝 IoU
-        if "ovd_agree" in cues or "ovd_pair_iou" in cues:
-            best_c, best_arm, best_iou = 0.0, None, 0.0
-            for o in ovd_boxes:
-                iou = _iou(box, o["xyxy"])
-                best_iou = max(best_iou, iou)
-                if (iou >= OVD_ASSOC_IOU or _contain(box, o["xyxy"]) >= OVD_ASSOC_CONTAIN) and o["conf"] > best_c:
-                    best_c, best_arm = o["conf"], o["arm"]
-            if "ovd_agree" in cues:
-                add("ovd_agree", 100.0 * best_c,
-                    ("%s %.2f" % (best_arm, best_c)) if best_arm else "no OVD box here",
-                    passed=best_arm is not None)
-            if "ovd_pair_iou" in cues:
-                mn = float(t.get("pair_iou_min", 0.42))
-                ok = best_iou >= mn
-                add("ovd_pair_iou", 100.0 if ok else 0.0, "pair IoU %.2f %s %.2f" % (best_iou, ">=" if ok else "<", mn),
-                    passed=ok)
+        # OVD 짝 IoU (main 2026-09-15) — 동의 자체는 탐지기 근거에 들어갔다
+        if "ovd_pair_iou" in cues:
+            best_iou = max([_iou(box, o["xyxy"]) for o in ovd_boxes] + [0.0])
+            mn = float(t.get("pair_iou_min", 0.42))
+            ok = best_iou >= mn
+            add("ovd_pair_iou", 100.0 if ok else 0.0, "pair IoU %.2f %s %.2f" % (best_iou, ">=" if ok else "<", mn),
+                passed=ok)
         # CLIP 색 · 모양 (main 게이트)
         if "clip_colour" in cues:
             if p.colour is None or emb is None:

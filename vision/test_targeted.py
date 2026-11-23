@@ -189,13 +189,26 @@ def test_veto_zeroes_score():
     assert a["score"] == 0.0 and a["suspect"] is None and a["vetoed"]
 
 
-def test_ovd_agreement_and_pair_iou():
-    t = _target({"class": "score", "ovd_agree": "score", "ovd_pair_iou": "gate"},
-                weights={"class": 0.5, "ovd_agree": 0.5}, pair_iou_min=0.42)
+def test_detector_cue_merges_text_free_similar_and_ovd():
+    """탐지기 근거 = 텍스트 · prompt-free · 비슷한 이름(0.7 배) · OVD 의 noisy-OR (2026-11-23)."""
+    t = _target({"class": "score"}, weights={"class": 1.0})
+    by_arm = {"yoloe": {"chair": (0.20, False)}, "yoloe_free": {"electric chair": (0.56, True)}}
+    ovd = {"thing": [{"xyxy": [0, 0, 40, 60], "conf": 0.45, "arm": "yolo_world"}]}
+    a = _run(t, conf=0.20, ovd=ovd, _by_arm=by_arm)
+    want = 100 * (1 - (1 - 0.20) * (1 - 0.56 * ta.SIMILAR_WEIGHT) * (1 - 0.45))
+    assert abs(a["score"] - want) < 0.1
+    row = a["cards"]["thing"]["rows"][0]
+    assert row[0] == "class" and "~electric chair" in row[2] and "yolo_world" in row[2]
+    # 정확한 이름이 있으면 같은 arm 의 비슷한 이름은 세지 않는다
+    b = _run(t, conf=0.20, _by_arm={"yoloe_free": {"chair": (0.30, False), "electric chair": (0.9, True)}})
+    assert abs(b["score"] - 30.0) < 0.1
+
+
+def test_pair_iou_gate():
+    t = _target({"class": "score", "ovd_pair_iou": "gate"}, weights={"class": 1.0}, pair_iou_min=0.42)
     box = [0, 0, 40, 60]
     near = {"thing": [{"xyxy": [1, 1, 40, 60], "conf": 0.8, "arm": "yolo_world"}]}
-    a = _run(t, box=box, ovd=near)
-    assert a["suspect"] == "thing" and abs(a["score"] - 85) < 1e-6
+    assert _run(t, box=box, ovd=near)["suspect"] == "thing"
     inside_small = {"thing": [{"xyxy": [5, 5, 15, 15], "conf": 0.9, "arm": "grounding_dino"}]}
     b = _run(t, box=box, ovd=inside_small)            # 포함으로는 동의하지만 짝 IoU 는 못 넘는다(main 2026-09-15)
     assert b["suspect"] is None and "ovd_pair_iou" in b["gates_failed"]

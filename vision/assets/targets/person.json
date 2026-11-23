@@ -50,14 +50,12 @@
   "cues": {
     "class": "score",
     "free_arm": "on",
-    "ovd_agree": "score",
     "semantic": "score",
     "dict_features": "score",
     "size_veto": "veto"
   },
   "weights": {
-    "class": 0.4,
-    "ovd_agree": 0.25,
+    "class": 0.65,
     "semantic": 0.2,
     "dict_features": 0.15
   },

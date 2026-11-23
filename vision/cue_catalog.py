@@ -49,7 +49,9 @@ class ProfileError(ValueError):
 #:      requires(대상 파일 칸 — 하나라도 있으면 됨) · detector(쓸 수 있는 탐지기 종류)
 #: role: score 점수 · gate 필수 · veto 거부 · cond 조건(거리 신뢰) · on 켜기만(후보 넓히기·감점)
 CUES = {
-    "class":        {"label": "탐지기 이름", "role": "score", "roles": ("score",), "weight": 0.30,
+    # 탐지기 — YOLOE 텍스트 · prompt-free(같은 이름, 중심 명사가 같은 비슷한 이름은 0.7 배) · OVD(YOLO-World ·
+    # GroundingDINO)가 같은 자리를 이 대상으로 부른 확신을 noisy-OR 로 모은다(2026-11-23: 이름과 OVD 동의를 하나로)
+    "class":        {"label": "탐지기", "role": "score", "roles": ("score",), "weight": 0.50,
                      "needs": [], "requires": [], "detector": ("yoloe_text", "trained")},
     "free_arm":     {"label": "후보 넓히기", "role": "on", "roles": ("on",), "weight": 0.0,
                      "needs": ["yoloe_free"], "requires": ["free_vocab"], "detector": ("yoloe_text",)},
@@ -61,8 +63,6 @@ CUES = {
                      "needs": [], "requires": ["shape", "size_mm"], "detector": ("yoloe_text",)},
     "colour":       {"label": "색상", "role": "score", "roles": ("score", "gate"), "weight": 0.15,
                      "needs": [], "requires": ["colours"], "detector": ("yoloe_text", "trained")},
-    "ovd_agree":    {"label": "OVD 동의", "role": "score", "roles": ("score", "gate"), "weight": 0.20,
-                     "needs": ["ovd"], "requires": [], "detector": ("yoloe_text",)},
     "ovd_pair_iou": {"label": "OVD 짝 IoU", "role": "gate", "roles": ("gate",), "weight": 0.0,
                      "needs": ["ovd"], "requires": ["pair_iou_min"], "detector": ("yoloe_text",)},
     "clip_colour":  {"label": "CLIP 색", "role": "gate", "roles": ("gate", "score"), "weight": 0.10,
@@ -88,7 +88,7 @@ CUES = {
 }
 ROLES = ("score", "gate", "veto", "cond", "on", "off")
 #: 직접 입력(등록하지 않은 이름)에서 쓰는 근거 — 크기·색을 주면 더 붙는다
-DIRECT_ALWAYS = ["class", "free_arm", "semantic", "ovd_agree"]
+DIRECT_ALWAYS = ["class", "free_arm", "semantic"]
 DIRECT_WITH_SIZE = ["shape", "size_veto"]
 DIRECT_WITH_COLOUR = ["colour"]
 DIRECT_MIN_SCORE = 50.0
@@ -512,6 +512,7 @@ def needed_models(resolved, tcfg):
             need.add("trained")
         else:
             need.add("yoloe_text")
+            need.update(ovd_available(tcfg, files, [t]))     # 탐지기 근거에 OVD 확신이 들어간다
         for k in t["cues"]:
             for n in CUES[k]["needs"]:
                 if n == "ovd":

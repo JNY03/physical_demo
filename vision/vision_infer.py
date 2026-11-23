@@ -2173,7 +2173,8 @@ class _TextArm:
 class _FreeArm:
     """YOLOE prompt-free — 자리를 넓힌다. 대상의 free_vocab 에 든 이름만 그 대상으로, 나머지는 버린다."""
 
-    def __init__(self, weight, vocab_map, device, imgsz, conf, max_det, scene_words, scene_min_area):
+    def __init__(self, weight, vocab_map, device, imgsz, conf, max_det, scene_words, scene_min_area, follow=True):
+        """vocab_map: 이름 → (대상, 비슷한 이름인가). 비슷한 이름(중심 명사가 같은 이름)은 탐지기 근거에 0.7 배로 들어간다."""
         from ultralytics import YOLOE
         weight = Path(weight)
         if not weight.is_file():
@@ -2183,6 +2184,9 @@ class _FreeArm:
         names = self.model.names or {}
         self.keep = sorted(int(i) for i, n in names.items() if str(n).lower() in self.vocab_map)
         self.device, self.imgsz, self.conf, self.max_det = device, imgsz, conf, max_det
+        # **프레임 크기 근처로**(2026-11-23) — 464x400 을 1280 으로 키우면 의자를 engineering · forklift 로 불렀다.
+        # 480 에서는 electric chair 0.56 (robot1 실측)
+        self.follow_frame = bool(follow)
         self.scene_words = {str(w).lower() for w in scene_words or []}
         self.scene_min_area = float(scene_min_area)
         self.name = weight.name
@@ -2192,8 +2196,8 @@ class _FreeArm:
         if not self.keep:
             return []
         # classes= 로 NMS 전에 거른다 — 대상과 무관한 이름이 max_det 를 차지하지 않는다
-        r = self.model.predict(bgr, conf=self.conf, imgsz=self.imgsz, max_det=self.max_det, classes=self.keep,
-                               device=self.device, verbose=False)[0]
+        r = self.model.predict(bgr, conf=self.conf, imgsz=_arm_imgsz(self, bgr), max_det=self.max_det,
+                               classes=self.keep, device=self.device, verbose=False)[0]
         names, out, polys = self.model.names or {}, [], _mask_polys(r)
         H, W = bgr.shape[:2]
         if r.boxes is not None and len(r.boxes):
@@ -2202,10 +2206,10 @@ class _FreeArm:
                 free = str(names.get(int(b.cls), "")).lower()
                 if free in self.scene_words and (x2 - x1) * (y2 - y1) >= self.scene_min_area * W * H:
                     continue
-                cls = self.vocab_map.get(free)
-                if cls:
-                    out.append({"cls_name": cls, "prompt": free, "conf": float(b.conf), "xyxy": [x1, y1, x2, y2],
-                                "poly": polys[i] if i < len(polys) else None})
+                hit = self.vocab_map.get(free)
+                if hit:
+                    out.append({"cls_name": hit[0], "prompt": free, "similar": hit[1], "conf": float(b.conf),
+                                "xyxy": [x1, y1, x2, y2], "poly": polys[i] if i < len(polys) else None})
         return out
 
 
@@ -2243,13 +2247,25 @@ class _GdinoArm:
     그대로 남긴다** — main 의 'door 는 라벨이 정확히 door + 점수 0.25 이상' 규칙이 그 글자를 본다."""
 
     def __init__(self, path, labels, owners, device, box_thr=0.15, text_thr=0.15):
-        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
         path = Path(path)
         if not (path / "model.safetensors").is_file():
             raise _ArmMissing("GroundingDINO 스냅샷이 없다: %s" % path)
-        self.proc, self.model = _cached(("gdino", str(path)), lambda: (
-            AutoProcessor.from_pretrained(str(path), local_files_only=True),
-            AutoModelForZeroShotObjectDetection.from_pretrained(str(path), local_files_only=True).to(device).eval()))
+        # depth_track 이 UniDepth 를 위해 넣어 둔 빈 `wandb` 모듈(__spec__ 없음)이 있으면 transformers 가
+        # find_spec('wandb') 에서 ValueError 로 넘어진다(2026-11-23, 거리 측정을 켠 채 문을 더할 때).
+        # 적재하는 동안만 치운다 — UniDepth 쪽은 그대로다
+        stub = sys.modules.get("wandb")
+        if stub is not None and getattr(stub, "__spec__", None) is None:
+            del sys.modules["wandb"]
+        else:
+            stub = None
+        try:
+            from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+            self.proc, self.model = _cached(("gdino", str(path)), lambda: (
+                AutoProcessor.from_pretrained(str(path), local_files_only=True),
+                AutoModelForZeroShotObjectDetection.from_pretrained(str(path), local_files_only=True).to(device).eval()))
+        finally:
+            if stub is not None:
+                sys.modules.setdefault("wandb", stub)
         self.labels = [str(l).lower() for l in labels]
         self.owners = list(owners)
         self.text = ". ".join(self.labels) + "."
@@ -2374,15 +2390,25 @@ class TargetedRunner:
                             log("  targeted %s: prompt-free 어휘에 없는 이름 %s — 뺍니다" % (t["name"], unknown))
                         for n in fv:
                             if n.lower() in vocab:
-                                vmap.setdefault(n.lower(), t["name"])
+                                vmap.setdefault(n.lower(), (t["name"], False))
                         t["_free_vocab_used"] = [n for n in fv if n.lower() in vocab]
+                        # **비슷한 이름** — 중심 명사(마지막 낱말)가 대상의 것과 같은 어휘 이름(chair → electric chair ·
+                        # computer chair). 같은 물건을 다르게 부른 것이라 근거로 받되 0.7 배로(target_assess.SIMILAR_WEIGHT)
+                        heads = {str(x).lower().split()[-1] for x in (t.get("prompts") or [t["name"]]) + list(fv)}
+                        skip = {str(x).lower() for x in (t.get("similar_exclude") or [])}
+                        sim = sorted(n for n in vocab if n.split()[-1] in heads and n not in skip
+                                     and n not in {x.lower() for x in fv})
+                        for n in sim:
+                            vmap.setdefault(n, (t["name"], True))
+                        t["_similar_vocab"] = sim
                         if not t["_free_vocab_used"]:
                             log("  targeted %s: prompt-free 어휘에 비슷한 이름 없음 — 텍스트 문구로만 찾음" % t["name"])
                     if vmap:
                         fc = cfg.get("free") or {}
                         self.arms.append(("yoloe_free", _FreeArm(
                             fw, vmap, device, int(fc.get("imgsz", 1280)), float(fc.get("conf", arm_conf)),
-                            self.max_det, fc.get("scene_words") or [], fc.get("scene_min_area", 0.10))))
+                            self.max_det, fc.get("scene_words") or [], fc.get("scene_min_area", 0.10),
+                            bool(fc.get("imgsz_follow_frame", True)))))
                 except _ArmMissing as exc:
                     self.missing.append(("yoloe_free", str(exc)))
         else:
@@ -2398,7 +2424,7 @@ class TargetedRunner:
                 log("  targeted %s 학습 검출기를 뺍니다 — %s" % (t["name"], exc))
         # OVD — 대상이 OVD 근거를 고른 경우만
         self.ovd = []
-        ovd_t = [t for t in text_t if "ovd_agree" in t["cues"] or "ovd_pair_iou" in t["cues"]]
+        ovd_t = [t for t in text_t if "class" in t["cues"] or "ovd_pair_iou" in t["cues"]]
         ok = cc.ovd_available(cfg, files, ovd_t)
         if ovd_t and "yolo_world" in ok:
             labels, owners = [], []
@@ -2476,6 +2502,8 @@ class TargetedRunner:
         if "yoloe_free" in need:
             from ultralytics import YOLOE
             _cached(("yoloe_free", str(files["yoloe_free"][0])), lambda: YOLOE(str(files["yoloe_free"][0])))
+        if "grounding_dino" in need:
+            _GdinoArm(files["gdino"][0].parent, ["x"], ["x"], self.device)     # 모델만 캐시에 올린다
         for t in resolved["targets"]:
             if t.get("detector") == "trained":
                 from demo_box import TrainedBoxArm
@@ -2514,6 +2542,7 @@ class TargetedRunner:
             if dup is None:
                 kept.append({"cls_name": det["cls_name"], "conf": det["conf"], "xyxy": det["xyxy"],
                              "arms": {det["arm"]}, "lead": word, "votes": {word: det["conf"]},
+                             "by_arm": {det["arm"]: {word: (det["conf"], bool(det.get("similar")))}},
                              "_poly": det.get("poly"), "extra": {k: v for k, v in det.items()
                                                                  if k in ("box_gates", "box_distance",
                                                                           "box_bearing", "camera_profile")}})
@@ -2523,6 +2552,9 @@ class TargetedRunner:
                     dup["_poly"] = det["poly"]
                 if det["conf"] > dup["votes"].get(word, 0.0):
                     dup["votes"][word] = det["conf"]
+                ba = dup["by_arm"].setdefault(det["arm"], {})
+                if det["conf"] > ba.get(word, (0.0, False))[0]:
+                    ba[word] = (det["conf"], bool(det.get("similar")))
         return kept
 
     def __call__(self, bgr, roi_crop=None):
@@ -2590,7 +2622,7 @@ class TargetedRunner:
                  "xyxy": [round(float(v), 1) for v in g["xyxy"]], "agree": len(g["arms"]), "arms": sorted(g["arms"]),
                  "lead": g["lead"], "votes": {k: round(float(v), 4) for k, v in
                                               sorted(g["votes"].items(), key=lambda t: -t[1])},
-                 "_poly": g.get("_poly")}
+                 "_poly": g.get("_poly"), "_by_arm": g["by_arm"]}
             d.update(g["extra"])
             if g["cls_name"] in self.same_as:
                 d["_same_as"] = self.same_as[g["cls_name"]]
@@ -2970,7 +3002,7 @@ def _targeted_cards(img, dets, obstacles, max_cards=5):
         rows = []
         for k, pct, txt in card.get("rows") or []:
             label = (CUES.get(k) or {}).get("label") or {"distance": "거리"}.get(k, k)
-            rows.append((label, pct, str(txt)[:40]))
+            rows.append((label, pct, str(txt)[:64]))
         head = st.get("shown", name)
         score = "-" if a.get("score") is None else "%d/100" % round(a["score"])
         lab_w = int(max([probe.textlength(r[0], font=font) for r in rows] + [0])) + 8

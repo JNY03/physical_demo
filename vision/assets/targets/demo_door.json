@@ -105,7 +105,6 @@
     "class": "score",
     "free_arm": "on",
     "dict_features": "score",
-    "ovd_agree": "score",
     "aspect": "gate",
     "clip_colour": "gate",
     "clip_shape": "gate",
@@ -114,9 +113,8 @@
     "ovd_pair_iou": "gate"
   },
   "weights": {
-    "class": 0.2,
-    "dict_features": 0.45,
-    "ovd_agree": 0.35
+    "class": 0.55,
+    "dict_features": 0.45
   },
   "source": "main class_features.json door 그대로 (2026-09-14 완화 · 2026-09-15 강화)",
   "anchor": "door",

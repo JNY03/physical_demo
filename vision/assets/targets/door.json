@@ -75,7 +75,6 @@
     "free_arm": "on",
     "dict_features": "score",
     "semantic": "score",
-    "ovd_agree": "score",
     "aspect": "gate",
     "clip_shape": "gate",
     "saturation": "gate",
@@ -83,9 +82,8 @@
     "size_veto": "veto"
   },
   "weights": {
-    "class": 0.3,
+    "class": 0.55,
     "dict_features": 0.3,
-    "ovd_agree": 0.25,
     "semantic": 0.15
   },
   "source": "main class_features.json door (2026-09-10~15) 일반 규칙",

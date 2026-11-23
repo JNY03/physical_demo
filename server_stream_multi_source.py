@@ -545,8 +545,37 @@ def _view_det(d):
 def view_result(res):
     """비전 결과에서 웹 화면(/vision/view)이 쓰는 칸만 남긴다."""
     return {"n": res.get("n"), "width": res.get("width"), "height": res.get("height"),
-            "model": res.get("model"),
+            "model": res.get("model"), "overlay_prefs": res.get("overlay_prefs"),
+            "counts": res.get("counts"), "roi": res.get("roi"),
             "detections": [_view_det(d) for d in (res.get("detections") or [])]}
+
+
+#: 구역(ROI) — 웹 화면에서 끌어 지정한다(2026-11-23). 좌표는 프레임 대비 0~1, 최대 개수
+ROI_MAX_RECTS = 8
+
+
+def check_rois(obj):
+    """POST /control/roi 본문 → (사각형 목록, 모델) 또는 ValueError(사람이 읽는 이유)."""
+    if not isinstance(obj, dict):
+        raise ValueError("JSON 사전이어야 함: {\"rects\": [[x1, y1, x2, y2], ...], \"model\": null}")
+    rects = obj.get("rects")
+    if not isinstance(rects, list) or not rects:
+        raise ValueError("rects 는 [[x1, y1, x2, y2], ...] (0~1 비율) — 지우려면 DELETE")
+    if len(rects) > ROI_MAX_RECTS:
+        raise ValueError("구역은 %d 개까지" % ROI_MAX_RECTS)
+    out = []
+    for r in rects:
+        if not (isinstance(r, list) and len(r) == 4 and all(isinstance(v, (int, float)) for v in r)):
+            raise ValueError("사각형은 숫자 넷 [x1, y1, x2, y2]: %r" % (r,))
+        x1, x2 = sorted(min(1.0, max(0.0, float(v))) for v in (r[0], r[2]))
+        y1, y2 = sorted(min(1.0, max(0.0, float(v))) for v in (r[1], r[3]))
+        if x2 - x1 < 0.01 or y2 - y1 < 0.01:
+            raise ValueError("너무 작은 구역: %r" % (r,))
+        out.append([round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)])
+    model = obj.get("model") or None
+    if model is not None and not isinstance(model, str):
+        raise ValueError("model 은 모델 이름 또는 null")
+    return out, model
 
 
 #: GET /vision/view — 비전 오버레이 + **근거 카드**(2026-11-13). 물체 위에 마우스를 올리면
@@ -584,18 +613,29 @@ main{display:flex;gap:10px;padding:8px;align-items:flex-start}
 .kv{display:grid;grid-template-columns:72px 1fr;gap:6px}.kv .txt{grid-column:2}
 .gone{opacity:.55}.gone h3::after{content:"이 장에서 안 보임";font-size:11px;color:var(--mute)}
 #tip{position:fixed;z-index:9;pointer-events:none;display:none}
+#rois{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+.roi{position:absolute;border:2px dashed #fff;box-shadow:0 0 0 1px #000a}
+.roi .x{position:absolute;right:-1px;top:-1px;pointer-events:auto;cursor:pointer;background:#000c;color:#fff;border:0;
+font-size:13px;line-height:1;padding:3px 5px}
+.rubber{position:absolute;border:2px dashed #5aa0ff;background:#5aa0ff22;pointer-events:none}
+header button{background:#222;color:var(--fg);border:1px solid var(--line);cursor:pointer}
 .hint{color:var(--mute);font-size:12px}
 </style></head><body>
 <header><b>__SRC__</b><span class="m">비전</span><select id="model"></select>
-<span class="hint">물체 위에 마우스 → 근거 카드 · 클릭 → 고정 · ✕ 닫기</span><span id="st" class="m" style="margin-left:auto"></span></header>
-<main><div id="stage"><img id="img" alt=""><div id="marks"></div></div></main>
+<span class="hint">물체 위에 마우스 → 근거 카드 · 클릭 → 고정 · ✕ 닫기 · 빈 곳을 끌면 구역</span>
+<button id="roiclear" style="display:none">구역 모두 지우기</button><span id="st" class="m" style="margin-left:auto"></span></header>
+<main><div id="stage"><img id="img" alt=""><div id="marks"></div><div id="rois"></div></div></main>
 <div id="tip"></div>
 <script>
 (function(){
 var MODEL=__MODEL__, seq=-1, cur=null, natW=0, natH=0, mouse=null, hoverKey=null;
 var pins=new Map();                          // key → {el, det}
 var SHOWN={wooden_box_mine:"목함지뢰 (wooden box mine)",butane_canister:"부탄가스 (butane canister)"};
-var CUE={semantic:"글 설명",shape:"형상",class:"이름",material:"재질",structure:"모양",match:"기준 사진",size:"크기",distance:"거리"};
+var CUE={semantic:"글 설명",shape:"형상",class:"이름",material:"재질",structure:"모양",match:"기준 사진",size:"크기",distance:"거리",
+  dict_features:"특징 사전",colour:"색상",ovd_agree:"OVD 동의",ovd_pair_iou:"OVD 짝 IoU",clip_colour:"CLIP 색",clip_shape:"CLIP 모양",
+  saturation:"채도",hue:"색상 H",aspect:"종횡비",ground:"바닥 위치",height:"높이 측정",calibration:"거리 검증",size_veto:"크기 거부"};
+var QCARDS=(location.search.match(/[?&]cards=(off|hover|always)/)||[])[1]||null, roi=null, drag=null, dragged=false;
+function cardsMode(){return QCARDS||((cur&&cur.overlay_prefs)||{}).cards||"hover"}
 var img=document.getElementById("img"), marks=document.getElementById("marks"),
     tip=document.getElementById("tip"),
     st=document.getElementById("st"), sel=document.getElementById("model"),
@@ -645,7 +685,7 @@ function toImg(ev){var r=img.getBoundingClientRect();if(!r.width||!natW)return n
 function placeTip(cx,cy){var w=tip.offsetWidth,h=tip.offsetHeight,vw=innerWidth,vh=innerHeight;
   var x=cx+18,y=cy+18;if(x+w>vw-8)x=cx-w-18;if(y+h>vh-8)y=vh-h-8;tip.style.left=Math.max(8,x)+"px";tip.style.top=Math.max(8,y)+"px"}
 function showTip(){
-  if(!mouse){tip.style.display="none";hoverKey=null;return}
+  if(!mouse||cardsMode()==="off"||drag){tip.style.display="none";hoverKey=null;return}
   var p=hitAt(mouse.x,mouse.y);
   if(!p){tip.style.display="none";hoverKey=null;stage.style.cursor="crosshair";return}
   hoverKey=keyOf(p.d,p.i);stage.style.cursor="pointer";
@@ -675,14 +715,52 @@ function renderPin(k){var p=pins.get(k);var c=cardHTML(p.det,true);
   p.el.querySelector(".x").onclick=function(ev){ev.stopPropagation();p.el.remove();pins.delete(k);hoverKey=null;drawMarks()};
   p.el.onclick=function(ev){ev.stopPropagation()};p.el.onmousemove=function(ev){ev.stopPropagation();tip.style.display="none"};
   p.el.onmouseenter=function(){hoverKey=k;drawMarks()};p.el.onmouseleave=function(){hoverKey=null;drawMarks()};}
-function updatePins(){var seen={};(cur.detections||[]).forEach(function(d,i){seen[keyOf(d,i)]=d});
+function updatePins(){var seen={},mode=cardsMode();
+  if(mode==="off"){pins.forEach(function(p){p.el.remove()});pins.clear()}
+  if(mode==="always")(cur.detections||[]).forEach(function(d,i){var k=keyOf(d,i);if(d.assess&&d.assess.suspect&&!pins.has(k)){
+    var el=document.createElement("div");stage.appendChild(el);pins.set(k,{el:el,det:d,seen:true,auto:true})}});
+  pins.forEach(function(p,k){if(p.auto&&mode==="always"&&!(cur.detections||[]).some(function(d,i){return keyOf(d,i)===k})){p.el.remove();pins.delete(k)}});
+  (cur.detections||[]).forEach(function(d,i){seen[keyOf(d,i)]=d});
   pins.forEach(function(p,k){if(seen[k]){p.det=seen[k];p.seen=true}else p.seen=false;renderPin(k)});layoutPins()}
 stage.addEventListener("mousemove",function(ev){mouse=toImg(ev);showTip();drawMarks()});
 stage.addEventListener("mouseleave",function(){mouse=null;showTip();drawMarks()});
-stage.addEventListener("click",function(ev){var m=toImg(ev);if(!m)return;var p=hitAt(m.x,m.y);if(!p)return;
+stage.addEventListener("click",function(ev){if(dragged){dragged=false;return}if(cardsMode()==="off")return;
+  var m=toImg(ev);if(!m)return;var p=hitAt(m.x,m.y);if(!p)return;
   var k=keyOf(p.d,p.i);if(pins.has(k))return;
   var el=document.createElement("div");stage.appendChild(el);pins.set(k,{el:el,det:p.d,seen:true});renderPin(k);layoutPins();
   tip.style.display="none";drawMarks()});
+// ---- 구역(ROI): 빈 곳을 끌어 그린다 → POST /control/roi. 좌표는 프레임 대비 0~1
+var rubber=null, rois=document.getElementById("rois"), clearBtn=document.getElementById("roiclear");
+function fw(){return (cur&&cur.width)||natW} function fh(){return (cur&&cur.height)||(natH-band())}
+function frac(m){return {x:Math.max(0,Math.min(1,m.x/fw())),y:Math.max(0,Math.min(1,m.y/fh()))}}
+stage.addEventListener("mousedown",function(ev){if(ev.button!==0||ev.target.closest(".card,.roi .x"))return;var m=toImg(ev);if(!m)return;
+  drag={a:frac(m),cx:ev.clientX,cy:ev.clientY};ev.preventDefault()});
+addEventListener("mousemove",function(ev){if(!drag)return;var m=toImg(ev);if(!m)return;drag.b=frac(m);
+  if(Math.abs(ev.clientX-drag.cx)+Math.abs(ev.clientY-drag.cy)<6)return;
+  if(!rubber){rubber=document.createElement("div");rubber.className="rubber";stage.appendChild(rubber)}
+  place(rubber,[drag.a.x,drag.a.y,drag.b.x,drag.b.y])});
+addEventListener("mouseup",function(ev){if(!drag)return;var d=drag;drag=null;if(rubber){rubber.remove();rubber=null}
+  if(!d.b||Math.abs(ev.clientX-d.cx)+Math.abs(ev.clientY-d.cy)<6)return;dragged=true;
+  var r=[Math.min(d.a.x,d.b.x),Math.min(d.a.y,d.b.y),Math.max(d.a.x,d.b.x),Math.max(d.a.y,d.b.y)];
+  if(r[2]-r[0]<0.01||r[3]-r[1]<0.01)return;
+  sendRois(((roi&&roi.rects)||[]).concat([r]))});
+function place(el,r){if(!natW)return;var bd=band();
+  el.style.left=(r[0]*fw()/natW*100)+"%";el.style.top=((bd+r[1]*fh())/natH*100)+"%";
+  el.style.width=((r[2]-r[0])*fw()/natW*100)+"%";el.style.height=((r[3]-r[1])*fh()/natH*100)+"%"}
+function drawRois(){rois.innerHTML="";var rs=(roi&&roi.rects)||[];clearBtn.style.display=rs.length?"":"none";
+  rs.forEach(function(r,i){var e=document.createElement("div");e.className="roi";place(e,r);
+    var x=document.createElement("button");x.className="x";x.textContent="✕";x.title="이 구역 지우기";
+    x.onclick=function(ev){ev.stopPropagation();var rest=rs.filter(function(_,j){return j!==i});
+      if(rest.length)sendRois(rest);else clearRois()};e.appendChild(x);rois.appendChild(e)})}
+function sendRois(rs){fetch("/control/roi",{method:"POST",headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({rects:rs,model:null})}).then(function(r){return r.json()}).then(function(j){
+    if(j.roi){roi=j.roi;drawRois()}else st.textContent=j.detail||"구역을 못 보냄"})}
+function clearRois(){fetch("/control/roi",{method:"DELETE"}).then(function(){roi=null;drawRois()})}
+clearBtn.onclick=clearRois;
+function pollRoi(){fetch("/control/roi",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+  var v=j.roi?j.roi.version:null;if(v!==(roi?roi.version:null)){roi=j.roi;drawRois()}}).catch(function(){})
+  .then(function(){setTimeout(pollRoi,2000)})}
+pollRoi();
 addEventListener("resize",layoutPins);
 function loop(){
   var u="/vision/frame?since="+seq+"&wait=5"+(MODEL?"&model="+encodeURIComponent(MODEL):"");
@@ -692,10 +770,11 @@ function loop(){
     if(j){seq=j.seq;if(!MODEL)MODEL=j.model;
       if(sel.options.length!==(j.models||[]).length){sel.innerHTML=(j.models||[]).map(function(m){return"<option>"+esc(m)+"</option>"}).join("")}
       sel.value=j.model;
-      var im=new Image();im.onload=function(){natW=im.naturalWidth;natH=im.naturalHeight;cur=j;img.src=im.src;
-        updatePins();if(mouse)showTip();drawMarks()};
+      var im=new Image();im.onload=function(){var first=!natW;natW=im.naturalWidth;natH=im.naturalHeight;cur=j;img.src=im.src;
+        updatePins();if(mouse)showTip();drawMarks();if(first)drawRois()};
       im.src="data:image/jpeg;base64,"+j.image_b64;
-      st.textContent="#"+(j.n==null?"-":j.n)+" · 검출 "+((j.detections||[]).length);
+      var cn=j.counts?Object.keys(j.counts).map(function(k){return k+" "+j.counts[k]}).join(" · "):"";
+      st.textContent="#"+(j.n==null?"-":j.n)+" · 검출 "+((j.detections||[]).length)+(cn?" · "+cn:"")+(j.roi?" · 구역 안":"");
     }
     setTimeout(loop,j?0:500);
   }).catch(function(){st.textContent="연결 끊김 — 다시 시도";setTimeout(loop,1500)});
@@ -786,6 +865,29 @@ class VisionView:
     def models(self, src):
         with self.cv:
             return sorted(m for s, m in self.info if s == src)
+
+    # -- 구역(ROI): Redis vision_roi:<소스> — vision_infer.py live 가 0.5초마다 읽는다
+    def _roi_client(self):
+        if redis is None:
+            raise RuntimeError("redis 패키지가 없음")
+        if getattr(self, "_rc", None) is None:
+            self._rc = redis.Redis.from_url(self.url, socket_connect_timeout=2, socket_timeout=3)
+        return self._rc
+
+    def roi_get(self, src):
+        raw = self._roi_client().get("vision_roi:" + src)
+        return json.loads(raw) if raw else None
+
+    def roi_set(self, src, rects, model, who):
+        c = self._roi_client()
+        ver = int(c.incr("vision_roi_ver:" + src))
+        roi = {"version": ver, "rects": rects, "model": model, "by": who,
+               "at": datetime.now().astimezone().isoformat(timespec="seconds")}
+        c.set("vision_roi:" + src, json.dumps(roi, ensure_ascii=False))
+        return roi
+
+    def roi_clear(self, src):
+        self._roi_client().delete("vision_roi:" + src)
 
     def wait_latest(self, src, model, last, timeout):
         with self.cv:
@@ -1181,6 +1283,8 @@ def make_handler(src, vision=None):
                 page = VISION_VIEW_HTML.replace("__SRC__", src.name).replace(
                     "__MODEL__", json.dumps(model))
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            if path == "/control/roi":
+                return self._roi("GET", None)
             if path == "/state":
                 return self._json(200, src.state_snapshot())
             if path == "/frame":
@@ -1332,6 +1436,33 @@ def make_handler(src, vision=None):
             except OSError:
                 pass                              # 보던 쪽이 닫음
 
+        def _roi(self, method, body):
+            """구역 지정(2026-11-23) — 이 소스(포트)의 구역. GET 지금 구역 · POST 바꾸기 · DELETE 지우기."""
+            if vision is None:
+                return self._json(503, {"status": "error", "detail": "비전 보기가 꺼져 있음(--no-vision)"})
+            try:
+                if method == "GET":
+                    return self._json(200, {"source": src.name, "roi": vision.roi_get(src.name)})
+                if method == "DELETE":
+                    vision.roi_clear(src.name)
+                    log("%s 구역 지움 (%s)" % (src.name, self.client_address[0]))
+                    return self._json(200, {"status": "ok", "source": src.name, "roi": None})
+                try:
+                    rects, model = check_rois(json.loads(body.decode("utf-8")))
+                except ValueError as e:
+                    return self._json(400, {"status": "error", "detail": str(e)})
+                roi = vision.roi_set(src.name, rects, model, self.client_address[0])
+                log("%s 구역 %d개 (번호 %d, %s)" % (src.name, len(rects), roi["version"], self.client_address[0]))
+                return self._json(200, {"status": "ok", "source": src.name, "roi": roi})
+            except Exception as e:
+                return self._json(503, {"status": "error", "detail": "Redis 에 못 씀 (%s)" % describe(e)})
+
+        def do_DELETE(self):
+            path = self.path.split("?", 1)[0].rstrip("/")
+            if path == "/control/roi":
+                return self._roi("DELETE", None)
+            self._json(404, {"status": "error", "detail": "없는 주소"})
+
         def do_POST(self):
             path = self.path.split("?", 1)[0].rstrip("/")
             length = self.headers.get("Content-Length")
@@ -1346,6 +1477,8 @@ def make_handler(src, vision=None):
             if body is None:
                 self.close_connection = True
                 return
+            if path == "/control/roi":
+                return self._roi("POST", body)
             try:
                 if path in ("/upload_pano", "/upload"):
                     ctype = self.headers.get("Content-Type", "")

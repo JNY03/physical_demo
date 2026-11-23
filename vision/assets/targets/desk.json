@@ -59,16 +59,14 @@
     "class": "score",
     "free_arm": "on",
     "semantic": "score",
-    "ovd_agree": "score",
     "dict_features": "score",
     "shape": "score",
     "size_veto": "veto",
     "lookalike": "on"
   },
   "weights": {
-    "class": 0.3,
+    "class": 0.5,
     "semantic": 0.25,
-    "ovd_agree": 0.2,
     "dict_features": 0.15,
     "shape": 0.1
   },
