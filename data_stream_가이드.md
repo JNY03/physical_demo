@@ -161,6 +161,8 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
 #### 바탕화면 「데이터 스트림 실행」 런처 (2026-11-23)
 
 - `C:\Users\khw67\DataStreamLauncher\launcher.ps1` · 이전 판 `launcher.ps1.bak_261123`.
+- 저장소 사본 `tools/launcher/launcher.ps1`(UTF-8 BOM — PowerShell 5.1 이 한글을 읽으려면 필요). 고치면 이것을
+  `C:\Users\khw67\DataStreamLauncher\` 에 복사한다. 바로가기: `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File launcher.ps1`
 - 탭: 스트림(소스 · 로봇 캠 · 슬라이스 · 비전 모델) · 지정 클래스(지정 클래스 탐지를 고를 때만) · 오버레이(고른 모델에 되는 것만).
 - **실행 뒤에도 열려 있다.** 바꾸면 1초 뒤 반영: 대상 · 근거 · 거리 · 오버레이는 `profile.json` 만(비전이 실행 중에 바꾼다,
   새 모델은 미리 적재하는 동안 옛 설정으로), 비전 모델 → 비전 창만, 소스 · 로봇 캠 → 서버와 비전, 슬라이스 → 슬라이스 창만.
