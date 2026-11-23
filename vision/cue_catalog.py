@@ -148,10 +148,12 @@ DEFAULT_FILES = {
     "depth": ["~/.cache/huggingface/hub/models--lpiccinelli--unidepth-v2-vitb14",
               "external/UniDepth"],
     "trained": [],                   # 대상 파일의 trained.weight · fit 이 정한다
+    "reid": ["models/lightglue_superpoint/model.safetensors",
+             "models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx"],
 }
 #: 프로세스 하나에 더해지는 GPU 메모리 추정(MB). 측정값이 아니라 **분할 계산용 어림**이다
 GPU_MB = {"base": 400, "yoloe_text": 900, "yoloe_free": 500, "clip": 350, "yolo_world": 500,
-          "grounding_dino": 1300, "gdino": 1300, "depth": 1300, "trained": 120}
+          "grounding_dino": 1300, "gdino": 1300, "reid": 700, "depth": 1300, "trained": 120}
 
 
 def have(key, files):
@@ -349,6 +351,8 @@ def resolve_cues(t, spec_cues, avail):
 
 
 # ---------------------------------------------------------------- 프로필
+#: 기능 선택(모델과 따로) — 런처 '객체 재식별' 등
+FEATURES = {"reid": "객체 재식별"}
 OVERLAY_KEYS = ("label", "cards", "count", "roi", "show_non_suspect", "show_rejected", "title", "pose")
 CARD_MODES = ("off", "hover", "always")
 LABEL_TOKENS = ("name", "lead", "conf", "cls", "id", "depth", "range", "dist", "gps", "alt", "ned")
@@ -432,7 +436,7 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     profile = copy.deepcopy(profile or {})
     if not isinstance(profile, dict):
         raise ProfileError("프로필은 JSON 사전이어야 한다")
-    bad = set(profile) - {"profile_version", "label", "models", "devices", "_doc", "saved_at"}
+    bad = set(profile) - {"profile_version", "label", "models", "devices", "features", "_doc", "saved_at"}
     if bad:
         raise ProfileError("프로필에 모르는 칸: %s" % ", ".join(sorted(bad)))
     pm = profile.get("models") or {}
@@ -452,7 +456,17 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     files = model_files(tcfg)
     targets_db = load_targets() if targets_db is None else targets_db
     result = {"version": profile.get("profile_version"), "label": profile.get("label"),
-              "targeted": None, "overlay": {}, "devices": {}}
+              "targeted": None, "overlay": {}, "devices": {}, "features": {}}
+    feats = profile.get("features") or {}
+    if not isinstance(feats, dict) or set(feats) - set(FEATURES):
+        raise ProfileError("features 에 모르는 기능: %s (가능: %s)" % (", ".join(sorted(set(feats) - set(FEATURES))),
+                                                            ", ".join(FEATURES)))
+    for k, v in feats.items():
+        if not isinstance(v, bool):
+            raise ProfileError("features.%s 는 참/거짓" % k)
+        if k == "reid" and v and not have("reid", model_files(((cfg or {}).get("models") or {}).get("targeted") or {})):
+            raise ProfileError("객체 재식별에 필요한 가중치가 없음 (models/lightglue_superpoint · CLIP)")
+    result["features"] = dict(feats)
     tpart = pm.get("targeted") or {}
     distance = bool(tpart.get("distance", tcfg.get("distance", True)))
     if "targeted" in models:
@@ -588,6 +602,7 @@ def catalog(cfg=None):
                                "title": "제목 띠", "pose": "드론 위치 띠"},
             "card_modes": [{"key": "off", "shown": "끔"}, {"key": "hover", "shown": "마우스 올릴 때"},
                            {"key": "always", "shown": "항상"}],
+            "features": [{"key": k, "shown": v, "available": have(k, files)} for k, v in FEATURES.items()],
             "gpu_mb": {m: gpu_mb([m]) for m in all_models if m != "targeted"},
             "gpu_mb_targeted": {k: v for k, v in GPU_MB.items()}}
 

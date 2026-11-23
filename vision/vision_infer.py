@@ -2984,6 +2984,9 @@ def detect_overlay(bgr, dets, title, ocfg, kind="yoloe", rec=None, rects=None):
     if blk.get("count") and rec is not None:
         # **탐지 개수는 프레임 왼쪽 위에 클래스별 라벨로**(2026-11-23). 구역이 있으면 구역 안에서만 센 값이다
         out = draw_counts(out, rec.get("counts") or {}, dets, kind, ocfg)
+    if any(d.get("reid") for d in dets or []):
+        from reid import draw_reid
+        out = draw_reid(out, dets)
     return add_header(out, lines, ocfg)
 
 
@@ -3439,6 +3442,52 @@ def _upscale_crop(runner, on):
             a.crop_floor = None
 
 
+# ---------------------------------------------------------------- 객체 재식별 (2026-11-23, vision/reid.py)
+def _reid_engine(cfg):
+    eng = cfg.get("_reid_engine")
+    if eng is None:
+        import cue_catalog as cc
+        import target_assess as ta
+        from reid import MemStore, ReidEngine
+        files = cc.model_files((cfg.get("models") or {}).get("targeted") or {})
+        clip = ta._shared_clip(files["clip"])
+        try:
+            from feature_match import FeatureMatcher
+            matcher = FeatureMatcher(cc.REPO / "models" / "lightglue_superpoint", cfg.get("_device", "cuda:0"))
+        except Exception as exc:                       # 매칭이 없으면 다시 찾기만 못 한다(추적은 된다)
+            log("  재식별: 특징점 매칭을 못 세움 — %s: %s" % (type(exc).__name__, exc))
+            matcher = None
+        eng = cfg["_reid_engine"] = ReidEngine(cfg.get("_reid_store") or MemStore(), clip, matcher, log=log)
+        log("  재식별 준비 (특징점 매칭 %s)" % ("SuperPoint+LightGlue" if matcher else "없음"))
+    return eng
+
+
+def _reid_step(cfg, device, model, bgr, dets, base):
+    """고른 물체가 있으면 재식별. 판정된 것(river · targeted) · 그린 것(yoloe)만 후보다."""
+    if not (cfg.get("_features") or {}).get("reid"):
+        return None
+    # from_n(저장된 이미지 --reid): 고른 기기에서는 그 장부터. 다른 기기는 갤러리가 생긴 뒤부터(엔진이 본다)
+    items = [it for it in (cfg.get("_reid_items") or [])
+             if it.get("from_n") is None or it.get("device") != device
+             or (base.get("n") is not None and base["n"] >= it["from_n"])]
+    if not items:
+        return None
+    min_conf = (cfg.get("overlay") or {}).get("min_conf")
+    ok = []
+    for d in dets:
+        a = d.get("assess")
+        if model in ("river", "targeted"):
+            if a and a.get("suspect"):
+                ok.append(d)
+        elif min_conf is None or d["conf"] >= float(min_conf):
+            ok.append(d)
+    eng = _reid_engine(cfg)
+    eng.last_try = {}
+    ms = eng.step(items, device, model, bgr, ok, base.get("n"))
+    cfg["_reid_try"] = {k: v for k, v in eng.last_try.items() if v.get("device") == device}
+    return ms
+
+
 def count_dets(model, dets, ocfg):
     """탐지 개수 — yoloe 는 그린 검출, river · targeted 는 **판정된 것만**(회색은 세지 않는다)."""
     out = {}
@@ -3535,10 +3584,15 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
         if ad is None:
             ad = cfg["_axes"][akey] = AxisDecider()
         dets = ad.update(dets)
+    reid_ms = _reid_step(cfg, device, det_model, bgr, dets, base)
     if not wanted:
         return (None, None, None, None, dets), stab
     om, prefs = model_ocfg(ocfg, cfg, det_model, device)
     rec = dict(base, model=det_model, **info)
+    if reid_ms is not None:
+        rec["reid_ms"] = reid_ms
+        if cfg.get("_reid_try"):
+            rec["reid_try"] = cfg["_reid_try"]          # 찾지 못한 장의 시도(매칭 수 · 둘째 · 유사도)
     rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]
     rec["counts"] = count_dets(det_model, rec["detections"], om)
     mblk = om.get(det_model) if isinstance(om.get(det_model), dict) else {}
@@ -3548,6 +3602,7 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
                             else "off",
                             "count": bool(mblk.get("count", False)),
                             "roi": bool(mblk.get("roi", True)),
+                            "reid": bool((cfg.get("_features") or {}).get("reid")),
                             "show_non_suspect": bool(mblk.get("show_non_suspect", True))}
     if cfg.get("_profile_label") is not None or cfg.get("_profile_version") is not None:
         rec["profile"] = {"label": cfg.get("_profile_label"), "version": cfg.get("_profile_version")}
@@ -3735,6 +3790,7 @@ def apply_profile(cfg, resolved):
     """확정된 프로필을 cfg 에 건다 — 오버레이는 그대로, targeted 는 _resolved 로."""
     cfg["_overlay"] = resolved.get("overlay") or {}
     cfg["_overlay_dev"] = resolved.get("devices") or {}
+    cfg["_features"] = resolved.get("features") or {}
     cfg["_profile_label"] = resolved.get("label")
     cfg["_profile_version"] = resolved.get("version")
     if resolved.get("targeted") is not None:
@@ -3801,6 +3857,7 @@ class LiveRunner:
 
     def __init__(self, devices, models, runners, cfg, data_root, watch=None):
         import redis
+        from reid import RedisStore
         self.watch = watch
         self.roi_t = {}
         self.redis_mod = redis
@@ -3808,6 +3865,7 @@ class LiveRunner:
         self.lc = lc
         self.url = lc.get("redis", "redis://127.0.0.1:6380/0")
         self.r = redis.Redis.from_url(self.url, socket_connect_timeout=2, socket_timeout=10)
+        cfg["_reid_store"] = RedisStore(self.r)
         self.devices, self.models, self.runners, self.cfg = devices, models, runners, cfg
         self.data_root = data_root
         self.maxlen = int(lc.get("maxlen", 300))
@@ -3895,6 +3953,7 @@ class LiveRunner:
                                "Redis 스트림만 냅니다" % (dv, p.parent.parent))
         outs = self.outputs(dv, run_dir)
         self.read_roi(dv)
+        self.read_reid()
         h, w = bgr.shape[:2]
         base = {"n": header.get("n"), "frame": rel, "source": dv, "run": run_dir.name if run_dir else None,
                 "image_wh": [w, h], "live": True}
@@ -3962,6 +4021,23 @@ class LiveRunner:
             log("%s 구역 %d개 (번호 %s%s)" % (dv, len(roi.get("rects") or []), roi.get("version"),
                                           (", 모델 %s" % roi["model"]) if roi.get("model") else ""))
         rois[dv] = roi
+
+    def read_reid(self):
+        """Redis vision_reid — 가시화 · 웹 화면에서 고른 재식별 물체. 0.5초마다."""
+        now = time.time()
+        if now - getattr(self, "_reid_t", 0.0) < 0.5:
+            return
+        self._reid_t = now
+        try:
+            raw = self.r.get("vision_reid")
+        except self.redis_mod.RedisError:
+            return
+        items = (json.loads(raw).get("items") if raw else None) or []
+        old = {it["id"] for it in (self.cfg.get("_reid_items") or [])}
+        new = {it["id"] for it in items}
+        if old != new:
+            log("재식별 대상: %s" % (", ".join("%s(%s)" % (it["id"], it.get("label")) for it in items) or "없음"))
+        self.cfg["_reid_items"] = items
 
     def check_profile(self):
         w = self.watch
@@ -4133,6 +4209,9 @@ def main():
     g.add_argument("--label", metavar="항목", help="박스 라벨 항목 (쉼표): name,conf,id,dist,gps …")
     g.add_argument("--count", action="store_true", help="탐지 개수 표시")
     g.add_argument("--catalog", action="store_true", help="런처용 카탈로그 JSON 을 찍고 끝낸다 (모델을 적재하지 않는다)")
+    g.add_argument("--reid", action="append", metavar="기기:장:x1,y1,x2,y2",
+                   help="[저장된 이미지] 그 장에서 그 상자의 물체를 재식별 대상으로 (여러 번). live 는 가시화에서 고른다")
+    g.add_argument("--reid-on", action="store_true", help="객체 재식별 기능 켜기 (런처는 프로필 features.reid)")
     args = ap.parse_args()
 
     if args.catalog:
@@ -4201,6 +4280,19 @@ def main():
     except (cc.ProfileError, ValueError, OSError) as exc:
         raise SystemExit("프로필이 틀렸습니다 — %s" % exc)
     apply_profile(cfg, resolved)
+    cfg["_device"] = gpu
+    if args.reid_on or args.reid:
+        cfg.setdefault("_features", {})["reid"] = True
+    if args.reid:
+        items = []
+        for k, spec in enumerate(args.reid, 1):
+            try:
+                dv, n, box = spec.split(":")
+                items.append({"id": k, "device": dv, "from_n": int(n), "n": int(n),
+                              "bbox": [float(v) for v in box.split(",")]})
+            except ValueError:
+                raise SystemExit("--reid 는 기기:장번호:x1,y1,x2,y2 — %r" % spec)
+        cfg["_reid_items"] = items
     if resolved.get("overlay"):
         log("오버레이 지정: %s" % json.dumps(resolved["overlay"], ensure_ascii=False))
     load = list(models)

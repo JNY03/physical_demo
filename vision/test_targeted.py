@@ -292,3 +292,61 @@ def test_part_measurability_by_scale():
     d = {"name": "door", "xyxy": [0, 0, 20, 55]}      # 55 px 문의 손잡이 ≈ 2.75 px — 볼 수 없다
     probe(np.zeros((100, 100, 3), np.uint8), [d])
     assert d["_part"] is None
+
+
+# ---------------------------------------------------------------- 객체 재식별 (2026-11-23)
+class _FakeClip:
+    """crop 평균색으로 임베딩 — 같은 색 상자는 같은 물체로 본다."""
+    def images(self, crops):
+        v = np.array([c.reshape(-1, 3).mean(0) for c in crops], np.float32) + 1.0
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+class _FakeMatcher:
+    """같은 색이면 매칭 많이, 다르면 적게."""
+    def count(self, pairs):
+        return [40 if np.abs(a.astype(int).mean((0, 1)) - b.astype(int).mean((0, 1))).max() < 20 else 5 for a, b in pairs]
+
+
+def _scene(red_at=None, blue_at=None):
+    img = np.zeros((200, 300, 3), np.uint8)
+    dets = []
+    for colour, at, tid in (((0, 0, 220), red_at, 1), ((220, 0, 0), blue_at, 2)):
+        if at is not None:
+            x = at
+            img[50:150, x:x + 40] = colour
+            dets.append({"name": "person", "xyxy": [x, 50, x + 40, 150], "track_id": tid, "conf": 0.9})
+    return img, dets
+
+
+def test_reid_select_track_reacquire_and_other_camera():
+    from reid import MemStore, ReidEngine
+    eng = ReidEngine(MemStore(), _FakeClip(), _FakeMatcher(), log=None)
+    item = [{"id": 1, "device": "cam1", "model": "targeted", "bbox": [20, 50, 60, 150], "label": "person"}]
+    img, dets = _scene(red_at=20, blue_at=200)
+    eng.step(item, "cam1", "targeted", img, dets, 1)
+    assert dets[0]["reid"]["how"] == "selected" and "reid" not in dets[1]
+    img, dets = _scene(red_at=24, blue_at=200)
+    eng.step(item, "cam1", "targeted", img, dets, 2)
+    assert dets[0]["reid"]["how"] == "tracked"
+    for n in range(3, 8):                             # 사라졌다
+        img, dets = _scene(blue_at=200)
+        eng.step(item, "cam1", "targeted", img, dets, n)
+        assert all("reid" not in d for d in dets)     # 다른 물체를 고르지 않는다
+    hows = []
+    for n in range(8, 11):                            # 멀리 다시 나타났다 — 확인 두 번 뒤에 다시 찾는다
+        img, dets = _scene(red_at=120, blue_at=200)
+        dets[0]["track_id"] = 7
+        eng.step(item, "cam1", "targeted", img, dets, n)
+        hows.append((dets[0].get("reid") or {}).get("how"))
+    assert hows[0] is None and "reacquired" in hows
+    img, dets = _scene(red_at=60)                    # 다른 카메라
+    other = []
+    for n in range(11, 14):
+        img, dets = _scene(red_at=60)
+        eng.step(item, "cam2", "targeted", img, dets, n)
+        other.append((dets[0].get("reid") or {}).get("how"))
+    assert "other_camera" in other
+    import json as _j
+    seen = _j.loads(eng.store.get("vision_reid_seen:1"))
+    assert [t["device"] for t in seen["trail"]] == ["cam1", "cam2"]

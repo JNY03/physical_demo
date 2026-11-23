@@ -528,7 +528,7 @@ class RedisSink:
 
 # ---------------------------------------------------------------- 비전 결과 보기 (vision_infer.py live 가 Redis 에 넣은 것)
 #: /vision/frame 이 넘기는 검출 칸 — 화면이 그리는 데 쓰는 것만(근거 카드 포함)
-VIEW_DET_KEYS = ("bbox", "label", "lead", "confidence", "track_id", "dist", "assess", "votes", "arms")
+VIEW_DET_KEYS = ("bbox", "label", "lead", "confidence", "track_id", "dist", "assess", "votes", "arms", "reid")
 
 
 def _view_det(d):
@@ -545,7 +545,7 @@ def _view_det(d):
 def view_result(res):
     """비전 결과에서 웹 화면(/vision/view)이 쓰는 칸만 남긴다."""
     return {"n": res.get("n"), "width": res.get("width"), "height": res.get("height"),
-            "model": res.get("model"), "overlay_prefs": res.get("overlay_prefs"),
+            "model": res.get("model"), "overlay_prefs": res.get("overlay_prefs"), "reid_on": "reid_ms" in res,
             "counts": res.get("counts"), "roi": res.get("roi"),
             "detections": [_view_det(d) for d in (res.get("detections") or [])]}
 
@@ -629,7 +629,8 @@ header button{background:#222;color:var(--fg);border:1px solid var(--line);curso
 <span class="hint">물체 위에 마우스 → 근거 카드 · 클릭 → 고정 · ✕ 닫기 · 영역 지정 → 끌기</span>
 <span id="st" class="m" style="margin-left:auto"></span></header>
 <main><div id="stage"><img id="img" alt=""><div id="marks"></div><div id="rois"></div>
-<div class="roibar" id="roibar"><button id="roiset" type="button">영역 지정</button><button id="roiclear" type="button">영역 취소</button></div></div></main>
+<div class="roibar" id="roibar"><button id="roiset" type="button">영역 지정</button><button id="roiclear" type="button">영역 취소</button>
+<button id="reidset" type="button" style="display:none">재식별 선택</button><button id="reidclear" type="button" style="display:none">재식별 취소</button></div></div></main>
 <div id="tip"></div>
 <script>
 (function(){
@@ -691,7 +692,7 @@ function toImg(ev){var r=img.getBoundingClientRect();if(!r.width||!natW)return n
 function placeTip(cx,cy){var w=tip.offsetWidth,h=tip.offsetHeight,vw=innerWidth,vh=innerHeight;
   var x=cx+18,y=cy+18;if(x+w>vw-8)x=cx-w-18;if(y+h>vh-8)y=vh-h-8;tip.style.left=Math.max(8,x)+"px";tip.style.top=Math.max(8,y)+"px"}
 function showTip(){
-  if(!mouse||cardsMode()==="off"||drag||roiMode){tip.style.display="none";hoverKey=null;return}
+  if(!mouse||cardsMode()==="off"||drag||roiMode||reidMode){tip.style.display="none";hoverKey=null;return}
   var p=hitAt(mouse.x,mouse.y);
   if(!p){tip.style.display="none";hoverKey=null;stage.style.cursor="crosshair";return}
   hoverKey=keyOf(p.d,p.i);stage.style.cursor="pointer";
@@ -730,7 +731,11 @@ function updatePins(){var seen={},mode=cardsMode();
   pins.forEach(function(p,k){if(seen[k]){p.det=seen[k];p.seen=true}else p.seen=false;renderPin(k)});layoutPins()}
 stage.addEventListener("mousemove",function(ev){mouse=toImg(ev);showTip();drawMarks()});
 stage.addEventListener("mouseleave",function(){mouse=null;showTip();drawMarks()});
-stage.addEventListener("click",function(ev){if(dragged){dragged=false;return}if(cardsMode()==="off"||roiMode)return;
+stage.addEventListener("click",function(ev){if(dragged){dragged=false;return}
+  if(reidMode){var mm=toImg(ev);var hp=mm&&hitAt(mm.x,mm.y);if(!hp)return;setReid(false);
+    fetch("/control/reid",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL||cur.model,
+      bbox:hp.d.bbox,track_id:hp.d.track_id==null?null:hp.d.track_id,n:cur.n,label:hp.d.label})}).then(pollReid);return}
+  if(cardsMode()==="off"||roiMode)return;
   var m=toImg(ev);if(!m)return;var p=hitAt(m.x,m.y);if(!p)return;
   var k=keyOf(p.d,p.i);if(pins.has(k))return;
   var el=document.createElement("div");stage.appendChild(el);pins.set(k,{el:el,det:p.d,seen:true});renderPin(k);layoutPins();
@@ -739,7 +744,16 @@ stage.addEventListener("click",function(ev){if(dragged){dragged=false;return}if(
 var rubber=null, rois=document.getElementById("rois"), clearBtn=document.getElementById("roiclear"),
     setBtn=document.getElementById("roiset"), roiBar=document.getElementById("roibar"), roiMode=false;
 function roiOn(){return !cur||!cur.overlay_prefs||cur.overlay_prefs.roi!==false}
-function setMode(on){roiMode=on;setBtn.classList.toggle("on",on);stage.classList.toggle("roimode",on)}
+function setMode(on){roiMode=on;setBtn.classList.toggle("on",on);stage.classList.toggle("roimode",on);if(on)setReid(false)}
+// ---- 객체 재식별: 「재식별 선택」 → 물체 클릭 → POST /control/reid (모든 카메라에서 찾는다) · 「재식별 취소」
+var reidSet=document.getElementById("reidset"), reidClear=document.getElementById("reidclear"), reidMode=false, reidState=null;
+function setReid(on){reidMode=on;reidSet.classList.toggle("on",on);stage.classList.toggle("roimode",on);if(on&&roiMode){roiMode=false;setBtn.classList.remove("on")}}
+reidSet.onclick=function(ev){ev.stopPropagation();setReid(!reidMode)};
+reidClear.onclick=function(ev){ev.stopPropagation();setReid(false);fetch("/control/reid",{method:"DELETE"}).then(pollReid)};
+function pollReid(){fetch("/control/reid",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){reidState=j;
+  var on=!!(cur&&cur.overlay_prefs&&cur.overlay_prefs.reid);reidSet.style.display=on?"":"none";
+  reidClear.style.display=on&&j.items&&j.items.length?"":"none"}).catch(function(){})}
+setInterval(pollReid,2000);
 setBtn.onclick=function(ev){ev.stopPropagation();setMode(!roiMode)};
 roiBar.addEventListener("mousedown",function(ev){ev.stopPropagation()});
 roiBar.addEventListener("click",function(ev){ev.stopPropagation()});
@@ -901,6 +915,42 @@ class VisionView:
 
     def roi_clear(self, src):
         self._roi_client().delete("vision_roi:" + src)
+
+    # -- 객체 재식별: Redis vision_reid {version, items} — **모든 기기 공통**(다른 카메라에서도 찾는다)
+    def reid_get(self):
+        c = self._roi_client()
+        raw = c.get("vision_reid")
+        state = json.loads(raw) if raw else {"version": 0, "items": []}
+        for it in state["items"]:
+            seen = c.get("vision_reid_seen:%s" % it["id"])
+            it["seen"] = json.loads(seen) if seen else None
+            g = c.get("vision_reid_gallery:%s" % it["id"])
+            it["views"] = len(json.loads(g).get("views") or []) if g else 0
+        return state
+
+    def reid_add(self, src, obj, who):
+        c = self._roi_client()
+        raw = c.get("vision_reid")
+        state = json.loads(raw) if raw else {"version": 0, "items": []}
+        rid = int(c.incr("vision_reid_id"))
+        state["items"].append({"id": rid, "device": src, "model": obj.get("model"), "bbox": obj["bbox"],
+                               "track_id": obj.get("track_id"), "n": obj.get("n"), "label": obj.get("label"),
+                               "by": who, "at": datetime.now().astimezone().isoformat(timespec="seconds")})
+        state["version"] = int(state.get("version", 0)) + 1
+        c.set("vision_reid", json.dumps(state, ensure_ascii=False))
+        return rid
+
+    def reid_remove(self, rid=None):
+        c = self._roi_client()
+        raw = c.get("vision_reid")
+        state = json.loads(raw) if raw else {"version": 0, "items": []}
+        gone = [it["id"] for it in state["items"] if rid is None or it["id"] == rid]
+        state["items"] = [it for it in state["items"] if it["id"] not in gone]
+        state["version"] = int(state.get("version", 0)) + 1
+        c.set("vision_reid", json.dumps(state, ensure_ascii=False))
+        for g in gone:
+            c.delete("vision_reid_gallery:%s" % g, "vision_reid_seen:%s" % g)
+        return gone
 
     def wait_latest(self, src, model, last, timeout):
         with self.cv:
@@ -1298,6 +1348,8 @@ def make_handler(src, vision=None):
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/control/roi":
                 return self._roi("GET", None)
+            if path == "/control/reid":
+                return self._reid("GET", None, query)
             if path == "/state":
                 return self._json(200, src.state_snapshot())
             if path == "/frame":
@@ -1470,6 +1522,32 @@ def make_handler(src, vision=None):
             except Exception as e:
                 return self._json(503, {"status": "error", "detail": "Redis 에 못 씀 (%s)" % describe(e)})
 
+        def _reid(self, method, body, query):
+            """객체 재식별(2026-11-23) — GET 고른 물체와 마지막으로 본 곳 · POST 고르기(이 소스의 상자) · DELETE 취소(?id=)."""
+            if vision is None:
+                return self._json(503, {"status": "error", "detail": "비전 보기가 꺼져 있음(--no-vision)"})
+            try:
+                if method == "GET":
+                    return self._json(200, vision.reid_get())
+                if method == "DELETE":
+                    q = parse_qs(query or "")
+                    rid = int(q["id"][0]) if q.get("id") else None
+                    gone = vision.reid_remove(rid)
+                    log("재식별 취소 %s (%s)" % (gone, self.client_address[0]))
+                    return self._json(200, {"status": "ok", "removed": gone})
+                try:
+                    obj = json.loads(body.decode("utf-8"))
+                    box = obj.get("bbox")
+                    if not (isinstance(box, list) and len(box) == 4 and all(isinstance(v, (int, float)) for v in box)):
+                        raise ValueError("bbox 는 [x1, y1, x2, y2] (프레임 픽셀)")
+                except (ValueError, AttributeError) as e:
+                    return self._json(400, {"status": "error", "detail": str(e)})
+                rid = vision.reid_add(src.name, obj, self.client_address[0])
+                log("%s 재식별 %d 고름: %s %s (%s)" % (src.name, rid, obj.get("label"), box, self.client_address[0]))
+                return self._json(200, {"status": "ok", "id": rid})
+            except Exception as e:
+                return self._json(503, {"status": "error", "detail": "Redis 에 못 씀 (%s)" % describe(e)})
+
         def do_OPTIONS(self):
             """CORS 사전 요청 — 가시화 웹(다른 주소)이 /control/roi 에 POST · DELETE 를 보낼 수 있게(2026-11-23)."""
             self.send_response(204)
@@ -1481,9 +1559,12 @@ def make_handler(src, vision=None):
             self.end_headers()
 
         def do_DELETE(self):
-            path = self.path.split("?", 1)[0].rstrip("/")
+            path, _, query = self.path.partition("?")
+            path = path.rstrip("/")
             if path == "/control/roi":
                 return self._roi("DELETE", None)
+            if path == "/control/reid":
+                return self._reid("DELETE", None, query)
             self._json(404, {"status": "error", "detail": "없는 주소"})
 
         def do_POST(self):
@@ -1502,6 +1583,8 @@ def make_handler(src, vision=None):
                 return
             if path == "/control/roi":
                 return self._roi("POST", body)
+            if path == "/control/reid":
+                return self._reid("POST", body, "")
             try:
                 if path in ("/upload_pano", "/upload"):
                     ctype = self.headers.get("Content-Type", "")
