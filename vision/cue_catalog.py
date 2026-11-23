@@ -87,6 +87,12 @@ CUES = {
                      "needs": ["clip"], "requires": ["confusers"], "detector": ("yoloe_text", "trained")},
 }
 ROLES = ("score", "gate", "veto", "cond", "on", "off")
+#: 카드(영상 · 웹)에 쓰는 근거 이름 — **카드는 영어로만**(2026-11-23). 런처 화면은 위 label(한글)
+CUE_EN = {"class": "detector", "free_arm": "wider candidates", "semantic": "description",
+          "dict_features": "features", "shape": "shape", "colour": "colour", "ovd_pair_iou": "OVD pair IoU",
+          "clip_colour": "CLIP colour", "clip_shape": "CLIP shape", "saturation": "saturation", "hue": "hue",
+          "aspect": "aspect", "ground": "ground", "height": "height", "calibration": "calibration",
+          "size_veto": "size veto", "lookalike": "look-alike", "distance": "distance"}
 #: 직접 입력(등록하지 않은 이름)에서 쓰는 근거 — 크기·색을 주면 더 붙는다
 DIRECT_ALWAYS = ["class", "free_arm", "semantic"]
 DIRECT_WITH_SIZE = ["shape", "size_veto"]

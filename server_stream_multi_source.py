@@ -611,7 +611,7 @@ main{display:flex;gap:10px;padding:8px;align-items:flex-start}
 .bar{height:9px;background:var(--bar);border-radius:2px;overflow:hidden}.bar i{display:block;height:100%;background:#fff}
 .pct{text-align:right;font-variant-numeric:tabular-nums}.txt{color:var(--mute);overflow-wrap:anywhere}
 .kv{display:grid;grid-template-columns:72px 1fr;gap:6px}.kv .txt{grid-column:2}
-.gone{opacity:.55}.gone h3::after{content:"이 장에서 안 보임";font-size:11px;color:var(--mute)}
+.gone{opacity:.55}.gone h3::after{content:"not in this frame";font-size:11px;color:var(--mute)}
 #tip{position:fixed;z-index:9;pointer-events:none;display:none}
 #rois{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
 .roi{position:absolute;border:2px dashed #fff;box-shadow:0 0 0 1px #000a}
@@ -630,10 +630,11 @@ header button{background:#222;color:var(--fg);border:1px solid var(--line);curso
 (function(){
 var MODEL=__MODEL__, seq=-1, cur=null, natW=0, natH=0, mouse=null, hoverKey=null;
 var pins=new Map();                          // key → {el, det}
-var SHOWN={wooden_box_mine:"목함지뢰 (wooden box mine)",butane_canister:"부탄가스 (butane canister)"};
-var CUE={semantic:"글 설명",shape:"형상",class:"이름",material:"재질",structure:"모양",match:"기준 사진",size:"크기",distance:"거리",
-  dict_features:"특징 사전",colour:"색상",ovd_agree:"OVD 동의",ovd_pair_iou:"OVD 짝 IoU",clip_colour:"CLIP 색",clip_shape:"CLIP 모양",
-  saturation:"채도",hue:"색상 H",aspect:"종횡비",ground:"바닥 위치",height:"높이 측정",calibration:"거리 검증",size_veto:"크기 거부"};
+var SHOWN={wooden_box_mine:"wooden box mine",butane_canister:"butane canister"};
+// 카드는 영어로만(2026-11-23) — 화면 안내(머리 줄)는 그대로
+var CUE={semantic:"description",shape:"shape",class:"detector",material:"material",structure:"structure",match:"reference",size:"size",distance:"distance",
+  dict_features:"features",colour:"colour",ovd_agree:"OVD",ovd_pair_iou:"OVD pair IoU",clip_colour:"CLIP colour",clip_shape:"CLIP shape",
+  saturation:"saturation",hue:"hue",aspect:"aspect",ground:"ground",height:"height",calibration:"calibration",size_veto:"size veto"};
 var QCARDS=(location.search.match(/[?&]cards=(off|hover|always)/)||[])[1]||null, roi=null, drag=null, dragged=false;
 function cardsMode(){return QCARDS||((cur&&cur.overlay_prefs)||{}).cards||"hover"}
 var img=document.getElementById("img"), marks=document.getElementById("marks"),
@@ -645,17 +646,17 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return
 function keyOf(d,i){return d.track_id!=null?"t"+d.track_id:"i"+i+"@"+seq}
 function band(){return cur&&cur.height?Math.max(0,natH-cur.height):0}
 function dist(d){var v=d.dist;if(!v)return"";if(typeof v==="number")return v.toFixed(1)+" m";
-  if(v.space==="metric")return v.value.toFixed(1)+" m";return v.value.toFixed(3)+" (상대 깊이)"}
+  if(v.space==="metric")return v.value.toFixed(1)+" m";return v.value.toFixed(3)+" (relative)"}
 function cls(s){return s>=60?"hi":(s>=40?"mid":"lo")}
 function title(d){var a=d.assess;if(a&&a.suspect)return SHOWN[a.suspect]||a.suspect;return d.lead||d.label||"?"}
 function cardHTML(d,closable){
   var a=d.assess,h="",haz=!!(a&&a.suspect);
-  var x=closable?'<button class="x" title="닫기">✕</button>':"";
+  var x=closable?'<button class="x" title="close">✕</button>':"";
   if(!a){
     h+='<h3><span class="nm">'+esc(title(d))+'</span>'+x+'</h3>';
-    h+='<div class="kv"><span>이름</span><span class="txt">'+esc(d.label)+'</span>'+
-       '<span>확신</span><span class="txt">'+(d.confidence!=null?(+d.confidence).toFixed(2):"-")+'</span>'+
-       (dist(d)?'<span>거리</span><span class="txt">'+esc(dist(d))+'</span>':"")+'</div>';
+    h+='<div class="kv"><span>name</span><span class="txt">'+esc(d.label)+'</span>'+
+       '<span>confidence</span><span class="txt">'+(d.confidence!=null?(+d.confidence).toFixed(2):"-")+'</span>'+
+       (dist(d)?'<span>distance</span><span class="txt">'+esc(dist(d))+'</span>':"")+'</div>';
     return {html:h,haz:false};
   }
   var best=a.suspect;
@@ -664,14 +665,14 @@ function cardHTML(d,closable){
   h+='<h3><span class="nm">'+esc(haz?SHOWN[best]||best:(d.lead||d.label))+'</span>'+
      (c.score!=null?'<span class="sc '+cls(c.score)+'">'+Math.round(c.score)+'/100</span>':"")+x+'</h3>';
   var cmp=Object.keys(a.scores).map(function(k){return esc((SHOWN[k]||k).split(" (")[0])+" "+(a.scores[k]==null?"-":a.scores[k].toFixed(1))}).join(" · ");
-  h+='<div class="cmp">'+cmp+' · 하한 '+a.min_score+(haz?"":" → <b>의심 아님</b> (아래는 가장 높은 "+esc((SHOWN[best]||best).split(" (")[0])+" 기준)")+'</div>';
+  h+='<div class="cmp">'+cmp+' · min '+a.min_score+(haz?"":" → <b>not suspected</b> (rows for the highest: "+esc((SHOWN[best]||best).split(" (")[0])+")")+'</div>';
   c.rows.forEach(function(r){
     if(r[1]==null){h+='<div class="kv"><span>'+esc(CUE[r[0]]||r[0])+'</span><span class="txt">'+esc(r[2])+'</span></div>';return}
     h+='<div class="row"><span>'+esc(CUE[r[0]]||r[0])+'</span><span class="bar"><i style="width:'+Math.max(0,Math.min(100,r[1]))+'%"></i></span>'+
        '<span class="pct">'+Math.round(r[1])+'%</span><span class="txt">'+esc(r[2])+'</span></div>';
   });
-  if(dist(d)&&!c.rows.some(function(r){return r[0]==="distance"}))h+='<div class="kv"><span>거리</span><span class="txt">'+esc(dist(d))+'</span></div>';
-  if(c.source)h+='<div class="kv"><span>출처</span><span class="txt">'+esc(c.source)+'</span></div>';
+  if(dist(d)&&!c.rows.some(function(r){return r[0]==="distance"}))h+='<div class="kv"><span>distance</span><span class="txt">'+esc(dist(d))+'</span></div>';
+  if(c.source)h+='<div class="kv"><span>source</span><span class="txt">'+esc(c.source)+'</span></div>';
   return {html:h,haz:haz};
 }
 function hitAt(px,py){                        // 이미지 좌표 → 가장 작은 박스

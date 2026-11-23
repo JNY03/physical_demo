@@ -12,6 +12,7 @@
     높이 · 자세 · 화각에서 잰 값이라, 그 크기 프레임에서만 원본대로 잰다.
     다른 크기 프레임: 전체 프레임을 imgsz 256 으로 검출하고 shape 관문만 잰다. ground · height 는
     판정 보류(`applicable: false`), 거리 · 방위는 내지 않는다(거리는 거리 측정이 켜졌으면 UniDepth 가 붙인다).
+  * 근거 문장(words)은 **영어로** 바꿨다(2026-11-23, 카드는 영어로만). 판정 · 값은 원본과 같다.
   * MQTT 판(scan) · 8방향 요약 · 경로 · try_box/ 산출물은 옮기지 않는다 — 이쪽은 프레임 단위 스트림이다.
   * 방위는 rotation_deg 를 모르므로 화면 중앙 대비 오프셋만 낸다(원본도 '참고값').
 """
@@ -83,7 +84,7 @@ class TrainedBoxArm:
         h_px = y2 - y1
         if y1 <= self.edge or y2 >= crop_h - self.edge:
             return {"distance_cm": None, "h_px": round(h_px, 2),
-                    "reason": "박스가 화면 위/아래 끝에 닿아 높이(39cm 앞면)를 잴 수 없음"}
+                    "reason": "box touches the top/bottom edge - height (39 cm front face) not measurable"}
         d = self.k / h_px - self.c
         return {"distance_cm": round(d, 1), "h_px": round(h_px, 2), "reason": None,
                 "formula": "distance_cm = k / h_px − c",
@@ -109,23 +110,23 @@ class TrainedBoxArm:
         gates = {"score_gate": {"required": True, "passed": score >= self.conf, "score": round(score, 3),
                                 "threshold_min": self.conf, "formula": "passed = score ≥ conf",
                                 "substituted": f"{score:.3f} ≥ {self.conf:g}",
-                                "words": f"YOLO 점수 {score:.2f}/{self.conf:g}"}}
+                                "words": f"YOLO score {score:.2f}/{self.conf:g}"}}
         cut_top, cut_bottom = y1 <= self.edge, y2 >= crop_h - self.edge
         if not go1:
             gates["ground_gate"] = {"required": True, "applicable": False, "passed": True, "not_go1": True,
-                                    "words": "Go1 카메라 프레임이 아니라 바닥 관계를 볼 수 없음 → 판정 보류"}
+                                    "words": "not a Go1 camera frame - ground check deferred"}
         else:
             expected_y2 = self.ga * h_px + self.gb
             residual = y2 - expected_y2
             if cut_bottom:
                 ground = {"applicable": False, "passed": True,
-                          "words": "아랫변이 화면 아래 끝에 닿아 바닥 관계를 볼 수 없음 → 판정 보류(통과로 둠)"}
+                          "words": "bottom edge touches the frame - ground check deferred (pass)"}
             else:
                 ok = abs(residual) <= self.gtol
                 ground = {"applicable": True, "passed": ok,
-                          "words": (f"바닥 위 박스 위치(아랫변 {y2:.0f}px, 기대 {expected_y2:.0f}±{self.gtol:g})" if ok else
-                                    f"바닥에 놓인 박스 위치가 아님(아랫변 {y2:.0f}px, 기대 {expected_y2:.0f}±{self.gtol:g}, "
-                                    f"{'위로' if residual < 0 else '아래로'} {abs(residual):.0f}px 벗어남)")}
+                          "words": (f"on the ground (bottom {y2:.0f}px, expected {expected_y2:.0f}±{self.gtol:g})" if ok else
+                                    f"not on the ground (bottom {y2:.0f}px, expected {expected_y2:.0f}±{self.gtol:g}, "
+                                    f"{abs(residual):.0f}px {'above' if residual < 0 else 'below'})")}
             gates["ground_gate"] = {
                 "required": True, **ground, "y2": round(y2, 1), "h_px": round(h_px, 2),
                 "expected_y2": round(expected_y2, 1), "residual_px": round(residual, 1), "tol_px": self.gtol,
@@ -140,12 +141,12 @@ class TrainedBoxArm:
         aspect_min = self.aspect_min_edge if cut_lr else self.aspect_min
         shape_ok = aspect >= aspect_min
         if shape_ok:
-            shape_words = f"박스 모양(폭/높이 {aspect:.2f} ≥ {aspect_min:g})"
+            shape_words = f"box shape (w/h {aspect:.2f} >= {aspect_min:g})"
         elif cut_lr:
-            shape_words = (f"화면 {'왼' if box[0] <= self.edge else '오른'}쪽 끝에 걸친 가는 조각(폭/높이 {aspect:.2f} < {aspect_min:g}) "
-                           f"— 박스라면 옆 각도 사진에 온전히 보인다")
+            shape_words = (f"thin piece cut by the {'left' if box[0] <= self.edge else 'right'} edge (w/h {aspect:.2f} < {aspect_min:g}) "
+                           f"- a real box shows whole in the next rotation")
         else:
-            shape_words = f"박스로 보기엔 너무 가늚(폭/높이 {aspect:.2f} < {aspect_min:g}, 옆면만 보여도 0.54)"
+            shape_words = f"too thin for the box (w/h {aspect:.2f} < {aspect_min:g}, side face alone is 0.54)"
         gates["shape_gate"] = {
             "required": True, "passed": shape_ok, "w_px": round(w_px, 2), "h_px": round(h_px, 2),
             "aspect": round(aspect, 3), "edge_cut_lr": cut_lr, "aspect_min": aspect_min,
@@ -154,13 +155,13 @@ class TrainedBoxArm:
             "words": shape_words}
         if not go1:
             gates["height_gate"] = {"required": False, "applicable": False, "passed": False,
-                                    "words": "Go1 카메라 프레임이 아니라 박스 높이 거리식을 쓸 수 없음"}
+                                    "words": "not a Go1 camera frame - box-height distance not used"}
             return gates
         if cut_top or cut_bottom:
-            where = "위·아래" if cut_top and cut_bottom else ("위" if cut_top else "아래")
-            height_words = f"높이 측정 불가 — 박스가 화면 {where} 끝에 닿음"
+            where = "top and bottom" if cut_top and cut_bottom else ("top" if cut_top else "bottom")
+            height_words = f"height not measurable - box touches the {where} edge"
         else:
-            height_words = f"높이 {h_px:.1f}px 측정 가능(위·아래 끝에 안 닿음)"
+            height_words = f"height {h_px:.1f}px measurable"
         gates["height_gate"] = {
             "required": False, "passed": not (cut_top or cut_bottom),
             "y1": round(y1, 1), "y2": round(y2, 1), "h_px": round(h_px, 2), "crop_h": crop_h, "edge_px": self.edge,
@@ -176,8 +177,8 @@ class TrainedBoxArm:
                 "source": self.fit_source["file"],
                 "formula": "passed = validated_min ≤ distance_cm ≤ validated_max",
                 "substituted": f"{lo:g} ≤ {d:.1f} ≤ {hi:g}",
-                "words": (f"실측 검증 범위 {lo:g}~{hi:g}cm 안({d:.1f}cm)" if inside
-                          else f"실측 검증 범위 {lo:g}~{hi:g}cm 밖({d:.1f}cm) — 참고값")}
+                "words": (f"inside the measured range {lo:g}-{hi:g} cm ({d:.1f} cm)" if inside
+                          else f"outside the measured range {lo:g}-{hi:g} cm ({d:.1f} cm) - reference only")}
         return gates
 
     def is_go1(self, bgr):
@@ -206,9 +207,9 @@ class TrainedBoxArm:
                 if len(rejected) < self.max_rejected:
                     rejected.append({"bbox": [round(v, 1) for v in full], "score": round(score, 3),
                                      "threshold_min": self.conf,
-                                     "words": f"후보 {score:.2f} < {self.conf:g} → 버림"})
+                                     "words": f"candidate {score:.2f} < {self.conf:g} - dropped"})
                 continue
-            dist = self.distance(box) if go1 else {"distance_cm": None, "reason": "Go1 카메라 프레임이 아님"}
+            dist = self.distance(box) if go1 else {"distance_cm": None, "reason": "not a Go1 camera frame"}
             gates = self.gates(box, score, dist, None if go1 else (img.shape[1], img.shape[0]))
             det = {"cls_name": self.target, "prompt": self.source_class, "conf": score, "xyxy": full,
                    "poly": None, "box_gates": gates, "box_distance": dist,
@@ -219,7 +220,7 @@ class TrainedBoxArm:
             if failed:
                 by_gates.append({"bbox": [round(v, 1) for v in full], "score": round(score, 3),
                                  "failed_gates": failed,
-                                 "words": " · ".join(gates[n]["words"] for n in failed) + " → 버림"})
+                                 "words": " · ".join(gates[n]["words"] for n in failed) + " - dropped"})
                 continue
             dets.append(det)
         return dets, rejected, by_gates, ms

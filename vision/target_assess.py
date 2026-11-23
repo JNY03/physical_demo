@@ -49,7 +49,8 @@ LOOKALIKE_FROM, LOOKALIKE_MAX = 0.5, 15.0       # river decision.lookalike 와 �
 #: 비슷한 이름(중심 명사가 같은 prompt-free 이름, 예: chair ← electric chair)의 확신에 곱하는 값. **선언이다** —
 #: 같은 물건을 다르게 부른 것이지만 그 이름이 정말 그 물건인지는 확신만큼 믿지 않는다
 SIMILAR_WEIGHT = 0.7
-ARM_SHOWN = {"yoloe": "text", "yoloe_free": "free", "yolo_world": "yolo_world", "grounding_dino": "gdino"}
+#: 설명에 적는 탐지기 이름 — YOLOE 텍스트 · prompt-free 는 이름을 적지 않는다(낱말만), OVD 만 적는다
+ARM_SHOWN = {"yoloe": "", "yoloe_free": "", "yolo_world": "yolo_world", "grounding_dino": "gdino"}
 
 
 def detector_support(d, ovd_boxes):
@@ -62,10 +63,10 @@ def detector_support(d, ovd_boxes):
         similar = [(w, c) for w, (c, sim) in words.items() if sim]
         if exact:
             w, c = max(exact, key=lambda t: t[1])
-            parts.append((c, "%s %s %.2f" % (ARM_SHOWN.get(arm, arm), w, c)))
+            parts.append((c, ("%s %s %.2f" % (ARM_SHOWN.get(arm, arm), w, c)).strip()))
         elif similar:
             w, c = max(similar, key=lambda t: t[1])
-            parts.append((c * SIMILAR_WEIGHT, "%s ~%s %.2f×%.1f" % (ARM_SHOWN.get(arm, arm), w, c, SIMILAR_WEIGHT)))
+            parts.append((c * SIMILAR_WEIGHT, ("%s ~%s %.2fx%.1f" % (ARM_SHOWN.get(arm, arm), w, c, SIMILAR_WEIGHT)).strip()))
     if not parts:
         parts.append((float(d["conf"]), "%s %.2f" % (d.get("lead") or d["name"], d["conf"])))
     best_ovd = {}
@@ -78,7 +79,13 @@ def detector_support(d, ovd_boxes):
     miss = 1.0
     for c, _t in parts:
         miss *= (1.0 - max(0.0, min(1.0, c)))
-    return 100.0 * (1.0 - miss), " · ".join(t for _c, t in parts), (max(best_ovd, key=best_ovd.get) if best_ovd else None)
+    # 같은 낱말은 한 번만 적는다('person 0.51 · 0.49') — 계산은 위에서 둘 다 셌다
+    shown, last = [], None
+    for _c, t in parts:
+        word, _sp, num = t.rpartition(" ")
+        shown.append(num if (word and word == last) else t)
+        last = word or None
+    return 100.0 * (1.0 - miss), " · ".join(shown), (max(best_ovd, key=best_ovd.get) if best_ovd else None)
 
 
 def _iou(a, b):

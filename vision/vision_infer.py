@@ -2985,7 +2985,7 @@ def _targeted_cards(img, dets, obstacles, max_cards=5):
     except Exception as exc:
         log("  targeted 카드 실패: %s" % exc)
         return img
-    from cue_catalog import CUES
+    from cue_catalog import CUE_EN
     H, W = img.shape[:2]
     probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
     taken = [tuple(o) for o in obstacles or []]
@@ -3001,7 +3001,7 @@ def _targeted_cards(img, dets, obstacles, max_cards=5):
         card = (a.get("cards") or {}).get(name) or {}
         rows = []
         for k, pct, txt in card.get("rows") or []:
-            label = (CUES.get(k) or {}).get("label") or {"distance": "거리"}.get(k, k)
+            label = CUE_EN.get(k, k)                   # 카드는 영어로만
             rows.append((label, pct, str(txt)[:64]))
         head = st.get("shown", name)
         score = "-" if a.get("score") is None else "%d/100" % round(a["score"])
