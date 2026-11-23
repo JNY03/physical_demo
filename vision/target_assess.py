@@ -589,7 +589,10 @@ class TargetEvidence:
         src = ", ".join(sorted(set(d.get("arms") or [])))
         axes = {"global": bool(ok), "local": None if part is None else round(part, 3),
                 "local_declared": "parts" in cues, "geometry": geometry}
-        return {"axes": axes,
+        # 트랙 누적(vision_infer.TrackEvidence)이 쓰는 장 단위 값 — 근거마다 % · 역할 · 무게 · 통과
+        cue_values = {r[0]: {"pct": r[1], "role": r[3], "passed": r[4], "w": float(w.get(r[0], 0.0))} for r in rows}
+        return {"axes": axes, "cue_values": cue_values, "min_evidence": p.min_evidence,
+                "lookalike_pen": round(pen, 2), "veto_text": veto,
                 "scores": {name: None if shown is None else round(shown, 1)},
                 "gate_scores": {name: None if gate_score is None else round(gate_score, 1)},
                 "suspect": name if ok else None,

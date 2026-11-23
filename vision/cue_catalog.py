@@ -97,7 +97,7 @@ CUE_EN = {"class": "detector", "free_arm": "wider candidates", "semantic": "desc
           "clip_colour": "CLIP colour", "clip_shape": "CLIP shape", "saturation": "saturation", "hue": "hue",
           "aspect": "aspect", "ground": "ground", "height": "height", "calibration": "calibration",
           "size_veto": "size veto", "lookalike": "look-alike", "distance": "distance",
-          "parts": "parts", "axes": "axes"}
+          "parts": "parts", "axes": "axes", "track": "track"}
 #: 직접 입력(등록하지 않은 이름)에서 쓰는 근거 — 크기·색을 주면 더 붙는다
 DIRECT_ALWAYS = ["class", "free_arm", "semantic"]
 DIRECT_WITH_SIZE = ["shape", "size_veto"]

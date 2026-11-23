@@ -350,3 +350,37 @@ def test_reid_select_track_reacquire_and_other_camera():
     import json as _j
     seen = _j.loads(eng.store.get("vision_reid_seen:1"))
     assert [t["device"] for t in seen["trail"]] == ["cam1", "cam2"]
+
+
+# ---------------------------------------------------------------- 트랙 근거 누적 (2026-11-23)
+def _tedet(sem, cls=80.0, gate=True, tid=1, box=(0, 0, 40, 80), local=0.2):
+    cv = {"class": {"pct": cls, "role": "score", "passed": None, "w": 0.5},
+          "semantic": {"pct": sem, "role": "score", "passed": None, "w": 0.5},
+          "aspect": {"pct": 100.0 if gate else 0.0, "role": "gate", "passed": gate, "w": 0.0}}
+    return {"name": "person", "track_id": tid, "xyxy": list(box),
+            "assess": {"suspect": None, "scores": {"person": 0.0}, "min_score": 50.0, "min_evidence": 0.45,
+                       "cue_values": cv, "cards": {"person": {"rows": [["class", cls, "x"], ["semantic", sem, "y"]]}},
+                       "axes": {"global": False, "local": local, "local_declared": True, "geometry": None}}}
+
+
+def test_track_evidence_averages_cues_over_frames():
+    import vision_infer as vi
+    te = vi.TrackEvidence()
+    d = te.update([_tedet(10.0)])[0]                  # 첫 장: (80+10)/2 = 45 < 50
+    assert d["assess"]["suspect"] is None and abs(d["assess"]["score"] - 45.0) < 1e-6
+    for _ in range(3):
+        d = te.update([_tedet(60.0)])[0]              # 쌓이면 평균이 올라 판정된다
+    assert d["assess"]["suspect"] == "person" and d["assess"]["track_frames"] == 4
+    assert any(r[0] == "track" and "4 frames" in r[2] for r in d["assess"]["cards"]["person"]["rows"])
+
+
+def test_track_evidence_gate_majority_ignores_single_failure():
+    import vision_infer as vi
+    te = vi.TrackEvidence()
+    for g in (True, True, False, True):               # 한 장의 우연한 탈락은 판정을 뒤집지 않는다
+        d = te.update([_tedet(80.0, gate=g)])[0]
+    assert d["assess"]["suspect"] == "person"
+    te2 = vi.TrackEvidence()
+    for g in (False, False, True):
+        d = te2.update([_tedet(80.0, gate=g)])[0]
+    assert d["assess"]["suspect"] is None and "aspect" in d["assess"]["gates_failed"]

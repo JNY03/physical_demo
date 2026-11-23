@@ -2130,6 +2130,117 @@ class AxisDecider:
         return dets
 
 
+class TrackEvidence(AxisDecider):
+    """**트랙에 근거를 쌓는다**(지정 클래스, 2026-11-23). 한 물체를 오래 볼수록 판정과 점수가 근거 전체로 다듬어진다.
+
+    장마다 target_assess 가 낸 근거 값(cue_values)을 트랙에 쌓고(최근 WINDOW 장), 트랙 단위로 다시 셈한다:
+      점수 근거  최근 장들의 평균 → 대상 무게로 가중 평균 = **트랙 점수**(장 단위 점수 대신)
+      필수 근거  잰 장들의 다수결로 통과 · 탈락 — 한 장의 우연한 실패 · 통과에 흔들리지 않는다
+      거부      잰 장의 절반 넘게 거부면 거부
+      국소 · 기하 (AxisDecider 와 같다) 다수결
+    판정 = 전역(트랙 점수 ≥ 하한 · 근거 충분 · 필수 통과 · 거부 없음) + 축 규칙. 이미 판정된 트랙은 하한 − HYST 까지 유지.
+    카드의 % 는 트랙 평균으로 바뀌고 'track' 줄에 몇 장의 근거인지 적는다. 장 단위 값은 assess.frame 에 남긴다.
+    새 트랙은 같은 자리의 최근 기록을 잇는다(트래커가 번호를 다시 붙일 때)."""
+
+    HYST = 5.0
+
+    def update(self, dets):
+        self.n += 1
+        anon = []
+        for d in dets:
+            a = d.get("assess") or {}
+            ax, cv = a.get("axes"), a.get("cue_values")
+            if not ax or cv is None:
+                continue
+            k = self._key(d)
+            if k[0] != "t":
+                anon.append((k, list(d["xyxy"]), d["name"]))
+            if k not in self.mem:
+                prev = max(((v, float(box_iou([v["box"]], [d["xyxy"]])[0, 0])) for v in self.mem.values()
+                            if v.get("name") == d["name"] and self.n - v["n"] <= 30 and v.get("box")),
+                           key=lambda t: t[1], default=(None, 0.0))
+                base = prev[0] if prev[1] >= 0.3 else None
+                self.mem[k] = {"local": list(base["local"]) if base else [], "geom": list(base["geom"]) if base else [],
+                               "cues": {c: list(v) for c, v in base["cues"].items()} if base else {},
+                               "veto": list(base["veto"]) if base else [], "frames": base["frames"] if base else 0,
+                               "sus": base["sus"] if base else None, "n": self.n}
+            m = self.mem[k]
+            m["n"], m["box"], m["name"] = self.n, list(d["xyxy"]), d["name"]
+            m["frames"] += 1
+            W = self.WINDOW
+            for c, v in cv.items():
+                if v["role"] in ("score", "gate"):
+                    val = v["pct"] if v["role"] == "score" else v["passed"]
+                    if val is not None:
+                        m["cues"][c] = (m["cues"].get(c, []) + [val])[-W:]
+            m["veto"] = (m["veto"] + [bool(a.get("veto_text"))])[-W:]
+            if ax.get("local") is not None:
+                m["local"] = (m["local"] + [ax["local"]])[-W:]
+            if ax.get("geometry") is not None:
+                m["geom"] = (m["geom"] + [bool(ax["geometry"])])[-W:]
+            # -- 트랙 점수
+            w = {c: v["w"] for c, v in cv.items() if v["role"] == "score"}
+            total = sum(w.values()) or 1.0
+            means = {c: sum(m["cues"][c]) / len(m["cues"][c]) for c in w if m["cues"].get(c)}
+            wsum = sum(w[c] for c in means)
+            score = (sum(means[c] * w[c] for c in means) / wsum) if wsum > 0 else None
+            enough = wsum / total >= float(a.get("min_evidence", 0.45))
+            gates = {c: (sum(m["cues"][c]) / len(m["cues"][c]) >= 0.5) if m["cues"].get(c) else None
+                     for c, v in cv.items() if v["role"] == "gate"}
+            failed = [c for c, ok in gates.items() if ok is not True]
+            vetoed = sum(m["veto"]) * 2 > len(m["veto"])
+            if vetoed and score is not None:
+                score = 0.0
+            shown = None if score is None else max(0.0, score - float(a.get("lookalike_pen", 0.0)))
+            mn = float(a.get("min_score", 50.0))
+            bar = mn - self.HYST if m.get("sus") else mn
+            glob_ = score is not None and enough and not failed and not vetoed and score >= bar
+            local = ratio = None
+            if ax.get("local_declared") and m["local"]:
+                ratio = sum(1 for v in m["local"] if v >= ta_part_floor()) / len(m["local"])
+                local = ratio >= self.MAJORITY
+            geom = (sum(m["geom"]) * 2 >= len(m["geom"])) if m["geom"] else None
+            votes = [v for v in (glob_, local, geom) if v is not None]
+            ok = glob_ and False not in votes and votes.count(True) >= (2 if len(votes) >= 2 else 1)
+            name = (a.get("scores") and next(iter(a["scores"]))) or d["name"]
+            m["sus"] = name if ok else None
+            # -- 카드: 트랙 평균으로, 몇 장의 근거인지
+            yn = lambda v: "-" if v is None else ("yes" if v else "no")
+            card = (a.get("cards") or {}).get(name)
+            if card is not None:
+                rows = []
+                for r in card["rows"]:
+                    c = r[0]
+                    if c in means:
+                        r = [c, round(means[c], 1), "%s · avg of %d" % (r[2], len(m["cues"][c]))]
+                    elif c in gates and gates[c] is not None:
+                        k_pass = sum(m["cues"][c])
+                        r = [c, round(100.0 * k_pass / len(m["cues"][c]), 1),
+                             "%s · passed %d/%d" % (r[2].split(" · ", 1)[-1], k_pass, len(m["cues"][c]))]
+                    rows.append(r)
+                rows = [r for r in rows if r[0] not in ("axes", "track")]
+                rows.append(["axes", None, "global %s · local %s%s · geometry %s" % (
+                    yn(glob_), yn(local), "" if ratio is None else " %d%% of %d" % (round(100 * ratio), len(m["local"])),
+                    yn(geom))])
+                rows.append(["track", None, "evidence over %d frames" % m["frames"]])
+                card = dict(card, rows=rows, score=None if shown is None else round(shown, 1))
+            d["assess"] = dict(a, frame={"score": a.get("score"), "suspect": a.get("suspect"),
+                                         "gates_failed": a.get("gates_failed")},
+                               score=None if shown is None else round(shown, 1),
+                               scores={name: None if shown is None else round(shown, 1)},
+                               gate_scores={name: None if score is None else round(score, 1)},
+                               suspect=name if ok else None, enough=bool(enough), gates_failed=failed,
+                               vetoed="too big" if vetoed else None, evidence=round(wsum / total, 2),
+                               cards={name: card} if card is not None else a.get("cards"),
+                               track_frames=m["frames"],
+                               axes=dict(ax, local_ratio=None if ratio is None else round(ratio, 2),
+                                         local_frames=len(m["local"]), decision="track"))
+        self.anon = anon
+        for k in [k for k, v in self.mem.items() if self.n - v["n"] > 60]:
+            del self.mem[k]
+        return dets
+
+
 def ta_part_floor():
     import target_assess as _ta
     return _ta.PART_FLOOR
@@ -3572,7 +3683,7 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
                     else stab.update(dets, ts if ts is not None else time.time()))
     # **판정이 장마다 흔들리지 않게**(assess_smooth, 2026-11-13) — 트랙 번호가 붙은 뒤에
     asm = ((cfg.get("models") or {}).get(det_model) or {}).get("assess_smooth")
-    if asm and asm.get("enabled", True):
+    if asm and asm.get("enabled", True) and det_model != "targeted":    # 지정 클래스는 TrackEvidence 가 쌓는다
         skey = (device, base.get("run"), det_model)
         sm = cfg.setdefault("_asm", {}).get(skey)
         if sm is None:
@@ -3582,7 +3693,7 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
         akey = (device, base.get("run"), det_model)
         ad = cfg.setdefault("_axes", {}).get(akey)
         if ad is None:
-            ad = cfg["_axes"][akey] = AxisDecider()
+            ad = cfg["_axes"][akey] = TrackEvidence()
         dets = ad.update(dets)
     reid_ms = _reid_step(cfg, device, det_model, bgr, dets, base)
     if not wanted:
