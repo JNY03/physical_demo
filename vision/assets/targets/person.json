@@ -1,0 +1,67 @@
+{
+  "_doc": "사람. 탐지기 이름이 주 근거다 — YOLOE·OVD 모두 잘 아는 클래스. main(JNY03/Physical_demo) class_features.json person 문구를 그대로 쓴다(2026-09-11 'two eyes'·'mouth present' 는 아무 데나 반응해서 뺀 뒤의 목록). 종횡비 게이트는 main 이 시도했다가 버렸다(다리만 2.44 · 발만 0.26).",
+  "name": "person",
+  "shown": "person",
+  "detector": "yoloe_text",
+  "colour_rgb": [
+    90,
+    200,
+    120
+  ],
+  "prompts": [
+    "person"
+  ],
+  "free_vocab": [
+    "person",
+    "man",
+    "woman",
+    "child",
+    "pedestrian"
+  ],
+  "descriptions": [
+    "a photo of a person",
+    "a person standing",
+    "a person walking"
+  ],
+  "negatives": [
+    "a mannequin",
+    "a coat on a rack",
+    "a statue",
+    "a photo of an object"
+  ],
+  "features": [
+    "two arms",
+    "one torso",
+    "two legs",
+    "head on top of torso",
+    "typically upright posture",
+    "wearing clothing",
+    "a human silhouette"
+  ],
+  "feature_sim_min": 0.22,
+  "ovd_labels": [
+    "person"
+  ],
+  "size_mm": [
+    600,
+    400,
+    1900
+  ],
+  "cues": {
+    "class": "score",
+    "free_arm": "on",
+    "ovd_agree": "score",
+    "semantic": "score",
+    "dict_features": "score",
+    "size_veto": "veto"
+  },
+  "weights": {
+    "class": 0.4,
+    "ovd_agree": 0.25,
+    "semantic": 0.2,
+    "dict_features": 0.15
+  },
+  "min_score": 50,
+  "provisional": true,
+  "source": "main class_features.json person (2026-09-11) + 2026-11-23 설계"
+}

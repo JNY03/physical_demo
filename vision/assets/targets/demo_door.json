@@ -1,0 +1,124 @@
+{
+  "detector": "yoloe_text",
+  "prompts": [
+    "door"
+  ],
+  "free_vocab": [
+    "door",
+    "glass door",
+    "screen door",
+    "elevator door",
+    "garage door"
+  ],
+  "descriptions": [
+    "a photo of a door",
+    "a closed door in a wall"
+  ],
+  "negatives": [
+    "a whiteboard",
+    "a window",
+    "a cabinet",
+    "a wall",
+    "a photo of an object"
+  ],
+  "features": [
+    "handle",
+    "hinge",
+    "lock",
+    "threshold",
+    "light blue color",
+    "round metal knob",
+    "closer device at the top",
+    "glossy surface"
+  ],
+  "feature_sim_min": 0.25,
+  "_feature_sim_min": "main 2026-09-14: 전역 0.26 -> door 0.25 (리허설 로봇 225도 실제 문 0.2522). 실제 문 0.250~0.270, 위험 음성 최대 0.267 로 겹친다",
+  "aspect": {
+    "h_over_w": [
+      1.5,
+      null
+    ]
+  },
+  "_aspect": "main 2026-09-10: 화이트보드 후보 0.96 vs 실제 문 2.60 — 1.5",
+  "clip_shape": {
+    "positive": [
+      "a rectangular shape",
+      "a square shape"
+    ],
+    "negative": [
+      "a round shape",
+      "an irregular shape"
+    ],
+    "tolerance": 0.005
+  },
+  "saturation": {
+    "min": 75
+  },
+  "ovd_labels": [
+    "door"
+  ],
+  "ovd_rules": {
+    "grounding_dino": {
+      "exact_label": true,
+      "min_score": 0.25
+    }
+  },
+  "_ovd_rules": "main 2026-09-14: GDINO 는 라벨이 정확히 door + 점수 0.25 이상만 — 'door pedestal' 섞인 라벨·저점수 박스가 문 증거로 들어오던 오탐",
+  "pair_iou_min": 0.42,
+  "_pair_iou_min": "main 2026-09-15: 실제 문 짝 IoU 0.76~0.91, 오탐(작은 CLIP 조각이 큰 단상 박스 안에 묶임) 0.03~0.22",
+  "size_mm": [
+    1000,
+    60,
+    2200
+  ],
+  "min_score": 50,
+  "provisional": true,
+  "_doc": "시연 장소 하늘색 문 — main 문 탐지 근거 구성 그대로(CLIP 특징 사전 + 색·모양·채도·색상 게이트 + OVD 동의 + 짝 IoU). 값은 Go1 어안 카메라 464x400 을 237x241 로 자른 프레임에서 잰 것이다.",
+  "name": "demo_door",
+  "shown": "demo door",
+  "colour_rgb": [
+    60,
+    200,
+    255
+  ],
+  "same_as": "door",
+  "clip_colour": {
+    "own": "light blue",
+    "competitors": [
+      "white",
+      "gray",
+      "black",
+      "brown",
+      "red",
+      "yellow",
+      "green"
+    ],
+    "tolerance": 0.012
+  },
+  "_clip_colour": "main 2026-09-14: '1등과 차이 0.012 이내'. 실제 문 -0.0074, 목재 유리책장 오탐 -0.0159",
+  "hue": {
+    "min": 85,
+    "max": 112
+  },
+  "_hue": "main 2026-09-15: 짙은 바지 다리(H 105~125)가 색 게이트를 통과하던 것 — 문 H 85~112",
+  "cues": {
+    "class": "score",
+    "free_arm": "on",
+    "dict_features": "score",
+    "ovd_agree": "score",
+    "aspect": "gate",
+    "clip_colour": "gate",
+    "clip_shape": "gate",
+    "saturation": "gate",
+    "hue": "gate",
+    "ovd_pair_iou": "gate"
+  },
+  "weights": {
+    "class": 0.2,
+    "dict_features": 0.45,
+    "ovd_agree": 0.35
+  },
+  "source": "main class_features.json door 그대로 (2026-09-14 완화 · 2026-09-15 강화)",
+  "anchor": "door",
+  "_anchor": "CLIP 문구의 이름 — main 과 같이 'a door's handle'. 보이는 이름(shown)과 따로 둔다"
+}

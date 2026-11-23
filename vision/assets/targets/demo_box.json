@@ -1,0 +1,55 @@
+{
+  "_doc": "시연 박스(회색 천 박스 59.3 x 21 x 39 cm) — Box_Detection(khw18033/physical-midterm-demo) 의 학습 검출기 yolov8n_graybox_v9 와 mqtt_box_receiver.py 관문을 그대로. 모델이 내는 'gray box' 를 demo_box 로 적는다. 관문·거리식은 Go1 카메라 464x400 프레임(테두리 crop 237x241)에서만 원본대로 잰다.",
+  "name": "demo_box",
+  "shown": "demo box",
+  "detector": "trained",
+  "colour_rgb": [
+    255,
+    120,
+    60
+  ],
+  "trained": {
+    "run": "yolov8n_graybox_v9",
+    "weight": "models/demo_box/yolov8n_graybox_v9.pt",
+    "fit": "models/demo_box/distance_fit_gt_yolov8n_graybox_v9.json",
+    "source_class": "gray box",
+    "conf": 0.25,
+    "candidate_conf": 0.05,
+    "max_rejected": 3,
+    "go1_frame": [
+      464,
+      400
+    ],
+    "border_crop": [
+      114,
+      80,
+      351,
+      321
+    ],
+    "edge_px": 2.0,
+    "box_height_cm": 39.0,
+    "ground": {
+      "a": 0.803,
+      "b": 135.7,
+      "tol_px": 12.0
+    },
+    "_ground": "Box_Detection 학습보고서_261102.md 5절: 학습 라벨 2,915개로 y2 = A·h + B, 오탐은 사람 등 -66 · 책상 상판 -117 · 공중 -131px → 허용 ±12px",
+    "aspect_min": 0.4,
+    "aspect_min_edge_cut": 0.35,
+    "_aspect": "2026-11-03: 검은 가방(폭/높이 0.15)이 박스로 — 박스는 옆면만 보여도 0.54, 학습 라벨 최소 0.44(증강) · 실제 0.49 → 0.40. 끝에 걸치면 0.35"
+  },
+  "cues": {
+    "class": "score",
+    "ground": "gate",
+    "aspect": "gate",
+    "height": "cond",
+    "calibration": "cond"
+  },
+  "weights": {
+    "class": 1.0
+  },
+  "min_score": 25,
+  "_min_score": "원본 판정은 score ≥ conf(0.25) + 필수 관문이다 — 점수 = conf×100 이라 하한 25 가 같은 뜻",
+  "provisional": false,
+  "source": "Box_Detection demo/test/mqtt_box_receiver.py (2026-11-03, v9)"
+}

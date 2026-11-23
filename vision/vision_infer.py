@@ -110,6 +110,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import re
 import signal
 import socket
 import sys
@@ -129,18 +130,19 @@ DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",  
            "pi11", "pi12",                                                        # 모듈 카메라 파이 2026-11-12 (DS 10008·10009)
            "pi13",                                                                # 모듈 카메라 파이 2026-11-13 (DS 10011)
            "drone2")                                                              # 둘째 드론 ds5 x500-002 2026-11-15 (DS 10012)
-MODELS = ("yoloe", "river", "unidepth", "moge2_aerial")
+MODELS = ("yoloe", "river", "targeted", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
                   "pi6": "realsense", "rs": "realsense", "d455": "realsense",
                   "slice": "cam360_slice"}
 MODEL_ALIASES = {"yoloe-pf": "yoloe", "yoloe_pf": "yoloe",
                  "moge": "moge2_aerial", "moge2": "moge2_aerial", "moge2-aerial": "moge2_aerial",
                  "moge2aerial": "moge2_aerial",
-                 "river-zeroshot": "river", "river_zeroshot": "river", "하천": "river"}
+                 "river-zeroshot": "river", "river_zeroshot": "river", "하천": "river",
+                 "target": "targeted", "custom": "targeted", "지정": "targeted", "지정클래스": "targeted"}
 DEPTH_MODELS = ("unidepth", "moge2_aerial")
 #: 검출 모델. depth 결합(fusion)은 이 중 **먼저 오는 하나**의 검출을 쓴다 —
 #: 둘을 같이 돌리면 결과는 둘 다 저장되지만 거리·GPS 는 한쪽에만 붙는다.
-DETECT_MODELS = ("yoloe", "river")
+DETECT_MODELS = ("yoloe", "river", "targeted")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 COLORMAPS = {"turbo": cv2.COLORMAP_TURBO, "jet": cv2.COLORMAP_JET, "inferno": cv2.COLORMAP_INFERNO,
              "magma": cv2.COLORMAP_MAGMA, "viridis": cv2.COLORMAP_VIRIDIS, "plasma": cv2.COLORMAP_PLASMA}
@@ -1092,7 +1094,11 @@ def _arm_imgsz(arm, bgr):
     if not getattr(arm, "follow_frame", False):
         return arm.imgsz
     long_side = max(bgr.shape[:2])
-    return int(min(arm.imgsz, -(-long_side // 32) * 32))
+    size = -(-long_side // 32) * 32
+    floor = getattr(arm, "crop_floor", None)       # 구역을 잘라 볼 때만(_upscale_crop) — 작은 crop 을 이만큼까지 키운다
+    if floor:
+        size = max(size, int(floor))
+    return int(min(arm.imgsz, size))
 
 
 class _ArmUltralytics:
@@ -2111,7 +2117,539 @@ class AssessSmoother:
         return dets
 
 
+# ---------------------------------------------------------------- 모델: targeted (지정 클래스 탐지, 2026-11-23)
+#: 무거운 모델은 프로세스에 하나씩만 — 대상을 바꿔 실행기를 다시 세워도 가중치는 다시 읽지 않는다
+_MODEL_CACHE = {}
+
+
+def _cached(key, make):
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = make()
+    return _MODEL_CACHE[key]
+
+
+def _ultra_clip_dir(models_dir):
+    """YOLO-World 의 텍스트 인코더(OpenAI CLIP ViT-B/32)를 **models/clip/** 에서 찾게 한다.
+    ultralytics 는 작업 폴더의 weights/clip 을 보고, 없으면 인터넷에서 받는다(폐쇄망에서 깨진다)."""
+    try:
+        import ultralytics.nn.text_model as tm
+        tm.WEIGHTS_DIR = Path(models_dir)
+    except Exception:
+        pass
+
+
+class _TextArm:
+    """YOLOE 텍스트 프롬프트 — 모델은 캐시, 문구만 바꾼다."""
+
+    def __init__(self, weight, enc_dir, prompts, owners, device, imgsz, conf, max_det, follow):
+        from ultralytics import YOLOE
+        weight = Path(weight)
+        if not weight.is_file():
+            raise _ArmMissing("가중치가 없다: %s" % weight)
+        if not (Path(enc_dir) / "mobileclip_blt.ts").is_file():
+            raise _ArmMissing("텍스트 인코더가 없다: %s/mobileclip_blt.ts" % enc_dir)
+        self.model = _cached(("yoloe_text", str(weight)), lambda: YOLOE(str(weight)))
+        with contextlib.chdir(enc_dir):
+            pe = self.model.get_text_pe(list(prompts))
+        self.model.set_classes(list(prompts), pe)
+        self.prompts, self.owners = list(prompts), list(owners)
+        self.device, self.imgsz, self.conf, self.max_det, self.follow_frame = device, imgsz, conf, max_det, follow
+        self.name = weight.name
+
+    def __call__(self, bgr):
+        r = self.model.predict(bgr, conf=self.conf, imgsz=_arm_imgsz(self, bgr), max_det=self.max_det,
+                               device=self.device, verbose=False)[0]
+        out, polys = [], _mask_polys(r)
+        if r.boxes is not None and len(r.boxes):
+            for i, b in enumerate(r.boxes):
+                k = int(b.cls)
+                if 0 <= k < len(self.owners):
+                    out.append({"cls_name": self.owners[k], "prompt": self.prompts[k], "conf": float(b.conf),
+                                "xyxy": [float(v) for v in b.xyxy[0].tolist()],
+                                "poly": polys[i] if i < len(polys) else None})
+        return out
+
+
+class _FreeArm:
+    """YOLOE prompt-free — 자리를 넓힌다. 대상의 free_vocab 에 든 이름만 그 대상으로, 나머지는 버린다."""
+
+    def __init__(self, weight, vocab_map, device, imgsz, conf, max_det, scene_words, scene_min_area):
+        from ultralytics import YOLOE
+        weight = Path(weight)
+        if not weight.is_file():
+            raise _ArmMissing("가중치가 없다: %s" % weight)
+        self.model = _cached(("yoloe_free", str(weight)), lambda: YOLOE(str(weight)))
+        self.vocab_map = dict(vocab_map)
+        names = self.model.names or {}
+        self.keep = sorted(int(i) for i, n in names.items() if str(n).lower() in self.vocab_map)
+        self.device, self.imgsz, self.conf, self.max_det = device, imgsz, conf, max_det
+        self.scene_words = {str(w).lower() for w in scene_words or []}
+        self.scene_min_area = float(scene_min_area)
+        self.name = weight.name
+        self.free_vocab = True
+
+    def __call__(self, bgr):
+        if not self.keep:
+            return []
+        # classes= 로 NMS 전에 거른다 — 대상과 무관한 이름이 max_det 를 차지하지 않는다
+        r = self.model.predict(bgr, conf=self.conf, imgsz=self.imgsz, max_det=self.max_det, classes=self.keep,
+                               device=self.device, verbose=False)[0]
+        names, out, polys = self.model.names or {}, [], _mask_polys(r)
+        H, W = bgr.shape[:2]
+        if r.boxes is not None and len(r.boxes):
+            for i, b in enumerate(r.boxes):
+                x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+                free = str(names.get(int(b.cls), "")).lower()
+                if free in self.scene_words and (x2 - x1) * (y2 - y1) >= self.scene_min_area * W * H:
+                    continue
+                cls = self.vocab_map.get(free)
+                if cls:
+                    out.append({"cls_name": cls, "prompt": free, "conf": float(b.conf), "xyxy": [x1, y1, x2, y2],
+                                "poly": polys[i] if i < len(polys) else None})
+        return out
+
+
+class _OvdArm:
+    """YOLO-World — OVD 동의 근거. 대상의 ovd_labels 로 찾고, 상자는 판정에만 쓴다(후보를 내지 않는다)."""
+
+    def __init__(self, weight, clip_dir, labels, owners, device, imgsz, conf):
+        from ultralytics import YOLO
+        weight = Path(weight)
+        if not weight.is_file():
+            raise _ArmMissing("가중치가 없다: %s" % weight)
+        if not (Path(clip_dir) / "clip" / "ViT-B-32.pt").is_file():
+            raise _ArmMissing("YOLO-World 텍스트 인코더가 없다: %s/clip/ViT-B-32.pt" % clip_dir)
+        _ultra_clip_dir(clip_dir)
+        self.model = _cached(("yolo_world", str(weight)), lambda: YOLO(str(weight)))
+        self.model.set_classes(list(labels))
+        self.owners = list(owners)
+        self.device, self.imgsz, self.conf = device, imgsz, conf
+        self.name = "yolo_world"
+
+    def __call__(self, bgr):
+        r = self.model.predict(bgr, conf=self.conf, imgsz=self.imgsz, device=self.device, verbose=False)[0]
+        out = []
+        if r.boxes is not None and len(r.boxes):
+            for b in r.boxes:
+                k = int(b.cls)
+                if 0 <= k < len(self.owners):
+                    out.append({"cls_name": self.owners[k], "conf": float(b.conf),
+                                "xyxy": [float(v) for v in b.xyxy[0].tolist()], "arm": self.name})
+        return out
+
+
+class _GdinoArm:
+    """GroundingDINO-tiny — main 과 같은 호출(문구를 '. ' 로 잇고 box 0.15 · text 0.15). **돌려받은 라벨 글자를
+    그대로 남긴다** — main 의 'door 는 라벨이 정확히 door + 점수 0.25 이상' 규칙이 그 글자를 본다."""
+
+    def __init__(self, path, labels, owners, device, box_thr=0.15, text_thr=0.15):
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        path = Path(path)
+        if not (path / "model.safetensors").is_file():
+            raise _ArmMissing("GroundingDINO 스냅샷이 없다: %s" % path)
+        self.proc, self.model = _cached(("gdino", str(path)), lambda: (
+            AutoProcessor.from_pretrained(str(path), local_files_only=True),
+            AutoModelForZeroShotObjectDetection.from_pretrained(str(path), local_files_only=True).to(device).eval()))
+        self.labels = [str(l).lower() for l in labels]
+        self.owners = list(owners)
+        self.text = ". ".join(self.labels) + "."
+        self.device, self.box_thr, self.text_thr = device, box_thr, text_thr
+        self.name = self.arm = "grounding_dino"
+
+    def __call__(self, bgr):
+        import torch
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        inputs = self.proc(images=rgb, text=self.text, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            raw = self.model(**inputs)
+        h, w = bgr.shape[:2]
+        post = self.proc.post_process_grounded_object_detection(
+            raw, input_ids=inputs["input_ids"], threshold=self.box_thr, text_threshold=self.text_thr,
+            target_sizes=[(h, w)])[0]
+        labels = post.get("text_labels") or post.get("labels")
+        out = []
+        for score, label, box in zip(post["scores"], labels, post["boxes"]):
+            lab = str(label).strip().lower()
+            owner = next((o for l, o in zip(self.labels, self.owners) if l == lab), None)
+            if owner is None:                          # 부분 일치("door pedestal")는 주인을 첫 일치로
+                owner = next((o for l, o in zip(self.labels, self.owners) if l in lab), None)
+            if owner:
+                out.append({"cls_name": owner, "prompt": lab, "conf": float(score),
+                            "xyxy": [float(v) for v in box.tolist()], "arm": self.name})
+        return out
+
+
+def _auto_free_vocab(name, vocab):
+    """직접 입력 대상의 prompt-free 어휘 지도 — 같은 이름, 그리고 중심 명사(마지막 낱말)가 같은 이름."""
+    name = name.lower().strip()
+    head = name.split()[-1]
+    out = [n for n in sorted(vocab) if n == name]
+    if head != name and head in vocab:
+        out.append(head)
+    return out
+
+
+class TargetedRunner:
+    """**지정 클래스 탐지** — 대상 · 근거를 프로필에서 받는다(탐지대상_런처_계획_261123.md).
+
+    후보: YOLOE 텍스트 arm(대상 문구 + 미끼) · YOLOE prompt-free arm(대상 free_vocab, 선택) ·
+          학습 검출기(demo_box). OVD(YOLO-World · GroundingDINO)는 **후보를 내지 않고** 판정의
+          근거(동의 · 짝 IoU)로만 쓴다 — main 의 '서로 다른 provider 동의' 를 점수로 옮긴 것이다.
+    판정: target_assess.TargetEvidence (역할: score · gate · veto). 결과 모양은 river 와 같다.
+    거리: 거리 측정이 켜졌을 때만 UniDepth(depth_track, 주기로 재고 트랙으로 나른다).
+          demo_box 는 Go1 카메라 프레임에서 박스 높이 식(k / h_px − c)을 쓴다.
+    """
+    name = "targeted"
+
+    def __init__(self, cfg, device):
+        self.cfg, self.device = cfg, device
+        resolved = cfg.get("_resolved")
+        if resolved is None:
+            from cue_catalog import resolve_profile
+            resolved = resolve_profile({}, {"models": {"targeted": cfg}}, ["targeted"])["targeted"]
+        self._build(resolved)
+
+    def _build(self, resolved):
+        import cue_catalog as cc
+        import target_assess as ta
+        cfg, device = self.cfg, self.device
+        self.resolved = resolved
+        self.targets = list(resolved["targets"])
+        self.names = [t["name"] for t in self.targets]
+        self.distance = bool(resolved.get("distance", True))
+        files = cc.model_files(cfg)
+        imgsz = int(cfg.get("imgsz", 1280))
+        arm_conf = float(cfg.get("arm_conf", 0.05))
+        self.conf = float(cfg.get("conf", 0.15))
+        self.merge_iou = float(cfg.get("merge_iou", 0.5))
+        self.max_det = int(cfg.get("max_det", 100))
+        self.area_cap = float(cfg.get("max_area_ratio", 0.9))
+        self.arms, self.missing = [], []
+        text_t = [t for t in self.targets if t.get("detector", "yoloe_text") == "yoloe_text"]
+        trained_t = [t for t in self.targets if t.get("detector") == "trained"]
+        # **같은 문구를 두 대상이 쓰면**(door · demo_door) 문구는 먼저 온 대상이 갖고, 뒤 대상은 그 후보를
+        # 복사해 받아 **자기 근거로 따로 판정**한다(alias). 한 문구를 두 이름이 나누면 어휘 argmax 가 둘로 갈린다.
+        self.alias = {}
+        if text_t:
+            spec, owner_of = {}, {}
+            for t in text_t:
+                mine = []
+                for p in (t.get("prompts") or [t["name"]]):
+                    k = str(p).strip().lower()
+                    if k in owner_of:
+                        self.alias.setdefault(owner_of[k], [])
+                        if t["name"] not in self.alias[owner_of[k]]:
+                            self.alias[owner_of[k]].append(t["name"])
+                        continue
+                    owner_of[k] = t["name"]
+                    mine.append(str(p))
+                if mine:
+                    spec[t["name"]] = mine
+            names = [n for n in (t["name"] for t in text_t) if n in spec]
+            want = {p.strip().lower() for ps in spec.values() for p in ps}
+            decoys = [d for d in (cfg.get("decoys") or []) if str(d).strip().lower() not in want]
+            prompts, owners = _expand_vocab(names, spec, decoys)
+            tw = files["yoloe_text"]
+            try:
+                self.arms.append(("yoloe", _TextArm(tw[0], tw[1].parent, prompts, owners, device, imgsz, arm_conf,
+                                                    self.max_det, bool(cfg.get("imgsz_follow_frame", True)))))
+            except _ArmMissing as exc:
+                raise SystemExit("targeted: YOLOE 텍스트 arm 을 못 세움 — %s" % exc)
+            self.decoys = decoys
+            free_t = [t for t in text_t if "free_arm" in t["cues"]]
+            if free_t:
+                fw = files["yoloe_free"][0]
+                try:
+                    from ultralytics import YOLOE
+                    vocab = {str(n).lower() for n in _cached(("yoloe_free", str(fw)),
+                                                             lambda: YOLOE(str(fw))).names.values()}
+                    vmap = {}
+                    for t in free_t:
+                        if any(t["name"] in v for v in self.alias.values()):
+                            continue                  # alias 대상은 주인의 후보를 받는다
+                        fv = t.get("free_vocab")
+                        fv = _auto_free_vocab(t["name"], vocab) if fv in (None, "auto") else fv
+                        unknown = [n for n in fv if n.lower() not in vocab]
+                        if unknown:
+                            log("  targeted %s: prompt-free 어휘에 없는 이름 %s — 뺍니다" % (t["name"], unknown))
+                        for n in fv:
+                            if n.lower() in vocab:
+                                vmap.setdefault(n.lower(), t["name"])
+                        t["_free_vocab_used"] = [n for n in fv if n.lower() in vocab]
+                        if not t["_free_vocab_used"]:
+                            log("  targeted %s: prompt-free 어휘에 비슷한 이름 없음 — 텍스트 문구로만 찾음" % t["name"])
+                    if vmap:
+                        fc = cfg.get("free") or {}
+                        self.arms.append(("yoloe_free", _FreeArm(
+                            fw, vmap, device, int(fc.get("imgsz", 1280)), float(fc.get("conf", arm_conf)),
+                            self.max_det, fc.get("scene_words") or [], fc.get("scene_min_area", 0.10))))
+                except _ArmMissing as exc:
+                    self.missing.append(("yoloe_free", str(exc)))
+        else:
+            self.decoys = []
+        self.trained = []
+        for t in trained_t:
+            try:
+                from demo_box import TrainedBoxArm
+                arm = _cached(("trained", t["name"], str(t["trained"]["weight"])), lambda: TrainedBoxArm(t, device))
+                self.trained.append((t["name"], arm))
+            except Exception as exc:
+                self.missing.append((t["name"], "%s: %s" % (type(exc).__name__, exc)))
+                log("  targeted %s 학습 검출기를 뺍니다 — %s" % (t["name"], exc))
+        # OVD — 대상이 OVD 근거를 고른 경우만
+        self.ovd = []
+        ovd_t = [t for t in text_t if "ovd_agree" in t["cues"] or "ovd_pair_iou" in t["cues"]]
+        ok = cc.ovd_available(cfg, files, ovd_t)
+        if ovd_t and "yolo_world" in ok:
+            labels, owners = [], []
+            for t in ovd_t:
+                for lab in (t.get("ovd_labels") or [t["name"]]):
+                    if str(lab) in labels:            # 같은 낱말 — 주인 하나, 나머지는 alias 로 받는다
+                        continue
+                    labels.append(str(lab))
+                    owners.append(t["name"])
+            oc = cfg.get("ovd") or {}
+            yw = files["yolo_world"]
+            try:
+                self.ovd.append(_OvdArm(yw[0], yw[1].parent.parent, labels, owners, device,
+                                        int(oc.get("imgsz", 640)), float(oc.get("conf", 0.05))))
+            except _ArmMissing as exc:
+                self.missing.append(("yolo_world", str(exc)))
+        if ovd_t and "grounding_dino" in ok:
+            labels, owners = [], []
+            for t in ovd_t:
+                for lab in (t.get("ovd_labels") or [t["name"]]):
+                    if str(lab).lower() not in labels:
+                        labels.append(str(lab).lower())
+                        owners.append(t["name"])
+            try:
+                self.ovd.append(_GdinoArm(files["gdino"][0].parent, labels, owners, device))
+            except _ArmMissing as exc:
+                self.missing.append(("grounding_dino", str(exc)))
+        self.ovd_rules = {t["name"]: (t.get("ovd_rules") or {}) for t in ovd_t}
+        # 거리
+        self.depth = None
+        dist_names = [t["name"] for t in self.targets if t.get("distance")]
+        if self.distance and dist_names:
+            dspec = dict(cfg.get("depth") or {}, enabled=True, classes=dist_names)
+            key = ("depth", json.dumps({k: v for k, v in dspec.items() if k != "classes"}, sort_keys=True))
+            import importlib.util as _ilu
+            if key not in _MODEL_CACHE:
+                _sp = _ilu.spec_from_file_location("depth_track", HERE / "depth_track.py")
+                _m = _ilu.module_from_spec(_sp)
+                _sp.loader.exec_module(_m)
+                _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
+            self.depth = _MODEL_CACHE[key]
+            self.depth.classes = tuple(dist_names)
+        self.evidence = ta.TargetEvidence(self.targets, files["clip"], log=log)
+        TARGET_STYLE.clear()
+        for t in self.targets:
+            rgb = t.get("colour_rgb") or [0, 200, 255]
+            TARGET_STYLE[t["name"]] = {"bgr": (int(rgb[2]), int(rgb[1]), int(rgb[0])), "shown": t.get("shown", t["name"])}
+        self.resolve_same_as = ta.resolve_same_as
+        self.same_as = {t["name"]: t.get("same_as") for t in self.targets if t.get("same_as")}
+        self.arm_names = [l for l, _ in self.arms] + [n for n, _ in self.trained] + [a.name for a in self.ovd]
+        self._streams, self._stream = {}, None
+        log("  targeted 대상 %d: %s · 거리 %s · arm %s%s"
+            % (len(self.names), ", ".join(self.names), "켬" if self.distance else "끔", "+".join(self.arm_names),
+               (" · 빠짐 " + ", ".join("%s(%s)" % m for m in self.missing)) if self.missing else ""))
+        for t in self.targets:
+            log("    %s: %s" % (t["name"], ", ".join("%s=%s" % kv for kv in t["cues"].items())))
+
+    def reconfigure(self, resolved):
+        """대상 · 근거 · 거리를 바꾼다. 무거운 모델은 캐시에서 다시 쓴다."""
+        self._build(resolved)
+        self._streams, self._stream = {}, None
+
+    def prewarm(self, resolved):
+        """**새로 필요한 무거운 모델만 미리 적재한다**(다른 스레드에서). 그동안 옛 설정으로 계속 돈다.
+        문구를 바꾸는 일(set_classes)은 여기서 하지 않는다 — 돌고 있는 모델을 건드리기 때문이다."""
+        import cue_catalog as cc
+        import target_assess as ta
+        files = cc.model_files(self.cfg)
+        need = cc.needed_models(resolved, self.cfg)
+        if "clip" in need:
+            ta._shared_clip(files["clip"])
+        if "yolo_world" in need:
+            from ultralytics import YOLO
+            _cached(("yolo_world", str(files["yolo_world"][0])), lambda: YOLO(str(files["yolo_world"][0])))
+        if "yoloe_free" in need:
+            from ultralytics import YOLOE
+            _cached(("yoloe_free", str(files["yoloe_free"][0])), lambda: YOLOE(str(files["yoloe_free"][0])))
+        for t in resolved["targets"]:
+            if t.get("detector") == "trained":
+                from demo_box import TrainedBoxArm
+                _cached(("trained", t["name"], str(t["trained"]["weight"])), lambda: TrainedBoxArm(t, self.device))
+        if resolved.get("distance") and any(t.get("distance") for t in resolved["targets"]):
+            dspec = dict(self.cfg.get("depth") or {}, enabled=True)
+            key = ("depth", json.dumps({k: v for k, v in dspec.items() if k != "classes"}, sort_keys=True))
+            if key not in _MODEL_CACHE:
+                import importlib.util as _ilu
+                _sp = _ilu.spec_from_file_location("depth_track", HERE / "depth_track.py")
+                _m = _ilu.module_from_spec(_sp)
+                _sp.loader.exec_module(_m)
+                _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
+
+    def use_stream(self, key):
+        """기기마다 거리 기억을 따로 둔다(river 와 같은 이유)."""
+        if key == self._stream or self.depth is None:
+            self._stream = key
+            return
+        dp = self.depth
+        if self._stream is not None:
+            self._streams[self._stream] = {"d_mem": dp._mem, "d_n": dp._n}
+        st = self._streams.get(key) or {}
+        dp._mem, dp._n = st.get("d_mem") or {}, st.get("d_n") or 0
+        self._stream = key
+
+    def _merge(self, raw, img_area):
+        kept = []
+        for det in sorted(raw, key=lambda d: -d["conf"]):
+            x1, y1, x2, y2 = det["xyxy"]
+            if (x2 - x1) * (y2 - y1) > self.area_cap * img_area:
+                continue
+            dup = next((o for o in kept if o["cls_name"] == det["cls_name"]
+                        and float(box_iou([o["xyxy"]], [det["xyxy"]])[0, 0]) >= self.merge_iou), None)
+            word = det.get("prompt") or det["cls_name"]
+            if dup is None:
+                kept.append({"cls_name": det["cls_name"], "conf": det["conf"], "xyxy": det["xyxy"],
+                             "arms": {det["arm"]}, "lead": word, "votes": {word: det["conf"]},
+                             "_poly": det.get("poly"), "extra": {k: v for k, v in det.items()
+                                                                 if k in ("box_gates", "box_distance",
+                                                                          "box_bearing", "camera_profile")}})
+            else:
+                dup["arms"].add(det["arm"])
+                if dup.get("_poly") is None and det.get("poly") is not None:
+                    dup["_poly"] = det["poly"]
+                if det["conf"] > dup["votes"].get(word, 0.0):
+                    dup["votes"][word] = det["conf"]
+        return kept
+
+    def __call__(self, bgr, roi_crop=None):
+        """roi_crop = [x1, y1, x2, y2] 이면 텍스트 · 프리 · OVD arm 은 그 안을 잘라 돌리고 좌표를 되돌린다.
+        학습 검출기(demo_box)는 **늘 전체 프레임** — 관문 상수가 Go1 테두리 crop 좌표계에 묶여 있다."""
+        t0 = time.perf_counter()
+        raw, arm_ms, decoyed = [], {}, 0
+        if roi_crop is not None:
+            ox, oy = roi_crop[0], roi_crop[1]
+            sub = np.ascontiguousarray(bgr[roi_crop[1]:roi_crop[3], roi_crop[0]:roi_crop[2]])
+        else:
+            ox = oy = 0
+            sub = bgr
+
+        def back(found):
+            if roi_crop is None:
+                return found
+            for d in found:
+                x1, y1, x2, y2 = d["xyxy"]
+                d["xyxy"] = [x1 + ox, y1 + oy, x2 + ox, y2 + oy]
+                if d.get("poly") is not None:
+                    d["poly"] = np.asarray(d["poly"], np.float32) + np.array([ox, oy], np.float32)
+            return found
+        for label, arm in self.arms:
+            a0 = time.perf_counter()
+            try:
+                found = back(arm(sub))
+            except Exception as exc:
+                log("  targeted arm %s 실패: %s: %s" % (label, type(exc).__name__, exc))
+                found = []
+            arm_ms[label] = round((time.perf_counter() - a0) * 1000, 1)
+            for d in found:
+                if d["cls_name"] == DECOY:
+                    decoyed += 1
+                    continue
+                raw.append(dict(d, arm=label))
+        rejected, by_gates = [], []
+        for name, arm in self.trained:
+            try:
+                found, rej, byg, ms = arm(bgr)
+            except Exception as exc:
+                log("  targeted %s 실패: %s: %s" % (name, type(exc).__name__, exc))
+                found, rej, byg, ms = [], [], [], None
+            arm_ms[name] = ms
+            rejected += [dict(r, target=name) for r in rej]
+            by_gates += [dict(r, target=name) for r in byg]
+            raw += [dict(d, arm=name) for d in found]
+        ovd = {}
+        for arm in self.ovd:
+            a0 = time.perf_counter()
+            try:
+                found = back(arm(sub))
+            except Exception as exc:
+                log("  targeted OVD %s 실패: %s: %s" % (arm.name, type(exc).__name__, exc))
+                found = []
+            arm_ms[arm.name] = round((time.perf_counter() - a0) * 1000, 1)
+            for d in found:
+                ovd.setdefault(d["cls_name"], []).append(dict(d, arm=getattr(arm, "arm", arm.name)))
+        img_area = float(bgr.shape[0] * bgr.shape[1])
+        dets = []
+        for g in self._merge(raw, img_area):
+            if g["conf"] < self.conf and not g["extra"]:
+                continue
+            d = {"cls": self.names.index(g["cls_name"]), "name": g["cls_name"], "conf": round(float(g["conf"]), 4),
+                 "xyxy": [round(float(v), 1) for v in g["xyxy"]], "agree": len(g["arms"]), "arms": sorted(g["arms"]),
+                 "lead": g["lead"], "votes": {k: round(float(v), 4) for k, v in
+                                              sorted(g["votes"].items(), key=lambda t: -t[1])},
+                 "_poly": g.get("_poly")}
+            d.update(g["extra"])
+            if g["cls_name"] in self.same_as:
+                d["_same_as"] = self.same_as[g["cls_name"]]
+            dets.append(d)
+        for src, names in self.alias.items():         # 같은 후보를 alias 대상에도 준다(각자 판정)
+            for d in [d for d in dets if d["name"] == src]:
+                for n in names:
+                    c = dict(d, name=n, cls=self.names.index(n))
+                    if n in self.same_as:
+                        c["_same_as"] = self.same_as[n]
+                    dets.append(c)
+        for src, names in self.alias.items():
+            for n in names:
+                if src in ovd:
+                    ovd.setdefault(n, []).extend(ovd[src])
+        # **받는 대상의 규칙으로 거른다**(main grounding_dino_evidence) — demo_door 는 GDINO 라벨이 정확히
+        # door 이고 점수 0.25 이상인 상자만. 문 상자를 복사해 받으므로 거르는 것도 받은 뒤다
+        for n in list(ovd):
+            rules = self.ovd_rules.get(n) or {}
+            keep = []
+            for d in ovd[n]:
+                rule = rules.get(d["arm"]) or {}
+                if rule.get("exact_label") and str(d.get("prompt", "")).strip() not in self._labels(n):
+                    continue
+                if d["conf"] < float(rule.get("min_score", 0.0)):
+                    continue
+                keep.append(d)
+            ovd[n] = keep
+        dets.sort(key=lambda d: -d["conf"])
+        del dets[self.max_det:]
+        depth_ms = 0.0
+        if self.distance:
+            box_cm = [d for d in dets if (d.get("box_distance") or {}).get("distance_cm") is not None]
+            for d in box_cm:
+                d["dist"] = {"value": round(d["box_distance"]["distance_cm"] / 100.0, 3), "space": "metric",
+                             "source": "box_height", "age": 0}
+            if self.depth is not None:
+                rest = [d for d in dets if d not in box_cm]
+                depth_ms = self.depth(bgr, rest)
+        assess_ms = self.evidence(bgr, dets, ovd)
+        dets = self.resolve_same_as(dets)
+        for d in dets:
+            d.pop("_same_as", None)
+        ms = (time.perf_counter() - t0) * 1000
+        return {"infer_ms": round(ms, 1), "targets": list(self.names),
+                "cues": {t["name"]: dict(t["cues"]) for t in self.targets},
+                "provisional": [t["name"] for t in self.targets if t.get("provisional")],
+                "distance": self.distance, "arms": list(self.arm_names), "arm_ms": arm_ms,
+                "missing_arms": [m[0] for m in self.missing], "depth_ms": depth_ms, "assess_ms": assess_ms,
+                "decoy_dropped": decoyed, "rejected_candidates": rejected, "rejected_by_gates": by_gates,
+                "ovd_boxes": sum(len(v) for v in ovd.values()), "prompt": "targeted"}, dets
+
+    def _labels(self, name):
+        t = next((t for t in self.targets if t["name"] == name), {})
+        return [str(x).lower() for x in (t.get("ovd_labels") or [name])]
+
+
 RUNNERS = {"yoloe": YoloeRunner, "river": RiverRunner, "river_open": RiverRunner,
+           "targeted": TargetedRunner,
            "unidepth": UniDepthRunner, "moge2_aerial": MogeAerialRunner}
 
 
@@ -2310,10 +2848,197 @@ def add_header(img, lines, ocfg):
     return np.vstack([band, img])
 
 
-def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
+def detect_overlay(bgr, dets, title, ocfg, kind="yoloe", rec=None, rects=None):
+    blk = (ocfg.get(kind) or {}) if isinstance(ocfg.get(kind), dict) else {}
+    lines = [title if ocfg.get("title", True) else None]
+    if blk.get("count") and rec is not None:
+        lines.append(count_line(rec.get("counts"), bool(rects)))
+    if kind == "targeted":
+        out = _targeted_overlay(bgr, dets, ocfg, blk, rec)
+        if rects:
+            out = draw_roi(out, rects)
+        return add_header(out, lines, ocfg)
+    out = _detect_overlay(bgr, dets, ocfg, kind)
+    if rects:
+        out = draw_roi(out, rects)
+    return add_header(out, lines, ocfg)
+
+
+def count_line(counts, in_roi=False):
+    body = " · ".join("%s %d" % kv for kv in (counts or {}).items()) or "0"
+    return ("[ROI] " if in_roi else "") + body
+
+
+def draw_roi(img, rects):
+    """구역 밖을 어둡게, 구역은 점선 테두리."""
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), bool)
+    for r in rects:
+        x1, y1, x2, y2 = [int(round(v)) for v in r]
+        mask[max(0, y1):min(h, y2), max(0, x1):min(w, x2)] = True
+    out = img.copy()
+    out[~mask] = (out[~mask] * 0.45).astype(np.uint8)
+    for r in rects:
+        x1, y1, x2, y2 = [int(round(v)) for v in r]
+        for i in range(x1, x2, 12):
+            cv2.line(out, (i, y1), (min(i + 6, x2), y1), (255, 255, 255), 2)
+            cv2.line(out, (i, y2), (min(i + 6, x2), y2), (255, 255, 255), 2)
+        for j in range(y1, y2, 12):
+            cv2.line(out, (x1, j), (x1, min(j + 6, y2)), (255, 255, 255), 2)
+            cv2.line(out, (x2, j), (x2, min(j + 6, y2)), (255, 255, 255), 2)
+    return out
+
+
+#: 지정 클래스 대상의 색 · 보이는 이름 — TargetedRunner 가 채운다
+TARGET_STYLE = {}
+
+
+def _targeted_overlay(bgr, dets, ocfg, blk, rec):
+    """판정된 대상은 대상 색 + 고른 라벨, 판정 아닌 검출은 회색(끄면 안 그림), 관문에 떨어진 demo_box 는 빨간 점선."""
+    other = (165, 155, 150)
+    dec = int(ocfg.get("gps_decimals", 6))
+    spec = label_spec(ocfg, "targeted")
+    show_other = bool(blk.get("show_non_suspect", True))
+    marked = []
+    for d in dets or []:
+        a = d.get("assess") or {}
+        sus = a.get("suspect")
+        st = TARGET_STYLE.get(d.get("name")) or {}
+        if sus:
+            parts = []
+            for line in spec:
+                toks = []
+                for k in line:
+                    if k in ("name", "lead"):
+                        toks.append(st.get("shown", sus))
+                    else:
+                        v = label_token(k, d, dec)
+                        if v:
+                            toks.append(v)
+                if toks:
+                    parts.append(" ".join(toks))
+            if parts and a.get("score") is not None:
+                parts[0] += "  %d" % round(a["score"])
+            marked.append(dict(d, _label="  ".join(parts), _colour=st.get("bgr", (0, 200, 255))))
+        elif show_other:
+            marked.append(dict(d, _label=d.get("lead") or "", _colour=other))
+    out = bgr.copy()
+    drawn = []
+    draw_dets(out, marked, ocfg, "targeted", lambda x: x["_colour"], drawn)
+    if blk.get("show_rejected") and rec:
+        for r in rec.get("rejected_by_gates") or []:
+            x1, y1, x2, y2 = [int(round(v)) for v in r["bbox"]]
+            for i in range(x1, x2, 10):
+                cv2.line(out, (i, y1), (min(i + 5, x2), y1), (60, 60, 230), 2)
+                cv2.line(out, (i, y2), (min(i + 5, x2), y2), (60, 60, 230), 2)
+            for j in range(y1, y2, 10):
+                cv2.line(out, (x1, j), (x1, min(j + 5, y2)), (60, 60, 230), 2)
+                cv2.line(out, (x2, j), (x2, min(j + 5, y2)), (60, 60, 230), 2)
+    cards = blk.get("cards")
+    if cards is True or cards == "always":
+        out = _targeted_cards(out, dets, drawn)
+    return out
+
+
+def _targeted_cards(img, dets, obstacles, max_cards=5):
+    """'항상' 카드 — 판정된 대상마다 근거 줄을 상자 옆에 그린다(PIL · 한글 글꼴)."""
+    sus = [d for d in dets or [] if (d.get("assess") or {}).get("suspect")]
+    if not sus:
+        return img
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        font_path = _cards_module().find_font()
+        fs = max(12, int(img.shape[1] / 90))
+        font = ImageFont.truetype(str(font_path), fs) if font_path else ImageFont.load_default()
+    except Exception as exc:
+        log("  targeted 카드 실패: %s" % exc)
+        return img
+    from cue_catalog import CUES
+    H, W = img.shape[:2]
+    probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+    taken = [tuple(o) for o in obstacles or []]
+    sus.sort(key=lambda d: -((d.get("assess") or {}).get("score") or 0))
+    lh = fs + 6
+    bar_w = int(fs * 5)
+    pad = 8
+    cards, side = [], []
+    for d in sus[:max_cards]:
+        a = d["assess"]
+        name = a["suspect"]
+        st = TARGET_STYLE.get(name) or {}
+        card = (a.get("cards") or {}).get(name) or {}
+        rows = []
+        for k, pct, txt in card.get("rows") or []:
+            label = (CUES.get(k) or {}).get("label") or {"distance": "거리"}.get(k, k)
+            rows.append((label, pct, str(txt)[:40]))
+        head = st.get("shown", name)
+        score = "-" if a.get("score") is None else "%d/100" % round(a["score"])
+        lab_w = int(max([probe.textlength(r[0], font=font) for r in rows] + [0])) + 8
+        pct_w = int(probe.textlength("100%", font=font)) + 8
+        txt_w = int(max([probe.textlength(r[2], font=font) for r in rows] + [0]))
+        cw = max(pad * 2 + lab_w + bar_w + 6 + pct_w + txt_w,
+                 pad * 2 + int(probe.textlength(head + "  " + score, font=font)))
+        ch = pad * 2 + lh * (len(rows) + 1)
+        x1, y1, x2, y2 = d["xyxy"]
+        pick = None
+        for cx, cy in [(x2 + 8, y1), (x1 - cw - 8, y1), (x1, y2 + 8), (x1, y1 - ch - 8)]:
+            cx, cy = int(cx), int(cy)
+            if cx < 0 or cy < 0 or cx + cw > W or cy + ch > H:
+                continue
+            box = (cx, cy, cx + cw, cy + ch)
+            if not any(not (box[2] <= o[0] or o[2] <= box[0] or box[3] <= o[1] or o[3] <= box[1]) for o in taken):
+                pick = box
+                break
+        rgb = tuple(int(v) for v in (st.get("bgr") or (0, 200, 255))[::-1])
+        item = (head, score, rows, lab_w, pct_w, rgb, a.get("score"))
+        if pick is None:                       # **자리가 없으면 오른쪽 패널에 쌓는다** — 장면을 가리지 않는다
+            side.append((item, cw, ch, d))
+        else:
+            taken.append(pick)
+            cards.append((pick, item))
+    pw = max([c[1] for c in side], default=0)
+    canvas = img if not side else np.hstack([img, np.full((H, pw + 8, 3), 17, np.uint8)])
+    pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    dr = ImageDraw.Draw(pil)
+    y = 4
+    for item, cw, ch, d in side:
+        if y + ch > H:
+            break
+        box = (W + 4, y, W + 4 + cw, y + ch)
+        cards.append((box, item))
+        x1, y1, x2, y2 = d["xyxy"]
+        dr.line([(int(x2), int((y1 + y2) / 2)), (box[0], box[1] + pad + lh // 2)], fill=item[5], width=1)
+        y += ch + 6
+    grey, bar_bg, white = (154, 163, 178), (58, 62, 70), (230, 230, 230)
+    for box, (head, score, rows, lab_w, pct_w, rgb, sc) in cards:
+        # 이전 카드(river · 웹 화면)와 같은 모양 — 머리: 대상 색 이름 + 점수, 줄: 근거 · 막대 · % · **세부는 회색**
+        dr.rectangle(box, fill=(24, 27, 33), outline=rgb, width=2)
+        x0, y0 = box[0] + pad, box[1] + pad
+        dr.text((x0, y0), head, font=font, fill=rgb)
+        hc = (90, 160, 255) if (sc or 0) >= 60 else ((255, 150, 60) if (sc or 0) >= 40 else (255, 110, 100))
+        dr.text((x0 + probe.textlength(head + "  ", font=font), y0), score, font=font, fill=hc)
+        for i, (label, pct, txt) in enumerate(rows):
+            yy = y0 + lh * (i + 1)
+            dr.text((x0, yy), label, font=font, fill=white)
+            bx = x0 + lab_w
+            if pct is None:
+                dr.text((bx, yy), txt, font=font, fill=grey)
+                continue
+            by = yy + lh // 2 - 4
+            dr.rectangle((bx, by, bx + bar_w, by + 8), fill=bar_bg)
+            dr.rectangle((bx, by, bx + int(bar_w * max(0.0, min(100.0, pct)) / 100.0), by + 8), fill=white)
+            p = "%d%%" % round(pct)
+            px = bx + bar_w + 6
+            dr.text((px + pct_w - 8 - probe.textlength(p, font=font), yy), p, font=font, fill=white)
+            dr.text((px + pct_w, yy), txt, font=font, fill=grey)
+    return cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+
+
+def _detect_overlay(bgr, dets, ocfg, kind):
     # 카드를 쓰는 배치에서는 **색의 주인도 카드 쪽**이다 — 위험물 노랑, 나머지 회색.
     # 두 곳이 색을 따로 정하면 같은 상자가 화면마다 다른 색이 된다.
     use_cards = ((ocfg.get(kind) or {}) if isinstance(ocfg.get(kind), dict) else {}).get("cards")
+    use_cards = use_cards is True or use_cards == "always"     # 프로필의 off · hover 는 그림에 안 넣는다
     colour_fn = None
     if use_cards:
         try:
@@ -2360,7 +3085,7 @@ def detect_overlay(bgr, dets, title, ocfg, kind="yoloe"):
                 obstacles=drawn)                 # **카드는 그려진 박스·라벨을 가리지 않는다**
         except Exception as exc:                 # 카드가 실패해도 오버레이는 나간다
             log("  overlay 카드 실패: %s: %s" % (type(exc).__name__, exc))
-    return add_header(out, [title if ocfg.get("title", True) else None], ocfg)
+    return out
 
 
 def _cards_module(_m=[]):
@@ -2455,53 +3180,216 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
     out = []
     dets = None
     stab = None
-    det_model = active_detector(runners)
-    if isinstance(save_detect, (set, frozenset, list, tuple)):
-        wanted = det_model in set(save_detect)
-    else:
-        wanted = bool(save_detect)
-    if det_model and (wanted or (depth_models and fusion.get("enabled", True))):
-        if hasattr(runners[det_model], "use_stream"):      # 기기마다 따로 기억하는 실행기
-            runners[det_model].use_stream((device, base.get("run")))
-        info, dets = runners[det_model](bgr)
-        sc = stabilize_cfg(cfg, det_model)
-        if sc.get("enabled", True):
-            key = (device, base.get("run"), det_model)
-            stab = cfg.setdefault("_stab", {}).get(key)
-            if stab is None:
-                backend = str(sc.get("backend", "builtin")).lower()
-                try:
-                    stab = (Stabilizer(sc) if backend == "builtin" else VendorTracker(sc))
-                except _ArmMissing as exc:             # 트래커만 끈다 (AI-C-05)
-                    log("  트래킹을 끕니다 — %s" % exc)
-                    stab = False
-                cfg["_stab"][key] = stab
-            ts = frame_ts(header)
-            lab = cfg.setdefault("_lab", {}).get(key)
-            if lab is None:
-                lab = cfg["_lab"][key] = LabelStabilizer(sc)
-            dets = lab.update(dets, ts if ts is not None else time.time())
-            if stab:
-                dets = (stab.update(dets, ts if ts is not None else time.time(), bgr)
-                        if isinstance(stab, VendorTracker)
-                        else stab.update(dets, ts if ts is not None else time.time()))
-        # **판정이 장마다 흔들리지 않게**(assess_smooth, 2026-11-13) — 트랙 번호가 붙은 뒤에
-        asm = ((cfg.get("models") or {}).get(det_model) or {}).get("assess_smooth")
-        if asm and asm.get("enabled", True):
-            skey = (device, base.get("run"), det_model)
-            sm = cfg.setdefault("_asm", {}).get(skey)
-            if sm is None:
-                sm = cfg["_asm"][skey] = AssessSmoother(asm)
-            dets = sm.update(dets)
-        if wanted:
-            rec = dict(base, model=det_model, **info)
-            rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]
-            title = "%s  %s/%s #%s" % (det_model, device, base.get("run") or "live", base.get("n"))
-            out.append((det_model, rec,
-                        detect_overlay(bgr, rec["detections"], title, ocfg, det_model), None))
+    fuse_model = active_detector(runners)
+    roi = ((cfg.get("_roi") or {}).get(device)) or None
+    # **고른 검출 모델을 모두 돌린다**(2026-11-23). 예전에는 첫 하나만 돌았다 — 로그는 "둘 다 저장"
+    # 이라 했지만 infer_frame 은 active_detector 하나만 불렀다. depth 결합·GPS 는 지금처럼 첫 하나에만.
+    for det_model in [m for m in DETECT_MODELS if m in runners]:
+        if isinstance(save_detect, (set, frozenset, list, tuple)):
+            wanted = det_model in set(save_detect)
+        else:
+            wanted = bool(save_detect)
+        fusing = det_model == fuse_model and depth_models and fusion.get("enabled", True)
+        if not (wanted or fusing):
+            continue
+        d_out, d_stab = _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, wanted)
+        if d_out[0] is not None:
+            out.append(d_out[:4])
+        if det_model == fuse_model:
+            dets, stab = d_out[4], d_stab
     fov = fov_hint(dev_cfg, header)
     pose = []                                           # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
+    return _infer_depth(out, dets, stab, bgr, base, header, device, depth_models, runners, cfg, pose_fn,
+                        fusion, vis, ocfg, locator, fov, pose, w)
 
+
+# ---------------------------------------------------------------- 구역(ROI, 웹 화면에서 끌어 지정, 2026-11-23)
+def roi_applies(roi, model):
+    return bool(roi and roi.get("rects") and (not roi.get("model") or roi.get("model") == model))
+
+
+def roi_rects_px(roi, w, h):
+    out = []
+    for r in roi.get("rects") or []:
+        x1, y1, x2, y2 = (float(v) for v in r)
+        x1, x2 = sorted((max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))))
+        y1, y2 = sorted((max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))))
+        if (x2 - x1) * w >= 4 and (y2 - y1) * h >= 4:
+            out.append([x1 * w, y1 * h, x2 * w, y2 * h])
+    return out
+
+
+def roi_crop_box(rects, w, h, margin=0.10, full_above=0.60):
+    """자를 상자 하나 — 구역이 하나이고 화면의 full_above 보다 작을 때만. 아니면 None(전체 프레임)."""
+    if len(rects) != 1:
+        return None
+    x1, y1, x2, y2 = rects[0]
+    if (x2 - x1) * (y2 - y1) >= full_above * w * h:
+        return None
+    mx, my = (x2 - x1) * margin, (y2 - y1) * margin
+    return [int(max(0, x1 - mx)), int(max(0, y1 - my)), int(min(w, np.ceil(x2 + mx))), int(min(h, np.ceil(y2 + my)))]
+
+
+def roi_offset(dets, ox, oy):
+    """자른 그림에서 낸 검출 좌표를 원래 프레임으로 되돌린다."""
+    for d in dets:
+        x1, y1, x2, y2 = d["xyxy"]
+        d["xyxy"] = [round(x1 + ox, 1), round(y1 + oy, 1), round(x2 + ox, 1), round(y2 + oy, 1)]
+        if d.get("_poly") is not None:
+            d["_poly"] = np.asarray(d["_poly"], np.float32) + np.array([ox, oy], np.float32)
+        if d.get("polygon"):
+            d["polygon"] = [[round(px + ox, 1), round(py + oy, 1)] for px, py in d["polygon"]]
+    return dets
+
+
+def roi_keep(d, rects, w, h, need=0.5):
+    """**분할 마스크 기준.** 마스크 넓이의 need 이상이 구역 안이어야 남긴다. 마스크가 없으면 상자 중심.
+    상자로 거르면 구역에 걸친 큰 물체(벽 · 책상 상판)가 들어온다."""
+    poly = d.get("_poly")
+    if poly is not None and len(poly) >= 3:
+        x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2 + 1), min(h, y2 + 1)
+        if x2 > x1 and y2 > y1:
+            m = np.zeros((y2 - y1, x2 - x1), np.uint8)
+            cv2.fillPoly(m, [np.round(np.asarray(poly) - (x1, y1)).astype(np.int32)], 1)
+            total = int(m.sum())
+            if total > 0:
+                inside = np.zeros_like(m)
+                for r in rects:
+                    a, b = int(max(0, r[0] - x1)), int(max(0, r[1] - y1))
+                    c, e = int(min(x2 - x1, r[2] - x1)), int(min(y2 - y1, r[3] - y1))
+                    if c > a and e > b:
+                        inside[b:e, a:c] = 1
+                return float((m & inside).sum()) / total >= need
+    cx, cy = (d["xyxy"][0] + d["xyxy"][2]) / 2, (d["xyxy"][1] + d["xyxy"][3]) / 2
+    return any(r[0] <= cx <= r[2] and r[1] <= cy <= r[3] for r in rects)
+
+
+@contextlib.contextmanager
+def _upscale_crop(runner, on):
+    """구역을 잘라 볼 때는 **키워서** 본다 — 그것이 자르는 이유다. 다만 640 까지만: 실측(robot1 의자, 168x216 crop)
+    224 → 0.10 · 640 → 0.30 · 1280 → 0.09. 맥락 없이 너무 키우면 오히려 못 찾는다. 큰 구역은 제 크기대로."""
+    arms = [a for _l, a in (getattr(runner, "arms", None) or []) if getattr(a, "follow_frame", False)] if on else []
+    for a in arms:
+        a.crop_floor = 640
+    try:
+        yield
+    finally:
+        for a in arms:
+            a.crop_floor = None
+
+
+def count_dets(model, dets, ocfg):
+    """탐지 개수 — yoloe 는 그린 검출, river · targeted 는 **판정된 것만**(회색은 세지 않는다)."""
+    out = {}
+    min_conf = ocfg.get("min_conf")
+    for d in dets or []:
+        a = d.get("assess") or {}
+        if model in ("river", "targeted"):
+            name = a.get("suspect")
+            if not name:
+                continue
+        else:
+            if min_conf is not None and d["conf"] < float(min_conf):
+                continue
+            name = d["name"]
+        out[name] = out.get(name, 0) + 1
+    return dict(sorted(out.items(), key=lambda t: (-t[1], t[0])))
+
+
+def model_ocfg(ocfg, cfg, model, device):
+    """yaml overlay 위에 프로필의 그 모델 오버레이(그리고 기기별)를 덮은 것."""
+    prefs = dict(((cfg.get("_overlay") or {}).get(model)) or {})
+    prefs.update(((cfg.get("_overlay_dev") or {}).get(device) or {}).get(model) or {})
+    if not prefs:
+        return ocfg, prefs
+    o = dict(ocfg)
+    blk = dict(ocfg.get(model) or {}) if isinstance(ocfg.get(model), dict) else {}
+    for k, v in prefs.items():
+        if k == "title":
+            o["title"] = v
+        else:
+            blk[k] = v
+    o[model] = blk
+    return o, prefs
+
+
+def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, wanted):
+    """검출 모델 하나 — (모델, 기록, 오버레이, None, 결합용 검출) 와 트래커. wanted 가 아니면 기록은 None."""
+    runner = runners[det_model]
+    if hasattr(runner, "use_stream"):                  # 기기마다 따로 기억하는 실행기
+        runner.use_stream((device, base.get("run")))
+    H, W = bgr.shape[:2]
+    rects = roi_rects_px(roi, W, H) if roi_applies(roi, det_model) else []
+    crop = roi_crop_box(rects, W, H) if rects else None
+    with _upscale_crop(runner, crop is not None):
+        if det_model == "targeted":
+            info, dets = runner(bgr, roi_crop=crop)
+        elif crop is not None:
+            info, dets = runner(np.ascontiguousarray(bgr[crop[1]:crop[3], crop[0]:crop[2]]))
+            dets = roi_offset(dets, crop[0], crop[1])
+        else:
+            info, dets = runner(bgr)
+    if rects:
+        before = len(dets)
+        dets = [d for d in dets if roi_keep(d, rects, W, H)]
+        info = dict(info, roi={"version": roi.get("version"), "rects": roi.get("rects"),
+                               "mode": "crop" if crop is not None else "full", "kept": len(dets),
+                               "dropped": before - len(dets)})
+    stab = None
+    sc = stabilize_cfg(cfg, det_model)
+    if sc.get("enabled", True):
+        key = (device, base.get("run"), det_model)
+        stab = cfg.setdefault("_stab", {}).get(key)
+        if stab is None:
+            backend = str(sc.get("backend", "builtin")).lower()
+            try:
+                stab = (Stabilizer(sc) if backend == "builtin" else VendorTracker(sc))
+            except _ArmMissing as exc:             # 트래커만 끈다 (AI-C-05)
+                log("  트래킹을 끕니다 — %s" % exc)
+                stab = False
+            cfg["_stab"][key] = stab
+        ts = frame_ts(header)
+        lab = cfg.setdefault("_lab", {}).get(key)
+        if lab is None:
+            lab = cfg["_lab"][key] = LabelStabilizer(sc)
+        dets = lab.update(dets, ts if ts is not None else time.time())
+        if stab:
+            dets = (stab.update(dets, ts if ts is not None else time.time(), bgr)
+                    if isinstance(stab, VendorTracker)
+                    else stab.update(dets, ts if ts is not None else time.time()))
+    # **판정이 장마다 흔들리지 않게**(assess_smooth, 2026-11-13) — 트랙 번호가 붙은 뒤에
+    asm = ((cfg.get("models") or {}).get(det_model) or {}).get("assess_smooth")
+    if asm and asm.get("enabled", True):
+        skey = (device, base.get("run"), det_model)
+        sm = cfg.setdefault("_asm", {}).get(skey)
+        if sm is None:
+            sm = cfg["_asm"][skey] = AssessSmoother(asm)
+        dets = sm.update(dets)
+    if not wanted:
+        return (None, None, None, None, dets), stab
+    om, prefs = model_ocfg(ocfg, cfg, det_model, device)
+    rec = dict(base, model=det_model, **info)
+    rec["detections"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in dets]
+    rec["counts"] = count_dets(det_model, rec["detections"], om)
+    mblk = om.get(det_model) if isinstance(om.get(det_model), dict) else {}
+    cards = mblk.get("cards")
+    rec["overlay_prefs"] = {"cards": ("always" if cards is True or cards == "always" else
+                                      "off" if cards == "off" else "hover") if det_model in ("river", "targeted")
+                            else "off",
+                            "count": bool(mblk.get("count", False)),
+                            "show_non_suspect": bool(mblk.get("show_non_suspect", True))}
+    if cfg.get("_profile_label") is not None or cfg.get("_profile_version") is not None:
+        rec["profile"] = {"label": cfg.get("_profile_label"), "version": cfg.get("_profile_version")}
+    title = "%s  %s/%s #%s" % (det_model, device, base.get("run") or "live", base.get("n"))
+    overlay = detect_overlay(bgr, rec["detections"], title, om, det_model, rec=rec, rects=rects)
+    return (det_model, rec, overlay, None, dets), stab
+
+
+def _infer_depth(out, dets, stab, bgr, base, header, device, depth_models, runners, cfg, pose_fn,
+                 fusion, vis, ocfg, locator, fov, pose, w):
+    """infer_frame 의 깊이 모델 부분 (그대로 옮겼다)."""
     def add_depth_fields(rec, depth, K, w):
         rec["depth_stats"] = depth_stats(depth)
         rec["intrinsics"] = np.round(K.astype(np.float64), 3).tolist()
@@ -2635,6 +3523,106 @@ def _process_run(device, run, own, runners, cfg, args, frames):
     return done
 
 
+# ---------------------------------------------------------------- 프로필 (런처 · 명령줄, 2026-11-23)
+def cli_profile(args, models, base=None):
+    """--profile 파일 위에 명령줄 지정(--target · --cues · --no-distance · --cards · --label · --count)을 덮는다."""
+    import cue_catalog as cc
+    prof = json.loads(json.dumps(base or {}))
+    pm = prof.setdefault("models", {})
+    if args.target:
+        cues = cc.parse_cues_arg(args.cues) if args.cues else None
+        ts = []
+        for t in args.target:
+            spec = cc.parse_target_arg(t)
+            if cues is not None:
+                spec["cues"] = cues
+            ts.append(spec)
+        pm.setdefault("targeted", {})["targets"] = ts
+    elif args.cues:
+        raise SystemExit("--cues 는 --target 과 함께 준다")
+    if args.no_distance:
+        pm.setdefault("targeted", {})["distance"] = False
+    over = {}
+    if args.cards:
+        over["cards"] = args.cards
+    if args.label:
+        over["label"] = [[t.strip() for t in args.label.split(",") if t.strip()]]
+    if args.count:
+        over["count"] = True
+    if over:
+        opts = cc.overlay_options(models, not args.no_distance)
+        for m in models:
+            o = {k: v for k, v in over.items() if k == "label" or opts[m].get(k) is True}
+            if "label" in o:
+                o["label"] = [[t for t in o["label"][0] if opts[m].get({"dist": "dist", "range": "dist",
+                               "depth": "dist", "gps": "gps", "alt": "gps", "ned": "gps", "conf": "conf",
+                               "id": "id"}.get(t, "name")) is True]]
+            if o:
+                pm.setdefault(m, {}).setdefault("overlay", {}).update(o)
+    return prof
+
+
+def apply_profile(cfg, resolved):
+    """확정된 프로필을 cfg 에 건다 — 오버레이는 그대로, targeted 는 _resolved 로."""
+    cfg["_overlay"] = resolved.get("overlay") or {}
+    cfg["_overlay_dev"] = resolved.get("devices") or {}
+    cfg["_profile_label"] = resolved.get("label")
+    cfg["_profile_version"] = resolved.get("version")
+    if resolved.get("targeted") is not None:
+        cfg["models"].setdefault("targeted", {})["_resolved"] = resolved["targeted"]
+
+
+def load_profile_file(path):
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+class ProfileWatch:
+    """런처가 바꾸는 프로필 파일을 지켜본다(1초마다 수정 시각만). 바뀌면 다시 읽어 확정한다.
+    **틀린 프로필은 반영하지 않는다** — 옛 설정을 유지하고 상태 파일에 이유를 쓴다(런처 상태 줄)."""
+
+    def __init__(self, path, args, models, devices, cfg):
+        self.path = Path(path)
+        self.args, self.models, self.cfg = args, models, cfg
+        self.mtime = self._mtime()
+        self.t = 0.0
+        tag = "%s_%s" % ("-".join(models), "-".join(devices))
+        self.status_path = self.path.with_name("status_%s.json" % re.sub(r"[^A-Za-z0-9_\-]", "_", tag)[:120])
+        self.pending = None                         # (resolved, thread)
+
+    def _mtime(self):
+        try:
+            return self.path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def status(self, ok, msg, version=None):
+        try:
+            self.status_path.write_text(json.dumps({"ok": ok, "message": msg, "version": version,
+                                                    "models": self.models, "at": iso_ms()},
+                                                   ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+    def poll(self):
+        """바뀌었으면 확정된 프로필, 아니면 None. 틀렸으면 None 과 상태 기록."""
+        now = time.time()
+        if now - self.t < 1.0:
+            return None
+        self.t = now
+        m = self._mtime()
+        if m is None or m == self.mtime:
+            return None
+        self.mtime = m
+        import cue_catalog as cc
+        try:
+            prof = cli_profile(self.args, self.models, load_profile_file(self.path))
+            return cc.resolve_profile(prof, self.cfg, self.models)
+        except (cc.ProfileError, ValueError, OSError) as exc:
+            log("프로필 반영 안 함 — %s (옛 설정 유지)" % exc)
+            self.status(False, str(exc))
+            return None
+
+
 # ---------------------------------------------------------------- live (실시간)
 class LiveRunner:
     """Redis camera_stream:<기기> 에서 기기마다 가장 최근 프레임만 꺼내 추론하고
@@ -2642,8 +3630,10 @@ class LiveRunner:
     디스크 <실행>/vision/<모델>/ 에도 오프라인과 같은 형식으로 저장한다.
     처리하는 사이에 들어온 프레임은 건너뛴다 (그 프레임은 나중에 --runs 로 오프라인 처리)."""
 
-    def __init__(self, devices, models, runners, cfg, data_root):
+    def __init__(self, devices, models, runners, cfg, data_root, watch=None):
         import redis
+        self.watch = watch
+        self.roi_t = {}
         self.redis_mod = redis
         lc = cfg.get("live", {}) or {}
         self.lc = lc
@@ -2735,6 +3725,7 @@ class LiveRunner:
                 self.warn_once(("nodir", dv), "%s 저장 폴더가 없음 (%s) — config data_root 가 서버 --save 와 같은지 확인. "
                                "Redis 스트림만 냅니다" % (dv, p.parent.parent))
         outs = self.outputs(dv, run_dir)
+        self.read_roi(dv)
         h, w = bgr.shape[:2]
         base = {"n": header.get("n"), "frame": rel, "source": dv, "run": run_dir.name if run_dir else None,
                 "image_wh": [w, h], "live": True}
@@ -2777,6 +3768,84 @@ class LiveRunner:
         st[1] += done_ms - recv_ms
         st[2] += infer_ms
 
+    # -- 구역(웹 화면) · 프로필(런처)
+    def read_roi(self, dv):
+        """Redis vision_roi:<기기> — 웹 화면에서 끌어 지정한 구역. 0.5초마다만 읽는다."""
+        now = time.time()
+        if now - self.roi_t.get(dv, 0.0) < 0.5:
+            return
+        self.roi_t[dv] = now
+        try:
+            raw = self.r.get("vision_roi:" + dv)
+        except self.redis_mod.RedisError:
+            return
+        rois = self.cfg.setdefault("_roi", {})
+        if not raw:
+            if rois.pop(dv, None) is not None:
+                log("%s 구역 해제" % dv)
+            return
+        try:
+            roi = json.loads(raw)
+        except ValueError:
+            return
+        old = rois.get(dv)
+        if not old or old.get("version") != roi.get("version"):
+            log("%s 구역 %d개 (번호 %s%s)" % (dv, len(roi.get("rects") or []), roi.get("version"),
+                                          (", 모델 %s" % roi["model"]) if roi.get("model") else ""))
+        rois[dv] = roi
+
+    def check_profile(self):
+        w = self.watch
+        if w is None:
+            return
+        if w.pending is not None:
+            resolved, th = w.pending
+            if th.is_alive():
+                return
+            w.pending = None
+            self.swap_profile(resolved, getattr(th, "error", None))
+            return
+        resolved = w.poll()
+        if resolved is None:
+            return
+        tr = self.runners.get("targeted")
+        if tr is not None and resolved.get("targeted") is not None:
+            import threading
+
+            def warm(th_box=[]):
+                try:
+                    tr.prewarm(resolved["targeted"])
+                except Exception as exc:
+                    threading.current_thread().error = "%s: %s" % (type(exc).__name__, exc)
+            th = threading.Thread(target=warm, daemon=True)
+            th.error = None
+            th.start()
+            w.pending = (resolved, th)
+            log("프로필 바뀜 — 필요한 모델을 미리 적재하는 동안 옛 설정으로 계속")
+            return
+        self.swap_profile(resolved, None)
+
+    def swap_profile(self, resolved, error):
+        w = self.watch
+        if error:
+            log("프로필 반영 실패 — %s (옛 설정 유지)" % error)
+            w.status(False, error, resolved.get("version"))
+            return
+        try:
+            tr = self.runners.get("targeted")
+            if tr is not None and resolved.get("targeted") is not None:
+                tr.reconfigure(resolved["targeted"])
+                for store in ("_asm", "_stab", "_lab"):
+                    for k in [k for k in (self.cfg.get(store) or {}) if k[2] == "targeted"]:
+                        del self.cfg[store][k]
+            apply_profile(self.cfg, resolved)
+        except Exception as exc:
+            log("프로필 반영 실패 — %s: %s (옛 설정 유지)" % (type(exc).__name__, exc))
+            w.status(False, "%s: %s" % (type(exc).__name__, exc), resolved.get("version"))
+            return
+        log("프로필 반영 (번호 %s)" % resolved.get("version"))
+        w.status(True, "반영됨", resolved.get("version"))
+
     # -- 반복
     def report(self, dt):
         parts = []
@@ -2797,6 +3866,7 @@ class LiveRunner:
         try:
             while not STOP:
                 now = time.time()
+                self.check_profile()
                 if now - t_rep >= every:
                     self.report(now - t_rep)
                     t_rep = now
@@ -2884,8 +3954,22 @@ def main():
     ap.add_argument("--watch", action="store_true",
                     help="[저장된 이미지] 끝나도 멈추지 않고 새로 저장되는 프레임을 계속 처리")
     ap.add_argument("--list", action="store_true", help="기기·실행 폴더·프레임 수만 보여 주고 끝낸다")
+    g = ap.add_argument_group("지정 클래스 탐지 · 오버레이 (탐지대상_런처_계획_261123.md)")
+    g.add_argument("--profile", metavar="파일", help="프로필 JSON (런처가 만든다). live 에서는 바뀌면 바로 반영")
+    g.add_argument("--target", action="append", metavar="대상",
+                   help="지정 클래스 대상. 여러 번. 예) door · 'traffic cone:size=300x300x700:colour=orange'")
+    g.add_argument("--cues", metavar="근거", help="--target 들의 근거. default · default,aspect=off · class,semantic")
+    g.add_argument("--no-distance", action="store_true", help="지정 클래스 거리 측정 끄기 (UniDepth 를 적재하지 않는다)")
+    g.add_argument("--cards", choices=("off", "hover", "always"), help="단서 카드: 끔 · 웹 화면 마우스 · 영상에 항상")
+    g.add_argument("--label", metavar="항목", help="박스 라벨 항목 (쉼표): name,conf,id,dist,gps …")
+    g.add_argument("--count", action="store_true", help="탐지 개수 표시")
+    g.add_argument("--catalog", action="store_true", help="런처용 카탈로그 JSON 을 찍고 끝낸다 (모델을 적재하지 않는다)")
     args = ap.parse_args()
 
+    if args.catalog:
+        import cue_catalog as cc
+        print(json.dumps(cc.catalog(load_config(args.config)), ensure_ascii=False))
+        return 0
     cfg = load_config(args.config)
     data_root = Path(args.data_root).expanduser().resolve() if args.data_root else cfg["data_root"]
     defaults = cfg.get("defaults", {}) or {}
@@ -2940,6 +4024,16 @@ def main():
            "실시간(live)" if live else "저장된 이미지=" + " ".join(want_runs), gpu))
     cfg["_geo"] = build_geo(cfg)
     check_overlay_cfg(cfg)
+    # 프로필 — 기본값(yaml + 대상 파일) 위에 --profile 파일, 그 위에 명령줄
+    import cue_catalog as cc
+    try:
+        base = load_profile_file(args.profile) if args.profile and Path(args.profile).exists() else {}
+        resolved = cc.resolve_profile(cli_profile(args, models, base), cfg, models)
+    except (cc.ProfileError, ValueError, OSError) as exc:
+        raise SystemExit("프로필이 틀렸습니다 — %s" % exc)
+    apply_profile(cfg, resolved)
+    if resolved.get("overlay"):
+        log("오버레이 지정: %s" % json.dumps(resolved["overlay"], ensure_ascii=False))
     load = list(models)
     if (active_detector(load) is None and any(m in DEPTH_MODELS for m in load)
             and (cfg.get("fusion") or {}).get("enabled", True)):
@@ -2958,7 +4052,10 @@ def main():
         log("  %s 준비 (%.1fs)" % (m, time.time() - t0))
 
     if live:
-        LiveRunner(devices, models, runners, cfg, data_root).run()
+        watch = ProfileWatch(args.profile, args, models, devices, cfg) if args.profile else None
+        if watch is not None:
+            watch.status(True, "시작", resolved.get("version"))
+        LiveRunner(devices, models, runners, cfg, data_root, watch).run()
         log("끝")
         return 0
 

@@ -232,7 +232,8 @@ def test_min_arms_below_one_is_refused():
 
 # ---------------------------------------------------------------- 검출 모델 경계
 def test_river_is_a_detection_model_and_yoloe_wins_the_fusion_slot():
-    assert vi.DETECT_MODELS == ("yoloe", "river")
+    # targeted(지정 클래스, 2026-11-23)는 **뒤에** 붙는다 — 결합 자리 차례(yoloe → river)는 그대로
+    assert vi.DETECT_MODELS[:2] == ("yoloe", "river") and vi.DETECT_MODELS[2:] == ("targeted",)
     assert "river" in vi.MODELS and "river" in vi.RUNNERS
     assert vi.active_detector(["river", "unidepth"]) == "river"
     assert vi.active_detector({"river": 1, "yoloe": 1}) == "yoloe"

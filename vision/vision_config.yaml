@@ -600,6 +600,48 @@ models:
         unconfirmed_class: unconfirmed
 
   # ── UniDepth V2 (metric depth, m) ─────────────────────────────────────────
+  # ── targeted — 지정 클래스 탐지 (2026-11-23, 탐지대상_런처_계획_261123.md) ─────────
+  # 대상 · 근거는 vision/assets/targets/<이름>.json 과 런처 프로필(--profile)이 정한다.
+  # 이 칸은 **기본값**이다: 프로필이 대상을 안 주면 targets, 거리를 안 주면 distance.
+  # 근거 정의 · 사용 가능 판정은 vision/cue_catalog.py, 판정은 vision/target_assess.py.
+  # river 는 건드리지 않는다 — 위험물 두 대상은 river 전용이다.
+  targeted:
+    targets: [person, door, chair, desk, demo_door, demo_box]
+    distance: true                # 거리 측정. 끄면 UniDepth 를 적재하지 않는다(크기 거부 · 거리 라벨도 꺼진다)
+    conf: 0.15                    # 후보 하한 — 판정은 근거 점수로 한다(탐지기 확신은 근거 하나)
+    arm_conf: 0.05
+    imgsz: 1280                   # 텍스트 arm 상한. 프레임 긴 변이 더 작으면 그것(imgsz_follow_frame)
+    imgsz_follow_frame: true
+    max_det: 100
+    merge_iou: 0.5
+    max_area_ratio: 0.9           # 화면을 거의 덮는 상자는 장면이다
+    # 미끼 — 대상과 겹치지 않는 일반 배경. 대상과 같은 낱말은 자동으로 빠진다
+    decoys: [rock, concrete wall, grass, soil, floor, wall, ceiling, window, curtain, carpet]
+    free:                         # 후보 넓히기(prompt-free) — 대상의 free_vocab 이름만 그 대상으로
+      imgsz: 1280
+      conf: 0.05
+      scene_words: [floor, wall, room, ceiling, road, sky, field, grass]
+      scene_min_area: 0.10
+    ovd:                          # OVD 동의 — 후보를 내지 않고 근거로만
+      grounding_dino: auto        # auto = 그 근거를 선언한 대상(demo_door)을 고를 때만 · true · false
+                                  # 스냅샷 models/grounding-dino-tiny (2026-11-23 받음, 659 MB). 무겁다
+      imgsz: 640
+      conf: 0.05
+    depth:                        # river depth 와 같은 방식(주기로 재고 트랙으로 나른다)
+      kind: unidepth
+      model_id: lpiccinelli/unidepth-v2-vitb14
+      source: /home/khw67/data_stream/external/UniDepth
+      device: cuda:0
+      period: 5
+      max_age: 30
+      percentile: 40
+      iou_match: 0.5
+    assess_smooth:
+      alpha: 0.4
+      hysteresis: 5
+      max_missed: 15
+    # files: {...}                # 모델 파일 자리를 바꿀 때만 (cue_catalog.DEFAULT_FILES)
+
   unidepth:
     repo_path: /home/khw67/data_stream/external/UniDepth
     model_name: /home/khw67/data_stream/models/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
@@ -631,6 +673,13 @@ stabilize:
   # river: 수십 px 짜리가 장마다 들락거린다. 값은 **자료가 아니라 프레임율과 물체
   # 크기**에서 정했다(local/consensus/prereg_tracking.md §2) — 라벨 219장이 전부
   # test 라 거기서 고르면 그 다섯 기기의 값이 된다.
+  targeted:                       # 지정 클래스 — river 와 같은 작동점(번호만 붙이고 거르지 않는다)
+    enabled: true
+    backend: bytetrack
+    on_untracked: keep
+    keep_boxes: detection
+    reset_gap_s: 2.0
+    label_policy: raw
   river:
     # **켠다. 다만 거르는 층이 아니라 번호를 붙이는 층이다.**
     #
@@ -770,6 +819,12 @@ overlay:
                                   # 오버레이는 "이름 거리 점수" 만, 근거 카드는 웹 /vision/view 에서
                                   # 마우스를 올리면 보인다(클릭 고정 · X 닫기)
     cues: null                    # 단서 선언 자리. null = vision/assets/hazard_cues.json
+  targeted:
+    label: [[name, dist]]         # 판정된 대상: 대상 이름 거리 점수
+    cards: hover                  # off · hover(웹 화면 마우스) · always(영상에 그림)
+    count: false
+    show_non_suspect: true        # 판정 아닌 후보를 회색으로
+    show_rejected: false          # demo_box 관문에 떨어진 상자(빨간 점선)
   depth:
     label: [[name, conf, range], [gps]]
     pose: true                    # 영상 위 띠에 드론 GPS·고도·자세·state 시각 차이 한 줄

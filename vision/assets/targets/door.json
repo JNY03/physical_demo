@@ -1,0 +1,95 @@
+{
+  "detector": "yoloe_text",
+  "prompts": [
+    "door"
+  ],
+  "free_vocab": [
+    "door",
+    "glass door",
+    "screen door",
+    "elevator door",
+    "garage door"
+  ],
+  "descriptions": [
+    "a photo of a door",
+    "a closed door in a wall"
+  ],
+  "negatives": [
+    "a whiteboard",
+    "a window",
+    "a cabinet",
+    "a wall",
+    "a photo of an object"
+  ],
+  "features": [
+    "handle",
+    "hinge",
+    "lock",
+    "threshold"
+  ],
+  "feature_sim_min": 0.25,
+  "_feature_sim_min": "main 2026-09-14: 전역 0.26 -> door 0.25 (리허설 로봇 225도 실제 문 0.2522). 실제 문 0.250~0.270, 위험 음성 최대 0.267 로 겹친다",
+  "aspect": {
+    "h_over_w": [
+      1.5,
+      null
+    ]
+  },
+  "_aspect": "main 2026-09-10: 화이트보드 후보 0.96 vs 실제 문 2.60 — 1.5",
+  "clip_shape": {
+    "positive": [
+      "a rectangular shape",
+      "a square shape"
+    ],
+    "negative": [
+      "a round shape",
+      "an irregular shape"
+    ],
+    "tolerance": 0.005
+  },
+  "saturation": {
+    "min": 75
+  },
+  "ovd_labels": [
+    "door"
+  ],
+  "pair_iou_min": 0.42,
+  "_pair_iou_min": "main 2026-09-15: 실제 문 짝 IoU 0.76~0.91, 오탐(작은 CLIP 조각이 큰 단상 박스 안에 묶임) 0.03~0.22",
+  "size_mm": [
+    1000,
+    60,
+    2200
+  ],
+  "min_score": 50,
+  "provisional": true,
+  "_doc": "문(일반). main 문 탐지의 일반 규칙만 — 시연 장소 하늘색 문 전용 값(색 게이트·색상 H·인스턴스 특징)은 demo_door 에 둔다.",
+  "name": "door",
+  "shown": "door",
+  "colour_rgb": [
+    90,
+    160,
+    255
+  ],
+  "cues": {
+    "class": "score",
+    "free_arm": "on",
+    "dict_features": "score",
+    "semantic": "score",
+    "ovd_agree": "score",
+    "aspect": "gate",
+    "clip_shape": "gate",
+    "saturation": "gate",
+    "ovd_pair_iou": "gate",
+    "size_veto": "veto"
+  },
+  "weights": {
+    "class": 0.3,
+    "dict_features": 0.3,
+    "ovd_agree": 0.25,
+    "semantic": 0.15
+  },
+  "source": "main class_features.json door (2026-09-10~15) 일반 규칙",
+  "anchor": "door",
+  "_anchor": "CLIP 문구의 이름 — main 과 같이 'a door's handle'. 보이는 이름(shown)과 따로 둔다",
+  "_ovd": "일반 문은 YOLO-World 동의만 — GroundingDINO(무겁다)는 demo_door 에만 둔다"
+}

@@ -1,0 +1,78 @@
+{
+  "_doc": "책상 — 1차 설계(2026-11-23). prompt-free 어휘에 'desk' 단독은 없다(office desk · computer desk · writing desk 만, 2026-11-23 확인). 'table' 은 넣지 않는다 — 식탁·회의 탁자가 모두 책상이 된다.",
+  "name": "desk",
+  "shown": "desk",
+  "detector": "yoloe_text",
+  "colour_rgb": [
+    200,
+    120,
+    230
+  ],
+  "prompts": [
+    "desk",
+    "office desk"
+  ],
+  "free_vocab": [
+    "office desk",
+    "computer desk",
+    "writing desk",
+    "workbench"
+  ],
+  "descriptions": [
+    "a photo of a desk",
+    "an office desk with a computer",
+    "a desk with drawers"
+  ],
+  "negatives": [
+    "a dining table",
+    "a chair",
+    "a cabinet",
+    "a bed",
+    "a photo of an object"
+  ],
+  "confusers": [
+    "a dining table",
+    "a workbench",
+    "a counter"
+  ],
+  "features": [
+    "flat work surface",
+    "drawers",
+    "monitor"
+  ],
+  "feature_sim_min": 0.22,
+  "shape": {
+    "aspect": [
+      0.8,
+      3.5
+    ]
+  },
+  "ovd_labels": [
+    "desk"
+  ],
+  "size_mm": [
+    1800,
+    900,
+    900
+  ],
+  "cues": {
+    "class": "score",
+    "free_arm": "on",
+    "semantic": "score",
+    "ovd_agree": "score",
+    "dict_features": "score",
+    "shape": "score",
+    "size_veto": "veto",
+    "lookalike": "on"
+  },
+  "weights": {
+    "class": 0.3,
+    "semantic": 0.25,
+    "ovd_agree": 0.2,
+    "dict_features": 0.15,
+    "shape": 0.1
+  },
+  "min_score": 50,
+  "provisional": true,
+  "source": "2026-11-23 설계"
+}
