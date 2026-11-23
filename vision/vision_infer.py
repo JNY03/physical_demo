@@ -2092,8 +2092,10 @@ class AssessSmoother:
             Ts = a.get("min_scores") or {}
             T = float(Ts.get(best, a.get("min_score") or 0))
             prev = m["sus"] if m else None
-            if top is None or not a.get("enough", True):
-                sus = None                           # 근거가 모자란 장은 의심하지 않는다
+            if top is None or not a.get("enough", True) or a.get("gates_failed") or a.get("vetoed"):
+                # 근거가 모자란 장, **필수 근거에 떨어진 장**(지정 클래스 gates_failed · 거부)은 판정하지 않는다.
+                # 평활된 점수만 보면 게이트에 떨어진 외투 건 의자가 다시 사람이 됐다(2026-11-23). river 에는 이 칸이 없다
+                sus = None
             elif best == prev:
                 sus = best if top >= T - self.hyst else None
             elif top >= T:
@@ -2473,6 +2475,7 @@ class TargetedRunner:
             rgb = t.get("colour_rgb") or [0, 200, 255]
             TARGET_STYLE[t["name"]] = {"bgr": (int(rgb[2]), int(rgb[1]), int(rgb[0])), "shown": t.get("shown", t["name"])}
         self.resolve_same_as = ta.resolve_same_as
+        self.suppress_duplicates = ta.suppress_duplicates
         self.same_as = {t["name"]: t.get("same_as") for t in self.targets if t.get("same_as")}
         self.arm_names = [l for l, _ in self.arms] + [n for n, _ in self.trained] + [a.name for a in self.ovd]
         self._streams, self._stream = {}, None
@@ -2664,6 +2667,7 @@ class TargetedRunner:
                 depth_ms = self.depth(bgr, rest)
         assess_ms = self.evidence(bgr, dets, ovd)
         dets = self.resolve_same_as(dets)
+        dets = self.suppress_duplicates(dets)
         for d in dets:
             d.pop("_same_as", None)
         ms = (time.perf_counter() - t0) * 1000

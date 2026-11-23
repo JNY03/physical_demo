@@ -517,6 +517,40 @@ def _shared_clip(files):
     return _CLIP[key]
 
 
+def suppress_duplicates(dets, iou=OVD_ASSOC_IOU, contain=OVD_ASSOC_CONTAIN):
+    """**같은 대상의 겹친 · 포개진 상자는 한 물체다**(2026-11-23). 판정된 것끼리 점수 순으로 세우고, 앞서 남긴 상자와
+    IoU ≥ 0.30 이거나 작은 쪽이 0.7 이상 안에 들면 지운다 — main 의 같은 물체 연계(ASSOCIATION_IOU_THR ·
+    CONTAINMENT_THR)와 같은 기준이다. 예전에는 같은 이름끼리 IoU 0.5 이상만 합쳐서 한 사람에 상체 · 다리 · 전신
+    상자가 따로 판정됐다(robot1 2026-11-23: 2~3 명 장면에서 판정 평균 4.85, 정확히 맞은 장 5%).
+    판정 안 된 후보는 건드리지 않는다(회색으로 남는다) — 다만 판정된 상자 안에 포개진 것은 지운다."""
+    def sc(d):
+        return (d.get("assess") or {}).get("score") or 0.0
+
+    def sus(d):
+        return (d.get("assess") or {}).get("suspect")
+    def area(d):
+        b = d["xyxy"]
+        return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    gone = set()
+    sus_d = [d for d in dets if sus(d)]
+    # ① 포개진 것은 **큰 쪽(전체)** 을 남긴다 — 상체만 잡은 상자보다 전신 상자가 거리 · 피부색 근거에 낫다
+    for d in sus_d:
+        if any(o is not d and o["name"] == d["name"] and area(o) > area(d) and _contain(o["xyxy"], d["xyxy"]) >= contain
+               and id(o) not in gone for o in sorted(sus_d, key=area, reverse=True)):
+            gone.add(id(d))
+    # ② 나머지 겹침은 점수 순
+    kept = []
+    for d in sorted((d for d in sus_d if id(d) not in gone), key=lambda d: -sc(d)):
+        if any(k["name"] == d["name"] and _iou(k["xyxy"], d["xyxy"]) >= iou for k in kept):
+            gone.add(id(d))
+        else:
+            kept.append(d)
+    for d in dets:
+        if not sus(d) and any(k["name"] == d["name"] and _contain(k["xyxy"], d["xyxy"]) >= contain for k in kept):
+            gone.add(id(d))
+    return [d for d in dets if id(d) not in gone]
+
+
 def resolve_same_as(dets):
     """`same_as` (demo_door ↔ door): 같은 자리를 두 대상이 함께 잡으면 판정 점수가 높은 하나만 남긴다."""
     def sc(d):
