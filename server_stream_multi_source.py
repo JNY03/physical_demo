@@ -1288,13 +1288,26 @@ def read_exact(f, n):
     return bytes(buf)
 
 
+#: TCP 세그먼트 상한(바이트). **테일넷 MTU 블랙홀 우회**(2026-11-23): 같은 PC 의 Windows 테일넷 노드 → WSL 테일넷
+#: 노드 경로에서 1180 바이트 넘는 패킷이 버려졌다(ping -M do: 1180 통과 · 1200 버려짐). 테일넷 MTU 는 1280 이라 서버는
+#: 1240 바이트 세그먼트를 보내고, 그것이 계속 사라져 가시화의 영상(MJPEG) · 큰 응답이 한 장도 안 갔다(머리 188 바이트만).
+#: 작은 JSON 은 지나가서 '결과는 온다는데 영상만 안 열린다' 로 보였다. 1100 으로 줄이면 통과한다. 0 이면 건드리지 않는다
+TCP_MSS = 1100
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = os.name != "nt"     # 윈도우에서는 같은 포트를 두 프로그램이 잡게 되므로 끈다
+    tcp_mss = TCP_MSS
 
     def server_bind(self):
         if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        if self.tcp_mss and hasattr(socket, "TCP_MAXSEG"):
+            try:                                   # 듣는 소켓에 걸면 받아들인 연결이 물려받는다(리눅스)
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, int(self.tcp_mss))
+            except OSError:
+                pass
         socketserver.TCPServer.server_bind(self)  # HTTPServer 의 getfqdn(느릴 수 있음)을 건너뛴다
         host, port = self.server_address[:2]
         self.server_name, self.server_port = str(host), port
@@ -2052,6 +2065,8 @@ def main():
     ap.add_argument("--no-pull", action="store_true",
                     help="파이에서 가져오지 않고 포트로 들어오는 것만 받는다 (엣지가 넘겨 줄 때 서버 쪽)")
     ap.add_argument("--bind", default="0.0.0.0", metavar="주소", help="포트를 열 주소 (기본 0.0.0.0 = 전부)")
+    ap.add_argument("--tcp-mss", type=int, default=TCP_MSS, metavar="바이트",
+                    help="TCP 세그먼트 상한 (기본 %d — 테일넷 MTU 블랙홀 우회, 0 = 건드리지 않음)" % TCP_MSS)
     ap.add_argument("--unpack", metavar="폴더", help="저장된 .frm 을 .jpg + .json 으로 풀고 끝낸다")
     args = ap.parse_args()
 
@@ -2089,6 +2104,7 @@ def main():
     servers = []                                   # 포트부터 잡는다 — 못 잡으면 폴더를 만들기 전에 끝낸다
     for s in sources:
         try:
+            Server.tcp_mss = args.tcp_mss
             servers.append(Server((args.bind, s.port), make_handler(s, vision)))
         except OSError as e:
             for srv in servers:
