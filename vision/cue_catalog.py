@@ -565,6 +565,7 @@ def catalog(cfg=None):
                         for k in keys if not avail.get(k)]
     all_models = list(MODELS)
     return {"models": [{"key": m, "shown": MODEL_SHOWN[m]} for m in all_models],
+            "overlay_defaults": overlay_defaults(cfg),
             "targets": targets, "direct": direct, "colours": list(COLOURS),
             "distance_default": bool(tcfg.get("distance", True)),
             "distance_available": have("depth", files),
@@ -577,6 +578,54 @@ def catalog(cfg=None):
                            {"key": "always", "shown": "항상"}],
             "gpu_mb": {m: gpu_mb([m]) for m in all_models if m != "targeted"},
             "gpu_mb_targeted": {k: v for k, v in GPU_MB.items()}}
+
+
+def overlay_defaults(cfg):
+    """yaml overlay 에서 모델별 기본값(런처가 처음 체크 상태로 쓴다). 라벨은 한 줄로 편다."""
+    o = (cfg or {}).get("overlay") or {}
+    out = {}
+    for m in MODELS:
+        kind = "depth" if m in DEPTH_MODELS else m
+        blk = o.get(kind) if isinstance(o.get(kind), dict) else {}
+        lab = blk.get("label")
+        if lab is None and m in DETECT_MODELS:
+            lab = (o.get("yoloe") or {}).get("label")
+        if lab is None:
+            lab = [["name", "conf"]] if m in DETECT_MODELS else [["name", "conf", "range"], ["gps"]]
+        flat = [t for line in (lab if lab and isinstance(lab[0], list) else [lab]) for t in line]
+        cards = blk.get("cards")
+        out[m] = {"label": flat,
+                  "cards": ("always" if cards is True or cards == "always" else "off" if cards == "off"
+                            else "hover") if m in ("river", "targeted") else None,
+                  "count": bool(blk.get("count", False)),
+                  "show_non_suspect": bool(blk.get("show_non_suspect", True)),
+                  "show_rejected": bool(blk.get("show_rejected", False)),
+                  "title": bool(o.get("title", True)),
+                  "pose": bool(blk.get("pose", True)) if m in DEPTH_MODELS else None}
+    return out
+
+
+def save_direct_target(name, size_mm=None, colours=None, target_dir=TARGET_DIR):
+    """직접 입력 대상을 **등록 대상**으로 저장한다(런처 '등록으로 저장'). 있는 파일은 덮지 않는다."""
+    spec = {"name": name}
+    if size_mm:
+        spec["size_mm"] = list(size_mm)
+    if colours:
+        for c in colours:
+            if c not in COLOURS:
+                raise ProfileError("색 %r 을 모름 (가능: %s)" % (c, ", ".join(COLOURS)))
+        spec["colours"] = list(colours)
+    parse_target_arg(name)                          # 이름 검사
+    f = Path(target_dir) / ("%s.json" % name)
+    if f.exists():
+        raise ProfileError("이미 등록된 대상: %s" % name)
+    t = _direct_target(name, spec)
+    t.pop("direct", None)
+    t["_doc"] = "직접 입력에서 등록(제로샷 자동 값). 특징 사전 · 게이트를 적어 다듬는다"
+    rgb = [int(x) for x in __import__("hashlib").md5(name.encode()).digest()[:3]]
+    t["colour_rgb"] = [max(80, v) for v in rgb]
+    f.write_text(json.dumps(t, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(f)
 
 
 def _load_yaml(path):
@@ -594,8 +643,21 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="런처용 카탈로그 JSON")
     ap.add_argument("--check", metavar="프로필", help="프로필 파일을 검사하고 확정된 근거를 보여 준다")
     ap.add_argument("--models", nargs="+", default=["targeted"])
+    ap.add_argument("--save-target", metavar="이름", help="직접 입력 대상을 등록 대상으로 저장")
+    ap.add_argument("--size", metavar="가로x세로x높이", help="--save-target 의 크기 mm")
+    ap.add_argument("--colours", metavar="색", help="--save-target 의 색 (+ 로 여럿)")
     a = ap.parse_args(argv)
     cfg = _load_yaml(a.config)
+    if a.save_target:
+        try:
+            spec = parse_target_arg(a.save_target + (":size=" + a.size if a.size else "")
+                                    + (":colour=" + a.colours if a.colours else ""))
+            path = save_direct_target(spec["name"], spec.get("size_mm"), spec.get("colours"))
+        except ProfileError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"ok": True, "file": path}, ensure_ascii=False))
+        return 0
     if a.check:
         try:
             prof = json.loads(Path(a.check).read_text(encoding="utf-8-sig"))

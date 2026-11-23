@@ -123,7 +123,52 @@ python vision/vision_infer.py --list                               # 기기·실
 ```
 
 - live 모드는 2)와 Redis 가 켜져 있어야 한다. 결과는 브라우저 `http://localhost:<포트>/vision?model=yoloe` 에서 본다.
-- 모델: `yoloe`(검출) · `unidepth` · `moge2_aerial`(깊이 m). 드론은 검출별 GPS 좌표도 붙는다.
+- 모델: `yoloe`(검출) · `river`(하천 위험물) · `targeted`(지정 클래스 탐지) · `unidepth` · `moge2_aerial`(깊이 m).
+  드론은 검출별 GPS 좌표도 붙는다. 검출 모델을 여럿 고르면 모두 돌고, 깊이 결합 · GPS 는 첫 검출 모델에만 붙는다.
+
+#### 지정 클래스 탐지 (`targeted`, 2026-11-23)
+
+대상과 근거를 골라 찾는다. 계획과 설계는 `탐지대상_런처_계획_261123.md`.
+
+```bash
+python vision/vision_infer.py --models targeted                         # 기본 대상 6개 · 기본 근거 · 거리 켬
+python vision/vision_infer.py --models targeted --target person --target chair --no-distance
+python vision/vision_infer.py --models targeted --target "traffic cone:size=300x300x700:colour=orange"
+python vision/vision_infer.py --models targeted --target door --cues default,aspect=off --cards always --count
+python vision/vision_infer.py --catalog                                 # 고를 수 있는 것 (런처가 쓴다)
+python vision/cue_catalog.py --check 프로필.json                        # 프로필 검사
+```
+
+- **대상**: `person` · `door` · `chair` · `desk` · `demo_door`(시연 장소 하늘색 문, main 문 탐지 근거 그대로) ·
+  `demo_box`(Box_Detection 학습 검출기 v9). 대상 파일 `vision/assets/targets/<이름>.json` 을 더하면 목록에 뜬다.
+  목록에 없는 이름은 제로샷으로 찾는다(크기 · 색을 주면 형상 · 크기 거부 · 색상 근거가 붙는다).
+- **근거**: 탐지기(텍스트 · prompt-free · OVD 확신의 noisy-OR, 중심 명사가 같은 비슷한 이름은 0.7 배) · 글 설명 ·
+  특징 사전 · 형상 · 색상 · CLIP 색 · CLIP 모양 · 채도 · 색상 H · 종횡비 · OVD 짝 IoU · 바닥 위치 · 크기 거부.
+  역할은 점수 · 필수(통과 못 하면 판정 안 함, 못 잰 것도 통과 아님) · 거부. 쓸 수 없는 근거는 런처에 안 나온다.
+- **거리 측정**을 끄면 UniDepth 를 적재하지 않는다(크기 거부 · 거리 라벨도 꺼진다). `demo_box` 는 Go1 카메라
+  (464x400) 프레임에서 박스 높이 식으로 재고, 다른 카메라에서는 관문 판정을 보류하고 UniDepth 거리를 쓴다.
+- **GroundingDINO** 는 `demo_door` 를 고를 때만 적재된다(프레임당 약 0.5 초). 스냅샷은 `models/grounding-dino-tiny`.
+- 판정 하한은 대부분 측정 전 값이다(결과에 `provisional`). 다른 카메라 · 장소에서는 다시 재야 한다.
+
+#### 오버레이와 웹 화면
+
+- 런처 오버레이 탭 = 모델별 라벨 항목 · 탐지 개수 · 카드(끔 · 마우스 올릴 때 · 항상) · 판정 아닌 검출 등.
+  **마우스 올릴 때** 카드는 웹 화면 `http://<주소>:<포트>/vision/view?model=targeted` 에서만 보인다(영상에는 안 들어감).
+  주소에 `&cards=off|hover|always` 를 붙이면 그 화면만 바뀐다.
+- **구역**: 웹 화면에서 빈 곳을 끌면 그 기기의 탐지를 그 안으로 제한한다(분할 마스크의 50% 이상이 안에 있어야 남는다).
+  구역마다 ✕, 위쪽 '구역 모두 지우기'. 창구는 `GET/POST/DELETE /control/roi` (Redis `vision_roi:<소스>`).
+
+#### 바탕화면 「데이터 스트림 실행」 런처 (2026-11-23)
+
+- `C:\Users\khw67\DataStreamLauncher\launcher.ps1` · 이전 판 `launcher.ps1.bak_261123`.
+- 탭: 스트림(소스 · 로봇 캠 · 슬라이스 · 비전 모델) · 지정 클래스(지정 클래스 탐지를 고를 때만) · 오버레이(고른 모델에 되는 것만).
+- **실행 뒤에도 열려 있다.** 바꾸면 1초 뒤 반영: 대상 · 근거 · 거리 · 오버레이는 `profile.json` 만(비전이 실행 중에 바꾼다,
+  새 모델은 미리 적재하는 동안 옛 설정으로), 비전 모델 → 비전 창만, 소스 · 로봇 캠 → 서버와 비전, 슬라이스 → 슬라이스 창만.
+  틀린 지정이면 옛 설정을 유지하고 아래 상태 줄에 이유가 나온다.
+- 창마다 이름표(`tools/ds_run.sh`, `/tmp/ds_launcher/`)가 붙는다. ✕ 로 닫으면 확인한 뒤 전부 끈다.
+  런처가 비정상으로 꺼져도 창은 남고, 다시 열면 '실행 중' 으로 이어받는다. 손으로 끄기: `tools/ds_stop.sh <이름>`, 목록: `tools/ds_status.sh`.
+- 로봇 캠 번호는 robot1 · robot2 에만 쓰인다(a2 · pi11~13 은 1 고정). 슬라이스 u 를 비우면 마지막 u, v 는 −30 고정.
+- 시험: `$env:DS_LAUNCHER_SELFTEST=1` 로 실행하면 창 없이 선택을 바꿔 보고 프로필을 찍는다.
 
 ### 4) 360 카메라 — `360camera_work/stream_to_server.py` (360 카메라 노트북)
 
