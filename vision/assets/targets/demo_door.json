@@ -110,7 +110,8 @@
     "clip_shape": "gate",
     "saturation": "gate",
     "hue": "gate",
-    "ovd_pair_iou": "gate"
+    "ovd_pair_iou": "gate",
+    "parts": "local"
   },
   "weights": {
     "class": 0.55,
@@ -118,5 +119,16 @@
   },
   "source": "main class_features.json door 그대로 (2026-09-14 완화 · 2026-09-15 강화)",
   "anchor": "door",
-  "_anchor": "CLIP 문구의 이름 — main 과 같이 'a door's handle'. 보이는 이름(shown)과 따로 둔다"
+  "_anchor": "CLIP 문구의 이름 — main 과 같이 'a door's handle'. 보이는 이름(shown)과 따로 둔다",
+  "parts": {
+    "names": [
+      "door handle",
+      "door knob",
+      "door hinge"
+    ],
+    "where": "any",
+    "scale": 0.05,
+    "_scale": "부분의 크기(물체 긴 변 대비, 사실): 손잡이 ≈ 문 높이의 5%",
+    "_what": "국소 축 — 닮은꼴(마네킹 · 외투 건 의자 / 화이트보드 · 창문 · 캐비닛)에 없는 이 대상만의 부분"
+  }
 }

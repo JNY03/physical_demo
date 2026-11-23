@@ -71,6 +71,10 @@ CUES = {
                      "needs": ["clip"], "requires": ["clip_shape"], "detector": ("yoloe_text", "trained")},
     "saturation":   {"label": "채도", "role": "gate", "roles": ("gate",), "weight": 0.0,
                      "needs": [], "requires": ["saturation"], "detector": ("yoloe_text", "trained")},
+    # 부분 — **국소 축**(2026-11-23). 그 물체에만 있는 부분(사람: 머리 · 얼굴 · 손)이 트랙의 절반 이상 장에서
+    # 잡히는가. 점수에 섞지 않고 축으로 따로 센다(전역 외형 근거를 여러 번 세지 않으려고)
+    "parts":        {"label": "부분", "role": "local", "roles": ("local",), "weight": 0.0,
+                     "needs": ["yoloe_text"], "requires": ["parts"], "detector": ("yoloe_text",)},
     "hue":          {"label": "색상 H", "role": "gate", "roles": ("gate",), "weight": 0.0,
                      "needs": [], "requires": ["hue"], "detector": ("yoloe_text", "trained")},
     "aspect":       {"label": "종횡비", "role": "gate", "roles": ("gate", "score"), "weight": 0.10,
@@ -86,13 +90,14 @@ CUES = {
     "lookalike":    {"label": "닮은꼴 감점", "role": "on", "roles": ("on",), "weight": 0.0,
                      "needs": ["clip"], "requires": ["confusers"], "detector": ("yoloe_text", "trained")},
 }
-ROLES = ("score", "gate", "veto", "cond", "on", "off")
+ROLES = ("score", "gate", "veto", "cond", "on", "local", "off")
 #: 카드(영상 · 웹)에 쓰는 근거 이름 — **카드는 영어로만**(2026-11-23). 런처 화면은 위 label(한글)
 CUE_EN = {"class": "detector", "free_arm": "wider candidates", "semantic": "description",
           "dict_features": "features", "shape": "shape", "colour": "colour", "ovd_pair_iou": "OVD pair IoU",
           "clip_colour": "CLIP colour", "clip_shape": "CLIP shape", "saturation": "saturation", "hue": "hue",
           "aspect": "aspect", "ground": "ground", "height": "height", "calibration": "calibration",
-          "size_veto": "size veto", "lookalike": "look-alike", "distance": "distance"}
+          "size_veto": "size veto", "lookalike": "look-alike", "distance": "distance",
+          "parts": "parts", "axes": "axes"}
 #: 직접 입력(등록하지 않은 이름)에서 쓰는 근거 — 크기·색을 주면 더 붙는다
 DIRECT_ALWAYS = ["class", "free_arm", "semantic"]
 DIRECT_WITH_SIZE = ["shape", "size_veto"]

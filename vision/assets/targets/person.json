@@ -52,7 +52,8 @@
     "free_arm": "on",
     "semantic": "score",
     "dict_features": "score",
-    "size_veto": "veto"
+    "size_veto": "veto",
+    "parts": "local"
   },
   "weights": {
     "class": 0.65,
@@ -61,5 +62,18 @@
   },
   "min_score": 50,
   "provisional": true,
-  "source": "main class_features.json person (2026-09-11) + 2026-11-23 설계"
+  "source": "main class_features.json person (2026-09-11) + 2026-11-23 설계",
+  "parts": {
+    "names": [
+      "human head",
+      "human face",
+      "human hand",
+      "hair"
+    ],
+    "where": "top",
+    "_why": "사람에만 있는 부분. 외투를 건 의자는 실루엣(전역)은 같지만 이것이 없다(robot1 2026-11-23: 사람 트랙 99~100% 장에서 잡힘, 외투 의자 7~21%)",
+    "scale": 0.12,
+    "_scale": "부분의 크기(물체 긴 변 대비, 사실): 머리 ≈ 키의 1/8",
+    "_what": "국소 축 — 닮은꼴(마네킹 · 외투 건 의자 / 화이트보드 · 창문 · 캐비닛)에 없는 이 대상만의 부분"
+  }
 }

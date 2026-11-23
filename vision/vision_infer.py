@@ -2049,6 +2049,92 @@ class RiverRunner:
                 "hypothesis_covered": covered,
                 "prompt": "text"}, dets
 
+class AxisDecider:
+    """**축 단위 판정**(지정 클래스, 2026-11-23) — 트랙이 붙은 뒤에.
+
+    전역(외형 점수 · 게이트 전체, target_assess 가 낸 판정) · 국소(부분이 트랙의 절반 이상 장에서 잡히는가) ·
+    기하(실물 크기가 선언과 같은 자릿수인가)를 **따로 센다.** 잰 축 가운데 반대하는 축이 없고 동의하는 축이 둘 이상이면
+    판정한다. 국소는 그 트랙에서 지금까지 잰 장들의 다수결이다(첫 장부터 판정하고 장이 쌓일수록 다듬어진다).
+    전역 근거(탐지기 · 글 설명 · 특징 사전 …)는 모두 같은 crop 의 2D 외형이라 하나로 센다 — 여럿으로 세면 외투를 건
+    의자처럼 실루엣만 같은 것이 높은 점수를 받는다(robot1 2026-11-23: 2 명 장면에서 판정 평균 3.37).
+    값은 모두 일반 상수다: 부분 하한 = arm 하한(0.05), 다수결 0.5, 창 30 장."""
+
+    WINDOW, MIN_MEASURED, MAJORITY = 30, 3, 0.5
+
+    def __init__(self):
+        self.mem, self.n, self.anon = {}, 0, []
+
+    def _key(self, d):
+        if d.get("track_id") is not None:
+            return ("t", d["track_id"])
+        # 번호 없는 검출 — 앞 장의 번호 없는 상자와 IoU 로 잇는다(depth_track 과 같은 차선책)
+        best, score = None, 0.3
+        for k, box, name in self.anon:
+            if name == d["name"]:
+                v = float(box_iou([box], [d["xyxy"]])[0, 0])
+                if v >= score:
+                    best, score = k, v
+        return best or ("a", self.n, round(d["xyxy"][0]), round(d["xyxy"][1]))
+
+    def update(self, dets):
+        self.n += 1
+        anon = []
+        for d in dets:
+            a = d.get("assess") or {}
+            ax = a.get("axes")
+            if not ax:
+                continue
+            k = self._key(d)
+            if k[0] != "t":
+                anon.append((k, list(d["xyxy"]), d["name"]))
+            if k not in self.mem:
+                # **새 트랙은 같은 자리의 최근 기록을 이어받는다** — 트래커가 번호를 다시 붙일 때마다 국소 근거를
+                # 처음부터 쌓느라 같은 사람이 보류됐다(robot1: 왼쪽 사람 88 장)
+                prev = max(((v, float(box_iou([v["box"]], [d["xyxy"]])[0, 0])) for v in self.mem.values()
+                            if v.get("name") == d["name"] and self.n - v["n"] <= 30 and v.get("box")),
+                           key=lambda t: t[1], default=(None, 0.0))
+                self.mem[k] = {"local": list(prev[0]["local"]) if prev[1] >= 0.3 else [], "n": self.n}
+            m = self.mem[k]
+            m["n"], m["box"], m["name"] = self.n, list(d["xyxy"]), d["name"]
+            if ax.get("local") is not None:
+                m["local"] = (m["local"] + [ax["local"]])[-self.WINDOW:]
+            vals = m["local"]
+            local = None
+            if ax.get("local_declared") and len(vals) >= 1:
+                ratio = sum(1 for v in vals if v >= ta_part_floor()) / len(vals)
+                local = ratio >= self.MAJORITY
+            else:
+                ratio = None
+            glob_ = bool(a.get("suspect"))
+            geom = ax.get("geometry")
+            votes = [v for v in (glob_, local, geom) if v is not None]
+            pending = False             # 보류하지 않는다 — 회전 스캔처럼 트랙이 안 이어지는 곳에서는 영영 보류된다
+            ok = glob_ and False not in votes and votes.count(True) >= (2 if len(votes) >= 2 else 1) and not pending
+            if not ax.get("local_declared") and geom is None:
+                ok = glob_                                # 국소도 기하도 없는 대상은 전역만(예전과 같다)
+            name = (a.get("scores") and next(iter(a["scores"]))) or d["name"]
+            word = lambda v: "-" if v is None else ("yes" if v else "no")
+            txt = "global %s · local %s%s · geometry %s" % (
+                word(glob_), word(local), "" if ratio is None else " %d%% of %d" % (round(100 * ratio), len(vals)),
+                word(geom)) + (" · pending" if pending else "")
+            card = (a.get("cards") or {}).get(name)
+            if card is not None:
+                card["rows"] = [r for r in card["rows"] if r[0] != "axes"] + [["axes", None, txt]]
+            d["assess"] = dict(a, suspect=name if ok else None,
+                               axes=dict(ax, local_ratio=None if ratio is None else round(ratio, 2),
+                                         local_frames=len(vals), decision="axes",
+                                         pending=bool(pending)))
+        self.anon = anon
+        for k in [k for k, v in self.mem.items() if self.n - v["n"] > 60]:
+            del self.mem[k]
+        return dets
+
+
+def ta_part_floor():
+    import target_assess as _ta
+    return _ta.PART_FLOOR
+
+
 class AssessSmoother:
     """**정지한 물체 · 정지한 카메라인데 판정이 흔들리는 것**을 막는다(2026-11-13).
 
@@ -2469,7 +2555,9 @@ class TargetedRunner:
                 _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
             self.depth = _MODEL_CACHE[key]
             self.depth.classes = tuple(dist_names)
-        self.evidence = ta.TargetEvidence(self.targets, files["clip"], log=log)
+        tw = files["yoloe_text"]
+        self.evidence = ta.TargetEvidence(self.targets, files["clip"], log=log,
+                                          parts_model=(tw[0], tw[1].parent, device))
         TARGET_STYLE.clear()
         for t in self.targets:
             rgb = t.get("colour_rgb") or [0, 200, 255]
@@ -3041,7 +3129,7 @@ def _targeted_cards(img, dets, obstacles, max_cards=5):
         rows = []
         for k, pct, txt in card.get("rows") or []:
             label = CUE_EN.get(k, k)                   # 카드는 영어로만
-            rows.append((label, pct, str(txt)[:64]))
+            rows.append((label, pct, str(txt)[:72]))
         head = st.get("shown", name)
         score = "-" if a.get("score") is None else "%d/100" % round(a["score"])
         lab_w = int(max([probe.textlength(r[0], font=font) for r in rows] + [0])) + 8
@@ -3441,6 +3529,12 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
         if sm is None:
             sm = cfg["_asm"][skey] = AssessSmoother(asm)
         dets = sm.update(dets)
+    if det_model == "targeted":
+        akey = (device, base.get("run"), det_model)
+        ad = cfg.setdefault("_axes", {}).get(akey)
+        if ad is None:
+            ad = cfg["_axes"][akey] = AxisDecider()
+        dets = ad.update(dets)
     if not wanted:
         return (None, None, None, None, dets), stab
     om, prefs = model_ocfg(ocfg, cfg, det_model, device)
@@ -3910,7 +4004,7 @@ class LiveRunner:
             tr = self.runners.get("targeted")
             if tr is not None and resolved.get("targeted") is not None:
                 tr.reconfigure(resolved["targeted"])
-                for store in ("_asm", "_stab", "_lab"):
+                for store in ("_asm", "_stab", "_lab", "_axes"):
                     for k in [k for k in (self.cfg.get(store) or {}) if k[2] == "targeted"]:
                         del self.cfg[store][k]
             apply_profile(self.cfg, resolved)

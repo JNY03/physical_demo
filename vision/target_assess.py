@@ -53,6 +53,73 @@ SIMILAR_WEIGHT = 0.7
 ARM_SHOWN = {"yoloe": "", "yoloe_free": "", "yolo_world": "yolo_world", "grounding_dino": "gdino"}
 
 
+#: 국소 축 — 부분이 '잡혔다' 고 보는 확신. **모든 arm 의 탐지기 하한(arm_conf)과 같은 값**이다(장면에 맞춘 값이 아니다)
+PART_FLOOR = 0.05
+PART_SIZE = 320          # 부분은 crop 을 이 크기로 키워 본다(사람 폭 40 px → 머리가 수 px 라 그대로는 못 본다)
+#: **안 보인 것과 없는 것은 다르다.** 부분이 원본에서 이 크기(px)보다 작게 찍힐 상자는 국소를 재지 않는다(못 잼).
+#: 부분의 크기는 대상 파일 parts.scale(물체 긴 변 대비, 사실). 8 px 은 탐지기가 볼 수 있는 최소 크기로 대상과 무관하다
+MIN_PART_PX = 8
+PART_NEGATIVES = ["wall", "floor", "jacket", "chair", "background"]   # 부분 어휘가 혼자면 아무 데나 부분이라 부른다
+
+
+class PartsProbe:
+    """**국소 근거** — 대상 crop 안에서 그 대상의 부분(대상 파일 parts)을 찾는다. YOLOE 텍스트(11l)를 따로 하나 올린다
+    (후보 arm 의 어휘를 바꾸지 않으려고). 한 장의 후보를 한 번에 묶어 돈다."""
+
+    def __init__(self, targets, weight, enc_dir, device):
+        import contextlib as _cl
+        from ultralytics import YOLOE
+        self.words = []
+        self.of = {}
+        self.scale = {}
+        for t in targets:
+            spec = t.get("parts") or {}
+            names = [str(n) for n in spec.get("names") or []]
+            self.of[t["name"]] = (names, spec.get("where", "any"))
+            self.scale[t["name"]] = float(spec.get("scale", 0.1))
+            for n in names:
+                if n not in self.words:
+                    self.words.append(n)
+        vocab = self.words + [w for w in PART_NEGATIVES if w not in self.words]
+        self.vocab = vocab
+        self.model = YOLOE(str(weight))
+        with _cl.chdir(enc_dir):
+            pe = self.model.get_text_pe(vocab)
+        self.model.set_classes(vocab, pe)
+        self.device = device
+
+    def __call__(self, bgr, dets):
+        H, W = bgr.shape[:2]
+        crops, owners = [], []
+        for d in dets:
+            if d["name"] not in self.of or not self.of[d["name"]][0]:
+                continue
+            x1, y1, x2, y2 = [int(round(v)) for v in d["xyxy"]]
+            c = bgr[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+            scale = float((self.scale or {}).get(d["name"], 0.1))
+            if c.size == 0 or max(c.shape[:2]) * scale < MIN_PART_PX:
+                d["_part"] = None                       # 못 잼 — 부분이 볼 수 있을 만큼 크게 찍히지 않는다
+                continue
+            k = PART_SIZE / max(c.shape[:2])
+            crops.append(cv2.resize(c, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC))
+            owners.append(d)
+        if not crops:
+            return
+        res = self.model.predict(crops, conf=PART_FLOOR * 0.6, imgsz=PART_SIZE, device=self.device, verbose=False)
+        for d, c, r in zip(owners, crops, res):
+            names, where = self.of[d["name"]]
+            best, word = 0.0, None
+            for b in (r.boxes or []):
+                w = self.vocab[int(b.cls)]
+                if w not in names:
+                    continue
+                if where == "top" and float(b.xyxy[0][1] + b.xyxy[0][3]) / 2 / c.shape[0] > 0.6:
+                    continue                            # 머리는 위쪽에 있다
+                if float(b.conf) > best:
+                    best, word = float(b.conf), w
+            d["_part"] = (best, word)
+
+
 def detector_support(d, ovd_boxes):
     """탐지기 근거 — 같은 자리를 이 대상으로 부른 탐지기마다 확신 하나(비슷한 이름은 0.7 배, OVD 는 겹친 상자의 최고)를
     noisy-OR 로 모은다: 1 − Π(1 − c). 여러 탐지기가 동의할수록 오르고, 하나만 말하면 그 확신이다.
@@ -263,7 +330,7 @@ class _Prepared:
 class TargetEvidence:
     """대상 목록 → 검출마다 근거를 재고 판정한다."""
 
-    def __init__(self, targets, clip_files=None, log=print):
+    def __init__(self, targets, clip_files=None, log=print, parts_model=None):
         self.targets = {t["name"]: t for t in targets}
         need_clip = any(CUES[k]["needs"] == ["clip"] or "clip" in CUES[k]["needs"]
                         for t in targets for k in t["cues"])
@@ -277,6 +344,14 @@ class TargetEvidence:
                 if log:
                     log("  targeted CLIP 을 못 세움 — %s (CLIP 근거는 못 잼)" % self.clip_why)
         self.prep = {n: _Prepared(t, self.clip) for n, t in self.targets.items()}
+        self.parts = None
+        pt = [t for t in targets if "parts" in t["cues"] and (t.get("parts") or {}).get("names")]
+        if pt and parts_model is not None:
+            try:
+                self.parts = _cached_probe(pt, parts_model[0], parts_model[1], parts_model[2])
+            except Exception as exc:                  # 없으면 국소 축만 못 잼
+                if log:
+                    log("  targeted 부분(국소) 탐지를 못 세움 — %s: %s" % (type(exc).__name__, exc))
 
     # -- 한 장
     def __call__(self, bgr, dets, ovd=None):
@@ -295,11 +370,14 @@ class TargetEvidence:
                 crops.append(d["_crop"])
                 owners.append(i)
         emb = self.clip.images(crops) if crops else None
+        if self.parts is not None:
+            self.parts(bgr, [d for d in dets if d["name"] in self.prep])
         e_of = {i: emb[k] for k, i in enumerate(owners)} if emb is not None else {}
         for i, d in enumerate(dets):
             if d["name"] in self.prep:
                 d["assess"] = self._one(d, e_of.get(i), (ovd or {}).get(d["name"]) or [], W, H)
             d.pop("_crop", None)
+            d.pop("_part", None)
         return round((time.perf_counter() - t0) * 1000, 1)
 
     def _one(self, d, emb, ovd_boxes, W, H):
@@ -457,6 +535,22 @@ class TargetEvidence:
                 if bad:
                     veto = "too big"
 
+        # 부분 — 국소 축(점수에 섞지 않는다). 트랙 누적은 vision_infer.AxisDecider 가 한다
+        part = None
+        if "parts" in cues:
+            pv = d.get("_part", "na")
+            if pv == "na" or pv is None:
+                add("parts", None, "not measured")
+            else:
+                part = pv[0]
+                add("parts", 100.0 * min(1.0, part / 0.5), "%s %.2f" % (pv[1] or "-", part))
+        # 기하 — 실물 크기(깊이로 잰 긴 변)가 선언 크기와 같은 자릿수인가(1/3 ~ 2 배). 축으로만 센다
+        geometry = None
+        real, mm = d.get("real_mm"), t.get("size_mm")
+        if real and mm:
+            ratio = float(real["long"]) / max(float(x) for x in mm)
+            geometry = (1.0 / 3.0) <= ratio <= 2.0
+
         # ---- 판정
         w = p.weights
         scored = [(r[1], w.get(r[0], 0.0)) for r in rows if r[3] == "score" and r[1] is not None]
@@ -493,7 +587,10 @@ class TargetEvidence:
             card_rows.append(["distance", None, "%.1f m" % v["value"] if v.get("space") == "metric"
                               else "%.3f relative" % v["value"]])
         src = ", ".join(sorted(set(d.get("arms") or [])))
-        return {"scores": {name: None if shown is None else round(shown, 1)},
+        axes = {"global": bool(ok), "local": None if part is None else round(part, 3),
+                "local_declared": "parts" in cues, "geometry": geometry}
+        return {"axes": axes,
+                "scores": {name: None if shown is None else round(shown, 1)},
                 "gate_scores": {name: None if gate_score is None else round(gate_score, 1)},
                 "suspect": name if ok else None,
                 "score": None if shown is None else round(shown, 1),
@@ -566,3 +663,19 @@ def resolve_same_as(dets):
             if _iou(a["xyxy"], b["xyxy"]) >= 0.5:
                 gone.add(id(b) if sc(a) >= sc(b) else id(a))
     return [d for d in dets if id(d) not in gone]
+
+
+_PROBE = {}
+
+
+def _cached_probe(targets, weight, enc_dir, device):
+    """부분 탐지기는 프로세스에 하나 — 어휘(부분 이름 합)가 같으면 다시 세우지 않는다."""
+    key = (str(weight), tuple(sorted({n for t in targets for n in (t.get("parts") or {}).get("names") or []})))
+    if key not in _PROBE:
+        _PROBE.clear()                                  # 어휘가 바뀌면 옛것을 버린다(GPU 메모리)
+        _PROBE[key] = PartsProbe(targets, weight, enc_dir, device)
+    probe = _PROBE[key]
+    probe.of = {t["name"]: ([str(n) for n in (t.get("parts") or {}).get("names") or []],
+                            (t.get("parts") or {}).get("where", "any")) for t in targets}
+    probe.scale = {t["name"]: float((t.get("parts") or {}).get("scale", 0.1)) for t in targets}
+    return probe

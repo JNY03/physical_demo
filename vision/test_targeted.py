@@ -242,3 +242,53 @@ def test_colour_fraction():
     assert frac > 0.99 and per["red"] > 0.99
     frac, _ = ta.colour_fraction(_red(), ["green"])
     assert frac < 0.01
+
+
+# ---------------------------------------------------------------- 축 단위 판정 (2026-11-23)
+def _axdet(local, glob_=True, geom=None, declared=True, tid=1, box=(0, 0, 40, 80)):
+    return {"name": "person", "track_id": tid, "xyxy": list(box),
+            "assess": {"suspect": "person" if glob_ else None, "scores": {"person": 60.0},
+                       "cards": {"person": {"rows": []}},
+                       "axes": {"global": glob_, "local": local, "local_declared": declared, "geometry": geom}}}
+
+
+def test_axes_local_majority_rejects_lookalike():
+    import vision_infer as vi
+    ad = vi.AxisDecider()
+    for _ in range(10):                               # 외투 건 의자: 전역은 사람, 부분은 거의 없다
+        d = ad.update([_axdet(0.0)])[0]
+    assert d["assess"]["suspect"] is None and d["assess"]["axes"]["local_ratio"] == 0.0
+    ad2 = vi.AxisDecider()
+    for i in range(10):                               # 사람: 부분이 대부분의 장에서 잡힌다
+        d = ad2.update([_axdet(0.14 if i % 4 else 0.0)])[0]
+    assert d["assess"]["suspect"] == "person"
+    assert any(r[0] == "axes" for r in d["assess"]["cards"]["person"]["rows"])
+
+
+def test_axes_unmeasured_local_falls_back_to_global():
+    import vision_infer as vi
+    ad = vi.AxisDecider()
+    d = ad.update([_axdet(None)])[0]                  # 부분이 너무 작아 못 잼 — 반대가 아니다
+    assert d["assess"]["suspect"] == "person"
+    d = vi.AxisDecider().update([_axdet(None, geom=False)])[0]
+    assert d["assess"]["suspect"] is None             # 기하가 반대하면 판정하지 않는다
+
+
+def test_axes_new_track_inherits_history():
+    import vision_infer as vi
+    ad = vi.AxisDecider()
+    for _ in range(6):
+        ad.update([_axdet(0.2, tid=5)])
+    d = ad.update([_axdet(0.0, tid=9)])[0]            # 트래커가 번호를 다시 붙였다 — 같은 자리의 기록을 잇는다
+    assert d["assess"]["suspect"] == "person" and d["assess"]["axes"]["local_frames"] == 7
+
+
+def test_part_measurability_by_scale():
+    t = {"name": "door", "parts": {"names": ["door handle"], "scale": 0.05}}
+    probe = ta.PartsProbe.__new__(ta.PartsProbe)
+    probe.of = {"door": (["door handle"], "any")}
+    probe.scale = {"door": 0.05}
+    probe.vocab = ["door handle"]
+    d = {"name": "door", "xyxy": [0, 0, 20, 55]}      # 55 px 문의 손잡이 ≈ 2.75 px — 볼 수 없다
+    probe(np.zeros((100, 100, 3), np.uint8), [d])
+    assert d["_part"] is None
