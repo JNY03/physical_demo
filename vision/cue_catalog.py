@@ -344,7 +344,7 @@ def resolve_cues(t, spec_cues, avail):
 
 
 # ---------------------------------------------------------------- 프로필
-OVERLAY_KEYS = ("label", "cards", "count", "show_non_suspect", "show_rejected", "title", "pose")
+OVERLAY_KEYS = ("label", "cards", "count", "roi", "show_non_suspect", "show_rejected", "title", "pose")
 CARD_MODES = ("off", "hover", "always")
 LABEL_TOKENS = ("name", "lead", "conf", "cls", "id", "depth", "range", "dist", "gps", "alt", "ned")
 
@@ -370,6 +370,7 @@ def overlay_options(models, targeted_distance=True, targets=()):
             o["dist"] = True
             o["gps"] = True
         o["count"] = det or "검출 모델이 아님"
+        o["roi"] = det or "검출 모델이 아님"           # 탐지 영역 — 웹 화면에서 끌어 지정한 영역을 쓰고 그린다
         o["cards"] = True if m in ("river", "targeted") else "판정 카드가 없는 모델"
         o["show_non_suspect"] = o["cards"]
         o["show_rejected"] = (True if (m == "targeted" and "demo_box" in targets)
@@ -577,7 +578,7 @@ def catalog(cfg=None):
             "distance_available": have("depth", files),
             "overlay": overlay_options(all_models, True, [t["name"] for t in targets]),
             "overlay_labels": {"name": "클래스명", "conf": "신뢰도", "id": "트랙 번호", "dist": "거리",
-                               "gps": "GPS", "count": "탐지 개수", "cards": "카드",
+                               "gps": "GPS", "count": "탐지 개수", "roi": "탐지 영역", "cards": "카드",
                                "show_non_suspect": "판정 아닌 검출", "show_rejected": "관문에 떨어진 검출",
                                "title": "제목 띠", "pose": "드론 위치 띠"},
             "card_modes": [{"key": "off", "shown": "끔"}, {"key": "hover", "shown": "마우스 올릴 때"},
@@ -604,6 +605,7 @@ def overlay_defaults(cfg):
                   "cards": ("always" if cards is True or cards == "always" else "off" if cards == "off"
                             else "hover") if m in ("river", "targeted") else None,
                   "count": bool(blk.get("count", False)),
+                  "roi": bool(blk.get("roi", True)) if m in DETECT_MODELS else None,
                   "show_non_suspect": bool(blk.get("show_non_suspect", True)),
                   "show_rejected": bool(blk.get("show_rejected", False)),
                   "title": bool(o.get("title", True)),

@@ -2883,42 +2883,77 @@ def add_header(img, lines, ocfg):
 def detect_overlay(bgr, dets, title, ocfg, kind="yoloe", rec=None, rects=None):
     blk = (ocfg.get(kind) or {}) if isinstance(ocfg.get(kind), dict) else {}
     lines = [title if ocfg.get("title", True) else None]
-    if blk.get("count") and rec is not None:
-        lines.append(count_line(rec.get("counts"), bool(rects)))
     if kind == "targeted":
         out = _targeted_overlay(bgr, dets, ocfg, blk, rec)
-        if rects:
-            out = draw_roi(out, rects)
-        return add_header(out, lines, ocfg)
-    out = _detect_overlay(bgr, dets, ocfg, kind)
+    else:
+        out = _detect_overlay(bgr, dets, ocfg, kind)
     if rects:
         out = draw_roi(out, rects)
+    if blk.get("count") and rec is not None:
+        # **탐지 개수는 프레임 왼쪽 위에 클래스별 라벨로**(2026-11-23). 구역이 있으면 구역 안에서만 센 값이다
+        out = draw_counts(out, rec.get("counts") or {}, dets, kind, ocfg)
     return add_header(out, lines, ocfg)
 
 
-def count_line(counts, in_roi=False):
-    body = " · ".join("%s %d" % kv for kv in (counts or {}).items()) or "0"
-    return ("[ROI] " if in_roi else "") + body
+#: 탐지 영역 색(BGR) — 대상 색과 겹치지 않는 청록
+ROI_BGR = (200, 200, 0)
 
 
-def draw_roi(img, rects):
-    """구역 밖을 어둡게, 구역은 점선 테두리."""
-    h, w = img.shape[:2]
-    mask = np.zeros((h, w), bool)
-    for r in rects:
-        x1, y1, x2, y2 = [int(round(v)) for v in r]
-        mask[max(0, y1):min(h, y2), max(0, x1):min(w, x2)] = True
+def draw_roi(img, rects, alpha=0.18):
+    """탐지 영역을 **색으로** — 안을 옅게 칠하고 테두리를 그린다(2026-11-23). 밖은 그대로 둔다."""
     out = img.copy()
-    out[~mask] = (out[~mask] * 0.45).astype(np.uint8)
+    tint = img.copy()
+    lw = max(2, round(img.shape[1] / 480))
     for r in rects:
         x1, y1, x2, y2 = [int(round(v)) for v in r]
-        for i in range(x1, x2, 12):
-            cv2.line(out, (i, y1), (min(i + 6, x2), y1), (255, 255, 255), 2)
-            cv2.line(out, (i, y2), (min(i + 6, x2), y2), (255, 255, 255), 2)
-        for j in range(y1, y2, 12):
-            cv2.line(out, (x1, j), (x1, min(j + 6, y2)), (255, 255, 255), 2)
-            cv2.line(out, (x2, j), (x2, min(j + 6, y2)), (255, 255, 255), 2)
+        cv2.rectangle(tint, (x1, y1), (x2, y2), ROI_BGR, -1)
+    cv2.addWeighted(tint, alpha, out, 1 - alpha, 0, out)
+    for r in rects:
+        x1, y1, x2, y2 = [int(round(v)) for v in r]
+        cv2.rectangle(out, (x1, y1), (x2, y2), ROI_BGR, lw)
     return out
+
+
+def count_colour(name, dets, kind):
+    if kind == "targeted":
+        st = TARGET_STYLE.get(name)
+        if st:
+            return st["bgr"]
+    if kind == "river":
+        try:
+            cards = _cards_module()
+            if name in cards.HAZARD:
+                return tuple(int(v) for v in cards.HAZARD_RGB[::-1])
+        except Exception:
+            pass
+    d = next((d for d in dets or [] if d.get("name") == name and d.get("cls") is not None), None)
+    return class_color(d["cls"]) if d is not None else (160, 160, 160)
+
+
+def draw_counts(img, counts, dets, kind, ocfg):
+    """프레임 왼쪽 위에 클래스별 라벨 '이름 개수' 를 세로로 쌓는다(박스 라벨과 같은 모양)."""
+    if not counts:
+        return img
+    h, w = img.shape[:2]
+    fs = float(ocfg.get("font_scale") or max(0.4, w / 1600.0))
+    pad = 4
+    y = pad
+    for name, n in counts.items():
+        if kind == "targeted" and name in TARGET_STYLE:
+            name_s = TARGET_STYLE[name].get("shown", name)
+        else:
+            name_s = name
+        s = "%s %d" % (name_s, n)
+        (tw, th), _ = cv2.getTextSize(s, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)
+        lh = th + 8
+        if y + lh > h:
+            break
+        color = count_colour(name, dets, kind)
+        cv2.rectangle(img, (pad, y), (pad + tw + 8, y + lh), color, -1)
+        text_color = (0, 0, 0) if sum(color) > 380 else (255, 255, 255)
+        cv2.putText(img, s, (pad + 4, y + lh - 5), cv2.FONT_HERSHEY_SIMPLEX, fs, text_color, 1, cv2.LINE_AA)
+        y += lh + 3
+    return img
 
 
 #: 지정 클래스 대상의 색 · 보이는 이름 — TargetedRunner 가 채운다
@@ -3353,7 +3388,10 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
     if hasattr(runner, "use_stream"):                  # 기기마다 따로 기억하는 실행기
         runner.use_stream((device, base.get("run")))
     H, W = bgr.shape[:2]
-    rects = roi_rects_px(roi, W, H) if roi_applies(roi, det_model) else []
+    om0, _p = model_ocfg(ocfg, cfg, det_model, device)
+    roi_on = ((om0.get(det_model) or {}) if isinstance(om0.get(det_model), dict) else {}).get("roi", True)
+    # **탐지 영역**(오버레이 선택지 roi, 기본 켬) — 끄면 이 모델은 웹 화면의 영역을 쓰지도 그리지도 않는다
+    rects = roi_rects_px(roi, W, H) if (roi_on and roi_applies(roi, det_model)) else []
     crop = roi_crop_box(rects, W, H) if rects else None
     with _upscale_crop(runner, crop is not None):
         if det_model == "targeted":
@@ -3411,6 +3449,7 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
                                       "off" if cards == "off" else "hover") if det_model in ("river", "targeted")
                             else "off",
                             "count": bool(mblk.get("count", False)),
+                            "roi": bool(mblk.get("roi", True)),
                             "show_non_suspect": bool(mblk.get("show_non_suspect", True))}
     if cfg.get("_profile_label") is not None or cfg.get("_profile_version") is not None:
         rec["profile"] = {"label": cfg.get("_profile_label"), "version": cfg.get("_profile_version")}

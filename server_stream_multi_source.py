@@ -614,17 +614,22 @@ main{display:flex;gap:10px;padding:8px;align-items:flex-start}
 .gone{opacity:.55}.gone h3::after{content:"not in this frame";font-size:11px;color:var(--mute)}
 #tip{position:fixed;z-index:9;pointer-events:none;display:none}
 #rois{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
-.roi{position:absolute;border:2px dashed #fff;box-shadow:0 0 0 1px #000a}
+.roi{position:absolute;border:2px solid #00c8c8;background:#00c8c833;box-shadow:0 0 0 1px #000a}
 .roi .x{position:absolute;right:-1px;top:-1px;pointer-events:auto;cursor:pointer;background:#000c;color:#fff;border:0;
 font-size:13px;line-height:1;padding:3px 5px}
-.rubber{position:absolute;border:2px dashed #5aa0ff;background:#5aa0ff22;pointer-events:none}
+.rubber{position:absolute;border:2px solid #00c8c8;background:#00c8c844;pointer-events:none}
+.roibar{position:absolute;right:8px;top:8px;z-index:6;display:flex;gap:6px}
+.roibar button{background:#000b;color:#fff;border:1px solid #fff6;border-radius:4px;padding:4px 9px;cursor:pointer;font:12px system-ui,"Malgun Gothic",sans-serif}
+.roibar button.on{background:#00c8c8;color:#000;border-color:#00c8c8}
+#stage.roimode{cursor:crosshair}
 header button{background:#222;color:var(--fg);border:1px solid var(--line);cursor:pointer}
 .hint{color:var(--mute);font-size:12px}
 </style></head><body>
 <header><b>__SRC__</b><span class="m">비전</span><select id="model"></select>
-<span class="hint">물체 위에 마우스 → 근거 카드 · 클릭 → 고정 · ✕ 닫기 · 빈 곳을 끌면 구역</span>
-<button id="roiclear" style="display:none">구역 모두 지우기</button><span id="st" class="m" style="margin-left:auto"></span></header>
-<main><div id="stage"><img id="img" alt=""><div id="marks"></div><div id="rois"></div></div></main>
+<span class="hint">물체 위에 마우스 → 근거 카드 · 클릭 → 고정 · ✕ 닫기 · 영역 지정 → 끌기</span>
+<span id="st" class="m" style="margin-left:auto"></span></header>
+<main><div id="stage"><img id="img" alt=""><div id="marks"></div><div id="rois"></div>
+<div class="roibar" id="roibar"><button id="roiset" type="button">영역 지정</button><button id="roiclear" type="button">영역 취소</button></div></div></main>
 <div id="tip"></div>
 <script>
 (function(){
@@ -686,7 +691,7 @@ function toImg(ev){var r=img.getBoundingClientRect();if(!r.width||!natW)return n
 function placeTip(cx,cy){var w=tip.offsetWidth,h=tip.offsetHeight,vw=innerWidth,vh=innerHeight;
   var x=cx+18,y=cy+18;if(x+w>vw-8)x=cx-w-18;if(y+h>vh-8)y=vh-h-8;tip.style.left=Math.max(8,x)+"px";tip.style.top=Math.max(8,y)+"px"}
 function showTip(){
-  if(!mouse||cardsMode()==="off"||drag){tip.style.display="none";hoverKey=null;return}
+  if(!mouse||cardsMode()==="off"||drag||roiMode){tip.style.display="none";hoverKey=null;return}
   var p=hitAt(mouse.x,mouse.y);
   if(!p){tip.style.display="none";hoverKey=null;stage.style.cursor="crosshair";return}
   hoverKey=keyOf(p.d,p.i);stage.style.cursor="pointer";
@@ -725,16 +730,22 @@ function updatePins(){var seen={},mode=cardsMode();
   pins.forEach(function(p,k){if(seen[k]){p.det=seen[k];p.seen=true}else p.seen=false;renderPin(k)});layoutPins()}
 stage.addEventListener("mousemove",function(ev){mouse=toImg(ev);showTip();drawMarks()});
 stage.addEventListener("mouseleave",function(){mouse=null;showTip();drawMarks()});
-stage.addEventListener("click",function(ev){if(dragged){dragged=false;return}if(cardsMode()==="off")return;
+stage.addEventListener("click",function(ev){if(dragged){dragged=false;return}if(cardsMode()==="off"||roiMode)return;
   var m=toImg(ev);if(!m)return;var p=hitAt(m.x,m.y);if(!p)return;
   var k=keyOf(p.d,p.i);if(pins.has(k))return;
   var el=document.createElement("div");stage.appendChild(el);pins.set(k,{el:el,det:p.d,seen:true});renderPin(k);layoutPins();
   tip.style.display="none";drawMarks()});
 // ---- 구역(ROI): 빈 곳을 끌어 그린다 → POST /control/roi. 좌표는 프레임 대비 0~1
-var rubber=null, rois=document.getElementById("rois"), clearBtn=document.getElementById("roiclear");
+var rubber=null, rois=document.getElementById("rois"), clearBtn=document.getElementById("roiclear"),
+    setBtn=document.getElementById("roiset"), roiBar=document.getElementById("roibar"), roiMode=false;
+function roiOn(){return !cur||!cur.overlay_prefs||cur.overlay_prefs.roi!==false}
+function setMode(on){roiMode=on;setBtn.classList.toggle("on",on);stage.classList.toggle("roimode",on)}
+setBtn.onclick=function(ev){ev.stopPropagation();setMode(!roiMode)};
+roiBar.addEventListener("mousedown",function(ev){ev.stopPropagation()});
+roiBar.addEventListener("click",function(ev){ev.stopPropagation()});
 function fw(){return (cur&&cur.width)||natW} function fh(){return (cur&&cur.height)||(natH-band())}
 function frac(m){return {x:Math.max(0,Math.min(1,m.x/fw())),y:Math.max(0,Math.min(1,m.y/fh()))}}
-stage.addEventListener("mousedown",function(ev){if(ev.button!==0||ev.target.closest(".card,.roi .x"))return;var m=toImg(ev);if(!m)return;
+stage.addEventListener("mousedown",function(ev){if(!roiMode||ev.button!==0||ev.target.closest(".card,.roi .x,.roibar"))return;var m=toImg(ev);if(!m)return;
   drag={a:frac(m),cx:ev.clientX,cy:ev.clientY};ev.preventDefault()});
 addEventListener("mousemove",function(ev){if(!drag)return;var m=toImg(ev);if(!m)return;drag.b=frac(m);
   if(Math.abs(ev.clientX-drag.cx)+Math.abs(ev.clientY-drag.cy)<6)return;
@@ -744,11 +755,12 @@ addEventListener("mouseup",function(ev){if(!drag)return;var d=drag;drag=null;if(
   if(!d.b||Math.abs(ev.clientX-d.cx)+Math.abs(ev.clientY-d.cy)<6)return;dragged=true;
   var r=[Math.min(d.a.x,d.b.x),Math.min(d.a.y,d.b.y),Math.max(d.a.x,d.b.x),Math.max(d.a.y,d.b.y)];
   if(r[2]-r[0]<0.01||r[3]-r[1]<0.01)return;
-  sendRois(((roi&&roi.rects)||[]).concat([r]))});
+  setMode(false);sendRois(((roi&&roi.rects)||[]).concat([r]))});
 function place(el,r){if(!natW)return;var bd=band();
   el.style.left=(r[0]*fw()/natW*100)+"%";el.style.top=((bd+r[1]*fh())/natH*100)+"%";
   el.style.width=((r[2]-r[0])*fw()/natW*100)+"%";el.style.height=((r[3]-r[1])*fh()/natH*100)+"%"}
-function drawRois(){rois.innerHTML="";var rs=(roi&&roi.rects)||[];clearBtn.style.display=rs.length?"":"none";
+function drawRois(){rois.innerHTML="";var on=roiOn();roiBar.style.display=on?"":"none";if(!on){setMode(false);return}
+  var rs=(roi&&roi.rects)||[];clearBtn.style.display=rs.length?"":"none";
   rs.forEach(function(r,i){var e=document.createElement("div");e.className="roi";place(e,r);
     var x=document.createElement("button");x.className="x";x.textContent="✕";x.title="이 구역 지우기";
     x.onclick=function(ev){ev.stopPropagation();var rest=rs.filter(function(_,j){return j!==i});
@@ -772,7 +784,7 @@ function loop(){
       if(sel.options.length!==(j.models||[]).length){sel.innerHTML=(j.models||[]).map(function(m){return"<option>"+esc(m)+"</option>"}).join("")}
       sel.value=j.model;
       var im=new Image();im.onload=function(){var first=!natW;natW=im.naturalWidth;natH=im.naturalHeight;cur=j;img.src=im.src;
-        updatePins();if(mouse)showTip();drawMarks();if(first)drawRois()};
+        var pr=(j.overlay_prefs||{}).roi!==false;updatePins();if(mouse)showTip();drawMarks();if(first||pr!==roiBar._on){roiBar._on=pr;drawRois()}};
       im.src="data:image/jpeg;base64,"+j.image_b64;
       var cn=j.counts?Object.keys(j.counts).map(function(k){return k+" "+j.counts[k]}).join(" · "):"";
       st.textContent="#"+(j.n==null?"-":j.n)+" · 검출 "+((j.detections||[]).length)+(cn?" · "+cn:"")+(j.roi?" · 구역 안":"");
@@ -1457,6 +1469,16 @@ def make_handler(src, vision=None):
                 return self._json(200, {"status": "ok", "source": src.name, "roi": roi})
             except Exception as e:
                 return self._json(503, {"status": "error", "detail": "Redis 에 못 씀 (%s)" % describe(e)})
+
+        def do_OPTIONS(self):
+            """CORS 사전 요청 — 가시화 웹(다른 주소)이 /control/roi 에 POST · DELETE 를 보낼 수 있게(2026-11-23)."""
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def do_DELETE(self):
             path = self.path.split("?", 1)[0].rstrip("/")
