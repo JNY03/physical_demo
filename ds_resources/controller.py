@@ -26,6 +26,10 @@ INPUT_FRESH_S = 5.0
 COMBO_STALE_S = 7 * 86400.0
 DEGRADED_RATIO = 0.8
 DEGRADED_AFTER_S = 30.0
+CPU_HEARTBEAT_FRESH_S = 30.0          # cpu_telemetry:<unit> 이 이 안에 있어야 running
+CPU_REPLACE_AFTER_S = 60.0            # running 이던 CPU 작업이 이만큼 하트비트가 없으면 다시 배치
+NODE_BAD_GRACE_S = 30.0               # 노드가 Ready 아님 · stale 인 채로 이만큼 이어져야 옮긴다 — metrics 가 잠깐
+                                      # 끊긴 것만으로 작업이 노드 사이를 오가지 않게 (2026-11-24 실측: 끊긴 지 15초에 옮겼다)
 
 
 def jpeg_size(data):
@@ -66,8 +70,9 @@ def load_yaml(path):
 
 class Controller:
     def __init__(self, redis_client, state, executor, memory, local_node=None, cluster=None, cfg=None,
-                 clock=time.time, log=print, gpus=probe.gpus):
+                 clock=time.time, log=print, gpus=probe.gpus, cpu_executor=None):
         self.r, self.state, self.ex, self.mem = redis_client, state, executor, memory
+        self.cpu_ex = cpu_executor                    # k3s CPU 실행기 (orchestrator 가 주입) — 없으면 파이에 못 둔다
         self.local = local_node or probe.node_name()
         self.cluster, self.clock, self.log, self.gpus = cluster, clock, log, gpus
         self.cfg = cfg if cfg is not None else load_yaml(REPO / "vision" / "vision_config.yaml")
@@ -121,14 +126,41 @@ class Controller:
     def local_node_snapshot(self):
         g = self.gpus()
         loaded = [u for u in self.ex.active_units().values() if u.get("status") == "loaded"]
+        mem = {}
+        try:
+            for line in open("/proc/meminfo", encoding="utf-8"):
+                k, _, v = line.partition(":")
+                if k in ("MemTotal", "MemAvailable"):
+                    mem[k] = int(v.split()[0]) / 1024.0
+            load1 = float(open("/proc/loadavg", encoding="utf-8").read().split()[0])
+        except (OSError, ValueError):
+            load1 = 0.0
+        import os
         return {"name": self.local, "role": "gpu", "ready": bool(g), "stale": not g,
                 "gpus": [{"mem_total_mb": x["mem_total_mb"], "mem_used_mb": x["mem_used_mb"]} for x in g],
-                "gpu_util_committed": sum(float(u.get("gpu_util") or 0) for u in loaded)}
+                "gpu_util_committed": sum(float(u.get("gpu_util") or 0) for u in loaded),
+                "cpu_alloc_m": (os.cpu_count() or 1) * 1000.0, "cpu_now_m": load1 * 1000.0,
+                "mem_alloc_mb": mem.get("MemTotal", 0.0),
+                "mem_now_mb": mem.get("MemTotal", 0.0) - mem.get("MemAvailable", 0.0), "net": {}}
 
     # ------------------------------------------------------------ 요청
-    def submit(self, sources, models, profile=None, profile_path=None, target_fps=None):
+    def cpu_specs(self, names, task_specs=None):
+        specs = task_specs if task_specs is not None else (self.reg.get("cpu_tasks") or {})
+        out = []
+        for n in sorted(names or []):
+            if n not in specs:
+                raise ValueError("모르는 CPU 작업 %r (레지스트리 cpu_tasks)" % n)
+            t = dict(specs[n], task=n)
+            if not t.get("image"):                      # 이미지가 없으면 파이에 못 둔다 → data_stream 기기만
+                t["roles"] = [r for r in t.get("roles", []) if r == "gpu"]
+            out.append(t)
+        return out
+
+    def submit(self, sources, models, profile=None, profile_path=None, target_fps=None, cpu_tasks=None,
+               task_specs=None):
         rid = "req-" + uuid.uuid4().hex[:10]
-        request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {}}
+        request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {},
+                   "cpu_tasks": sorted(cpu_tasks or [])}
         self.state.put_request(rid, dict(request, status="requested", at=self.clock()))
         self.emit("requested", rid, request=request)
         ok, why, nodes = True, "", []
@@ -153,10 +185,15 @@ class Controller:
                 infos[s] = info
         snapshot = {"nodes": [self.local_node_snapshot()] + [n for n in nodes if n.get("name") != self.local],
                     "costs": {}}
-        if infos:
+        if infos and models:
             snapshot["costs"]["+".join(sorted(models))] = self.costs(models, infos, profile)
         fps = {s: float((target_fps or {}).get(s) or max(1.0, infos[s]["fps"] or 10.0)) for s in infos}
-        req = {"request_id": rid, "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps}] if infos else []}
+        specs = self.cpu_specs(cpu_tasks, task_specs)
+        if mode != "k3s" or self.cpu_ex is None:        # k3s 가 없으면 CPU 작업도 data_stream 기기에만
+            specs = [dict(t, roles=[r for r in t.get("roles", []) if r == "gpu"]) for t in specs]
+        req = {"request_id": rid, "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps}] if infos else [],
+               "cpu": specs}
+        self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
         for s in missing:
             plan["refused"].append({"item": "input:%s" % s, "reason": "입력 영상 없음 또는 %d초 넘게 멈춤" % INPUT_FRESH_S})
@@ -181,12 +218,114 @@ class Controller:
                                   "execution_id": xid}, u["need_mb"], calc)
             self.emit("applied", rid, execution_id=xid, mode=mode, reason=why2 or "GPU Executor 로 띄움",
                       detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"]})
+        for u in plan["cpu_units"]:
+            self.launch_cpu(rid, xid, mode, u)
         return rid
+
+    # ------------------------------------------------------------ CPU 작업
+    def launch_cpu(self, rid, xid, mode, u, replaces=None):
+        uid = "cpu-%s-%s" % (u["task"], uuid.uuid4().hex[:6])
+        rec = {"unit_id": uid, "kind": "cpu", "task": u["task"], "node": u["node"], "requests": u["requests"],
+               "limits": u["limits"], "priority_class": u["priority_class"], "request_id": rid, "execution_id": xid,
+               "status": "starting", "started_at": self.clock(), "replaces": replaces}
+        if u["node"] == self.local or self.cpu_ex is None:
+            rec.update(status="local", where="data_stream 기기 (런처가 띄우는 기존 방식)")
+            self.state.put_unit(uid, rec)
+            self.emit("applied", rid, execution_id=xid, mode=mode, reason="CPU 작업 %s → data_stream 기기" % u["task"],
+                      detail={"unit_id": uid, "node": u["node"], "note": u.get("reason")})
+            return uid
+        try:
+            self.cpu_ex.launch(rec)
+        except Exception as e:  # noqa: BLE001
+            rec.update(status="failed", reason=str(e)[:200])
+            self.state.put_unit(uid, rec)
+            self.emit("failed", rid, execution_id=xid, mode=mode, reason="CPU 작업을 못 띄움: %s" % e, detail={"unit_id": uid})
+            return uid
+        self.state.put_unit(uid, rec)
+        self.emit("applied", rid, execution_id=xid, mode=mode, reason="CPU 작업 %s → %s" % (u["task"], u["node"]),
+                  detail={"unit_id": uid, "node": u["node"], "requests": u["requests"], "limits": u["limits"],
+                          "priority_class": u["priority_class"]})
+        return uid
+
+    def heartbeat_age(self, uid):
+        try:
+            raw = self.r.get("cpu_telemetry:" + uid)
+            ts = json.loads(raw).get("ts") if raw else None
+            return self.clock() - float(ts) if ts else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def replace_cpu(self, u, reason, nodes):
+        """CPU 작업만 다시 배치한다(GPU 는 옮기지 않는다). 그 노드를 빼고 placement 의 CPU 규칙으로."""
+        self.cpu_ex.stop(u)
+        self.state.update_unit(u["unit_id"], status="replaced", reason=reason, ended_at=self.clock())
+        spec = (getattr(self, "_specs", {}) or {}).get(u["task"]) or self.cpu_specs([u["task"]])[0]
+        out = {"cpu_units": [], "refused": []}
+        placement.place_cpu(spec, [n for n in nodes if n["name"] != u["node"]] + [self.local_node_snapshot()],
+                            out, self.local)
+        if not out["cpu_units"]:
+            return self.emit("failed", u["request_id"], execution_id=u["execution_id"], mode="k3s",
+                             reason="%s — 옮길 노드 없음" % reason, detail={"unit_id": u["unit_id"]})
+        new = out["cpu_units"][0]
+        nid = self.launch_cpu(u["request_id"], u["execution_id"], "k3s", new, replaces=u["unit_id"])
+        return self.emit("replanned", u["request_id"], execution_id=u["execution_id"], mode="k3s",
+                         reason="%s → %s 에서 %s 로" % (reason, u["node"], new["node"]),
+                         detail={"from": u["unit_id"], "to": nid, "from_node": u["node"], "to_node": new["node"]})
+
+    def poll_cpu(self):
+        units = {k: u for k, u in self.state.units().items() if u.get("kind") == "cpu"
+                 and u.get("status") in ("starting", "running")}
+        if not units or self.cpu_ex is None:
+            return []
+        events = []
+        try:
+            ok, why = self.cluster.check() if self.cluster is not None else (False, "k3s 백엔드 없음")
+            nodes = self.cluster.nodes() if ok else []
+        except Exception as e:  # noqa: BLE001
+            ok, why, nodes = False, str(e), []
+        if not ok:                                      # 파드는 노드에서 계속 돈다 — 상태만 모른다
+            for uid, u in units.items():
+                if not u.get("k3s_down_emitted"):
+                    self.state.update_unit(uid, k3s_down_emitted=True)
+                    events.append(self.emit("degraded", u["request_id"], execution_id=u["execution_id"], mode="local",
+                                            basis="saved", reason="k3s 응답 없음 — 파이 작업 상태를 확인할 수 없음 (%s)" % why))
+            return events
+        by_name = {n["name"]: n for n in nodes}
+        now = self.clock()
+        for uid, u in units.items():
+            if u.get("k3s_down_emitted"):
+                self.state.update_unit(uid, k3s_down_emitted=False)
+            node = by_name.get(u["node"])
+            st = self.cpu_ex.status(u)
+            age = self.heartbeat_age(uid)
+            if node is None or not node.get("ready") or node.get("stale"):
+                since = u.get("node_bad_since")
+                if since is None:
+                    self.state.update_unit(uid, node_bad_since=now)
+                elif now - since >= NODE_BAD_GRACE_S:
+                    events.append(self.replace_cpu(u, "노드 %s 빠짐 (Ready 아님 · stale %d초)" % (u["node"], now - since),
+                                                   nodes))
+                continue
+            if u.get("node_bad_since") is not None:
+                self.state.update_unit(uid, node_bad_since=None)
+            if st.get("waiting") in ("CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull") or st.get("phase") == "Failed":
+                events.append(self.replace_cpu(u, "파드 실패 (%s)" % (st.get("waiting") or st.get("phase")), nodes))
+                continue
+            if u["status"] == "starting":
+                if st.get("ready") and age is not None and age <= CPU_HEARTBEAT_FRESH_S:
+                    self.state.update_unit(uid, status="running", running_at=now)
+                    events.append(self.emit("running", u["request_id"], execution_id=u["execution_id"], mode="k3s",
+                                            detail={"unit_id": uid, "node": u["node"]}))
+                elif now - u["started_at"] > ge.LOAD_TIMEOUT_S:
+                    events.append(self.replace_cpu(u, "%d초 안에 하트비트 없음" % ge.LOAD_TIMEOUT_S, nodes))
+            elif age is None or age > CPU_REPLACE_AFTER_S:
+                events.append(self.replace_cpu(u, "하트비트 %s초 없음" % ("?" if age is None else int(age)), nodes))
+        return events
 
     # ------------------------------------------------------------ 감시
     def poll(self):
         self.flush_outbox()
-        events = []
+        events = self.poll_cpu()
         for uid, change in self.ex.poll():
             u = self.state.units().get(uid) or {}
             rid, xid = u.get("request_id") or "-", u.get("execution_id")
@@ -231,6 +370,14 @@ class Controller:
 
     def stop(self, request_id, reason="요청"):
         n = 0
+        for uid, u in self.state.units().items():
+            if u.get("kind") == "cpu" and u.get("request_id") == request_id and u.get("status") in ("starting", "running"):
+                if self.cpu_ex is not None:
+                    self.cpu_ex.stop(u)
+                self.state.update_unit(uid, status="stopped", reason=reason, ended_at=self.clock())
+                self.emit("stopped", request_id, execution_id=u.get("execution_id"), reason=reason,
+                          detail={"unit_id": uid})
+                n += 1
         for uid, u in self.ex.active_units().items():
             if u.get("request_id") == request_id:
                 self.ex.stop(uid, reason)

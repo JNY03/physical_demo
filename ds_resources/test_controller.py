@@ -181,3 +181,113 @@ def test_cluster_ok_is_live_mode(tmp_path):
     k.submit(["pi13"], ["yoloe"])
     assert "fallback" not in r.events()
     assert [x for x in r.rows if x["event"] == "planned"][0]["mode"] == "k3s"
+
+
+# ---------------------------------------------------------------- CPU 작업 (M8)
+class FakeCpu:
+    def __init__(self):
+        self.launched, self.stopped, self.st = [], [], {}
+
+    def launch(self, unit):
+        self.launched.append(unit)
+
+    def status(self, unit):
+        return self.st.get(unit["unit_id"], {"phase": "Running", "ready": True})
+
+    def stop(self, unit):
+        self.stopped.append(unit["unit_id"])
+
+
+class Nodes:
+    def __init__(self):
+        self.ok = True
+        self.n = {"pi6": dict(name="pi6", role="sensor", ready=True, cpu_alloc_m=4000, mem_alloc_mb=8000, cpu_now_m=100,
+                              mem_now_mb=500, net={"bw_mbps": 80}),
+                  "pi13": dict(name="pi13", role="small", ready=True, cpu_alloc_m=4000, mem_alloc_mb=900, cpu_now_m=600,
+                               mem_now_mb=300, net={"bw_mbps": 30})}
+
+    def check(self):
+        return (True, "") if self.ok else (False, "API 응답 없음")
+
+    def nodes(self):
+        return [dict(v) for v in self.n.values()]
+
+
+PROBE = {"probe": {"cpu_m": 200, "mem_mb": 64, "roles": ["sensor", "small"], "image": "busybox:1.36", "command": ["sh"]}}
+
+
+def cpu_setup(tmp_path):
+    k, r, c = make(tmp_path)
+    k.cluster, k.cpu_ex = Nodes(), FakeCpu()
+    rid = k.submit([], [], cpu_tasks=["probe"], task_specs=PROBE)
+    return k, r, c, rid
+
+
+def unit_of(k):
+    return [u for u in k.state.units().values() if u.get("kind") == "cpu" and u["status"] in ("starting", "running")][0]
+
+
+def test_cpu_task_goes_to_pi_with_limits_and_runs_on_heartbeat(tmp_path):
+    k, r, c, rid = cpu_setup(tmp_path)
+    u = unit_of(k)
+    assert u["node"] == "pi6" and u["limits"] == {"cpu_m": 400, "mem_mb": 128} and u["priority_class"] == "ds-vision-low"
+    assert k.poll() == []                                              # 하트비트 없음 → 아직
+    r.kv["cpu_telemetry:" + u["unit_id"]] = json.dumps({"ts": c()})
+    assert [e["event"] for e in k.poll()] == ["running"]
+
+
+def test_node_drop_moves_only_cpu_work(tmp_path):
+    k, r, c, rid = cpu_setup(tmp_path)
+    u = unit_of(k)
+    k.cluster.n["pi6"]["ready"] = False
+    assert k.poll() == []                                              # 바로 옮기지 않는다 (유예)
+    c.t += 10
+    k.cluster.n["pi6"]["ready"] = True
+    assert k.poll() == []                                              # 잠깐 끊겼다 돌아옴 → 그대로
+    k.cluster.n["pi6"]["ready"] = False
+    k.poll()
+    c.t += ctl.NODE_BAD_GRACE_S + 1
+    ev = k.poll()
+    assert ev[-1]["event"] == "replanned" and "pi6 에서 pi13" in ev[-1]["reason"]
+    assert k.cpu_ex.stopped == [u["unit_id"]] and unit_of(k)["node"] == "pi13"
+
+
+def test_silent_pod_is_replaced(tmp_path):
+    k, r, c, rid = cpu_setup(tmp_path)
+    u = unit_of(k)
+    r.kv["cpu_telemetry:" + u["unit_id"]] = json.dumps({"ts": c()})
+    k.poll()                                                           # running
+    c.t += ctl.CPU_REPLACE_AFTER_S + 5
+    assert k.poll()[-1]["event"] == "replanned"
+
+
+def test_crashloop_is_replaced(tmp_path):
+    k, r, c, rid = cpu_setup(tmp_path)
+    u = unit_of(k)
+    k.cpu_ex.st[u["unit_id"]] = {"phase": "Running", "ready": False, "waiting": "ImagePullBackOff"}
+    assert "ImagePullBackOff" in k.poll()[-1]["reason"]
+
+
+def test_k3s_down_mid_run_is_degraded_once(tmp_path):
+    k, r, c, rid = cpu_setup(tmp_path)
+    k.cluster.ok = False
+    ev = k.poll()
+    assert [e["event"] for e in ev] == ["degraded"] and ev[0]["basis"] == "saved"
+    assert k.poll() == []                                              # 한 번만
+    assert k.cpu_ex.stopped == []                                      # 파드는 그대로 둔다
+
+
+def test_no_k3s_keeps_cpu_work_local(tmp_path):
+    k, r, c = make(tmp_path)
+    k.cpu_ex = FakeCpu()                                               # 실행기는 있지만 클러스터가 없다
+    k.submit([], [], cpu_tasks=["probe"], task_specs={"probe": dict(PROBE["probe"], roles=["sensor", "gpu"])})
+    u = [x for x in k.state.units().values() if x.get("kind") == "cpu"][0]
+    assert u["status"] == "local" and k.cpu_ex.launched == []
+
+
+def test_image_less_task_never_goes_to_pi(tmp_path):
+    k, r, c = make(tmp_path)
+    k.cluster, k.cpu_ex = Nodes(), FakeCpu()
+    k.submit([], [], cpu_tasks=["cam360_slice"])                       # 레지스트리 — image: null
+    u = [x for x in k.state.units().values() if x.get("kind") == "cpu"][0]
+    assert u["node"] == "wsl" and u["status"] == "local" and k.cpu_ex.launched == []

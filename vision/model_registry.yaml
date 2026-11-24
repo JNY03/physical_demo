@@ -108,6 +108,25 @@ cues:
   size_veto:     {label: 크기 거부, label_en: size veto, role: veto, roles: [veto], weight: 0.0, needs: [depth], requires: [size_mm], detector: [yoloe_text, trained]}
   lookalike:     {label: 닮은꼴 감점, label_en: look-alike, role: "on", roles: ["on"], weight: 0.0, needs: [clip], requires: [confusers], detector: [yoloe_text, trained]}
 
+#: CPU 작업 — 오케스트레이터가 파이(k3s) 또는 data_stream 기기에 둔다 (placement/1)
+#:   cpu_m · mem_mb  requests (limits 는 2배)       roles  둘 수 있는 노드 역할 (gpu = data_stream 기기)
+#:   frame_kb · fps · proc_ms  네트워크 비용 계산용 (장당 전송 시간 > 처리 시간이면 그 노드에 두지 않는다)
+#:   placement  any | measured (measured 는 노드별 비교 측정이 기억에 있어야 옮긴다 — 없으면 data_stream 기기)
+#:   image · command  k3s 파드 (image 가 null 이면 파이에 못 둔다 — Docker 단계에서 만든다)
+#:   local_command  data_stream 기기에서 돌릴 때 (저장소 기준)
+cpu_tasks:
+  cam360_slice:
+    note: 360 파노라마를 90도 화면으로 자른다 (e2p/slice360_live.py). camera360 은 보류(2026-11-24) — 비교 측정 전
+    cpu_m: 1000
+    mem_mb: 400
+    roles: [gpu, sensor]
+    frame_kb: 970
+    fps: 3
+    proc_ms: 120
+    placement: measured
+    image: null
+    local_command: [venv/bin/python, e2p/slice360_live.py]
+
 #: targeted 밖 선택지(river 등)의 단서 유형 이름 (런처 설명용). targeted 단서는 위 label 을 쓴다
 cue_type_labels: {match: 기준 사진 유사도, material: 재질 규칙, structure: 구조 규칙, distance: 거리}
 
