@@ -156,13 +156,8 @@ class Controller:
             out.append(t)
         return out
 
-    def submit(self, sources, models, profile=None, profile_path=None, target_fps=None, cpu_tasks=None,
-               task_specs=None):
-        rid = "req-" + uuid.uuid4().hex[:10]
-        request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {},
-                   "cpu_tasks": sorted(cpu_tasks or [])}
-        self.state.put_request(rid, dict(request, status="requested", at=self.clock()))
-        self.emit("requested", rid, request=request)
+    def prepare(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, task_specs=None, request_id=None):
+        """클러스터 확인 → 입력 영상 → 스냅숏 → placement/1. 아무것도 띄우지 않고 기록도 하지 않는다(미리보기와 같은 계산)."""
         ok, why, nodes = True, "", []
         if self.cluster is None:
             ok, why = False, "k3s 백엔드 없음 (로컬 전용)"
@@ -172,10 +167,7 @@ class Controller:
                 nodes = self.cluster.nodes() if ok else []
             except Exception as e:  # noqa: BLE001
                 ok, why = False, "k3s 확인 실패: %s" % e
-        self.emit("cluster_checked", rid, reason=why, detail={"ok": ok})
         mode, basis = ("k3s", "live") if ok else ("local", "saved")
-        if not ok:
-            self.emit("fallback", rid, mode="local", basis="saved", reason=why)
         infos, missing = {}, []
         for s in sorted(sources):
             info = source_info(self.r, s, int(self.clock() * 1000))
@@ -191,12 +183,37 @@ class Controller:
         specs = self.cpu_specs(cpu_tasks, task_specs)
         if mode != "k3s" or self.cpu_ex is None:        # k3s 가 없으면 CPU 작업도 data_stream 기기에만
             specs = [dict(t, roles=[r for r in t.get("roles", []) if r == "gpu"]) for t in specs]
-        req = {"request_id": rid, "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps}] if infos else [],
+        req = {"request_id": request_id,
+               "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps}] if infos and models else [],
                "cpu": specs}
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
         for s in missing:
             plan["refused"].append({"item": "input:%s" % s, "reason": "입력 영상 없음 또는 %d초 넘게 멈춤" % INPUT_FRESH_S})
+        return {"ok": ok, "why": why, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
+
+    def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None):
+        """런처 「배치 보기」 — prepare + GPU 단위마다 지금 들일 수 있는지(Executor admit, 읽기만)"""
+        p = self.prepare(sources, models, profile, target_fps, cpu_tasks)
+        for u in p["plan"]["gpu_units"]:
+            c = p["snapshot"]["costs"]["+".join(u["models"])]
+            ok, why, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"])
+            u["admit"] = {"ok": ok, "why": why, **calc}
+            u["p90_ms"], u["p90_basis"] = c["p90_ms"], c["p90_basis"]
+        return p
+
+    def submit(self, sources, models, profile=None, profile_path=None, target_fps=None, cpu_tasks=None,
+               task_specs=None):
+        rid = "req-" + uuid.uuid4().hex[:10]
+        request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {},
+                   "cpu_tasks": sorted(cpu_tasks or [])}
+        self.state.put_request(rid, dict(request, status="requested", at=self.clock()))
+        self.emit("requested", rid, request=request)
+        p = self.prepare(sources, models, profile, target_fps, cpu_tasks, task_specs, request_id=rid)
+        ok, why, mode, basis, plan, snapshot = p["ok"], p["why"], p["mode"], p["basis"], p["plan"], p["snapshot"]
+        self.emit("cluster_checked", rid, reason=why, detail={"ok": ok})
+        if not ok:
+            self.emit("fallback", rid, mode="local", basis="saved", reason=why)
         self.emit("planned", rid, mode=mode, basis=basis, plan=plan)
         xid = "exe-" + uuid.uuid4().hex[:10]
         self.state.put_request(rid, dict(request, status="planned", plan=plan, mode=mode, execution_id=xid, at=self.clock()))
@@ -367,6 +384,24 @@ class Controller:
             elif not low and since is not None:
                 self.state.update_unit(uid, low_since=None, degraded_emitted=False)
         return events
+
+    def cleanup_previous(self, reason="이전 오케스트레이터 실행이 남긴 것"):
+        """새 run 을 시작할 때: 지난 실행이 남긴 starting · loaded GPU 단위를 정리한다. 살아 있는 고아는 멈추고(GPU 를
+        두 번 쓰지 않게), 죽은 것은 stopped 로 적는다 — Executor.poll 이 그것을 다시 띄우지 않게."""
+        n = 0
+        for uid, u in self.ex.active_units().items():
+            if self.ex._alive(uid, u["pid"]):
+                self.ex.stop(uid, reason)
+            else:
+                self.state.update_unit(uid, status="stopped", reason=reason, ended_at=self.clock())
+            n += 1
+        for uid, u in self.state.units().items():
+            if u.get("kind") == "cpu" and u.get("status") in ("starting", "running"):
+                if self.cpu_ex is not None:
+                    self.cpu_ex.stop(u)
+                self.state.update_unit(uid, status="stopped", reason=reason, ended_at=self.clock())
+                n += 1
+        return n
 
     def stop(self, request_id, reason="요청"):
         n = 0

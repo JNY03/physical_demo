@@ -57,13 +57,13 @@ $ModelShown = @{}; foreach ($m in $cat.models) { $ModelShown[$m.key] = $m.shown 
 $TargetDb = @{}; foreach ($t in $cat.targets) { $TargetDb[$t.name] = $t }
 
 # ---- 마지막 선택
-$s = [pscustomobject]@{ sources = $Sources; robotCam = 1; vision = $false; models = @("yoloe");
+$s = [pscustomobject]@{ sources = $Sources; robotCam = 1; vision = $false; models = @("yoloe"); orchestrate = $true;
                         slice = $false; sliceU = ""; targets = $null; direct = @(); distance = $cat.distance_default;
                         cueMode = $null; cues = $null; overlay = $null; features = $null }
 if (Test-Path $SettingsFile) {
     try {
         $saved = Get-Content $SettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($k in "sources", "robotCam", "vision", "models", "slice", "sliceU", "targets", "direct", "distance",
+        foreach ($k in "sources", "robotCam", "vision", "orchestrate", "models", "slice", "sliceU", "targets", "direct", "distance",
                        "cueMode", "cues", "overlay", "features") {
             if ($null -ne $saved.$k) { $s.$k = $saved.$k }
         }
@@ -159,6 +159,14 @@ $gStream.Controls.Add($sliceU)
 
 $gVision = New-Group $tStream "비전 추론" 8 186 596 146
 $visOn = New-Check $gVision "켜기" 14 28 $s.vision
+# 자원 배분 — 켜면 비전을 오케스트레이터(python -m ds_resources.cli run)로 띄운다: 자원에 맞춰 배치 · GPU 여유 확인 ·
+# fps 상한 · k3s 가 있으면 파이까지. 끄면 예전처럼 창을 직접 나눠 띄운다 (2026-11-24)
+$orchOn = New-Check $gVision "자원 배분" 80 28 $(if ($null -ne $s.orchestrate) { [bool]$s.orchestrate } else { $true })
+$planBtn = New-Object System.Windows.Forms.Button
+$planBtn.Text = "배치 보기"
+$planBtn.Location = New-Object System.Drawing.Point(208, 24)
+$planBtn.Width = 90
+$gVision.Controls.Add($planBtn)
 [void](New-Label $gVision "모델" 14 62)
 $modelChecks = @{}
 $x = 80
@@ -525,6 +533,8 @@ function Sync-Enabled {
     foreach ($c in $modelChecks.Values) { $c.Enabled = $visOn.Checked }
     foreach ($k in $featChecks.Keys) { $featChecks[$k].Enabled = $visOn.Checked -and [bool](@($cat.features) | Where-Object { $_.key -eq $k -and $_.available }) }
     $overPanel.Enabled = $visOn.Checked
+    $orchOn.Enabled = $visOn.Checked
+    $planBtn.Enabled = $visOn.Checked
     $sliceU.Enabled = $sliceOn.Checked
 }
 
@@ -535,7 +545,7 @@ function Current-Config {
     return [pscustomobject]@{
         server = (($on -join " ") + "|" + $cam.SelectedItem + "|" + $sliceOn.Checked)
         slice  = ($sliceOn.Checked.ToString() + "|" + $sliceU.Text.Trim())
-        vision = ($visOn.Checked.ToString() + "|" + ((Chosen-Models) -join " ") + "|" + ($onAll -join " ") + "|" + (Vision-Groups-Key))
+        vision = ($visOn.Checked.ToString() + "|" + ((Chosen-Models) -join " ") + "|" + ($onAll -join " ") + "|" + (Vision-Groups-Key) + "|" + $orchOn.Checked)
         on = $on; onAll = $onAll
     }
 }
@@ -595,7 +605,8 @@ function Write-Profile {
 function Save-Settings {
     $on = @($Sources | Where-Object { $srcChecks[$_].Checked })
     $direct = @($script:Direct | ForEach-Object { [pscustomobject]$_ })
-    [pscustomobject]@{ sources = $on; robotCam = [int]$cam.SelectedItem; vision = $visOn.Checked; models = @(Chosen-Models);
+    [pscustomobject]@{ sources = $on; robotCam = [int]$cam.SelectedItem; vision = $visOn.Checked; orchestrate = $orchOn.Checked;
+                       models = @(Chosen-Models);
                        slice = $sliceOn.Checked; sliceU = $sliceU.Text.Trim();
                        targets = $(if ($script:TargetsTouched) { @(Checked-Targets) } else { $null });
                        direct = $direct; distance = $distOn.Checked; cueMode = $script:CueMode; cues = $script:Cues;
@@ -654,8 +665,27 @@ function Targeted-MB {   # targeted 단서 모델 합 (프로세스 기본값 �
     if ($distOn.Checked) { $mb += [int]$g.depth }
     return $mb
 }
+function Orch-Args($cfg) {
+    return ("--sources {0} --models {1} --profile {2}" -f ($cfg.onAll -join " "), ((Chosen-Models) -join " "), $ProfileWsl)
+}
+function Show-Plan {
+    $cfg = Current-Config
+    if ($cfg.onAll.Count -eq 0 -or (Chosen-Models).Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show("소스와 비전 모델을 고르세요.", "배치 보기"); return }
+    Write-Profile
+    Set-Status "배치 계산 중"
+    $argv = @("./venv/bin/python", "-m", "ds_resources.cli", "plan") + ((Orch-Args $cfg) -split " " | Where-Object { $_ })
+    $txt = Invoke-Wsl $argv
+    Set-Status $(if ($script:Running) { "● 실행 중" } else { "" })
+    if (-not $txt) { $txt = "배치를 계산하지 못했습니다 (WSL · venv 확인)." }
+    [void][System.Windows.Forms.MessageBox]::Show($txt, "배치 보기")
+}
 function Start-Vision($cfg) {
     $mods = Chosen-Models
+    if ($orchOn.Checked) {
+        $env = "HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+        Start-WslWindow "ds_vision_orch" "비전 오케스트레이터" ("./venv/bin/python -m ds_resources.cli run " + (Orch-Args $cfg)) $env
+        return
+    }
     $procMB = [int]$cat.gpu_mb_base           # 프로세스 하나에 한 번 (torch · CUDA)
     foreach ($m in $mods) { if ($m -eq "targeted") { $procMB += (Targeted-MB) } else { $procMB += [int]$cat.gpu_mb_option.$m } }
     $groups = 1
@@ -730,7 +760,7 @@ function Apply-Changes {
         if ($cfg.vision -ne $old.vision) {
             # 대상 · 거리만 바뀐 것은 프로필로 반영된다 — 모델 · 기기 · 켜기가 바뀐 것만 창을 다시 띄운다
             $oldv = $old.vision -split "\|"; $newv = $cfg.vision -split "\|"
-            if ($oldv[0] -ne $newv[0] -or $oldv[1] -ne $newv[1] -or $oldv[2] -ne $newv[2]) {
+            if ($oldv[0] -ne $newv[0] -or $oldv[1] -ne $newv[1] -or $oldv[2] -ne $newv[2] -or $oldv[4] -ne $newv[4]) {
                 Set-Status "비전을 다시 띄우는 중"
                 Stop-Windows (Vision-Names)
                 if ($visOn.Checked) { Start-Vision $cfg }
@@ -763,6 +793,8 @@ $visOn.Add_CheckedChanged({ Build-Overlay; Changed })
 foreach ($c in $modelChecks.Values) { $c.Add_CheckedChanged({ Build-Overlay; Changed }) }
 foreach ($c in $featChecks.Values) { $c.Add_CheckedChanged({ Changed }) }
 $run.Add_Click({ Start-All })
+$orchOn.Add_CheckedChanged({ Changed })
+$planBtn.Add_Click({ Show-Plan })
 $form.Add_FormClosing({
     param($sender, $e)
     if (-not $script:Running) { return }
@@ -799,6 +831,8 @@ function Self-Test {
     $r.models = $Models
     $r.initial_targets = @(Checked-Targets)
     $r.profile_untouched = Build-Profile
+    $r.orchestrate = $orchOn.Checked
+    $r.orch_args = Orch-Args (Current-Config)
     $visOn.Checked = $true
     foreach ($m in $Models) { $modelChecks[$m].Checked = ($m -eq "targeted" -or $m -eq "yoloe") }
     $r.target_tab_enabled = $tTarget.Controls[0].Enabled

@@ -86,7 +86,11 @@ class LocalRecorder:
         self.last_error = None
         self.context_mb = registry_context_mb()
         self.sources = []                             # 노드 원천 플러그인 (예: orchestrator.k3s_source:K3sNodeSource)
+        from ds_resources.backends import resolve_cluster
+        paths = []
         for path in node_sources or ():
+            paths.append(resolve_cluster(path)[0] if path in ("auto", "none") else path)   # auto: k3s 가 있을 때만
+        for path in [p for p in paths if p]:
             try:
                 self.sources.append(load_source(path, memory=self.mem, log=log))
                 log("자원 기록: 노드 원천 %s" % path)
