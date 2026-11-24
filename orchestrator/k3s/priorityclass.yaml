@@ -1,0 +1,10 @@
+# ds-vision-low — 비전 오케스트레이션이 파이에 올리는 CPU 작업의 우선순위 (placement/1 PRIORITY_CLASS).
+# 기본(0)보다 낮아서 노드가 바쁘면 이 파드가 먼저 밀려난다 — 로봇 서비스(파드가 아닌 systemd)는 건드리지 않는다.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ds-vision-low
+value: -100
+globalDefault: false
+preemptionPolicy: Never
+description: "data_stream 비전 CPU 작업 — 낮은 우선순위, 남을 밀어내지 않는다"
