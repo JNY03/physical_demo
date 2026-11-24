@@ -167,3 +167,75 @@ def test_recorder_tick_records_once_per_telemetry(tmp_path, monkeypatch):
     rec.tick()                                                          # 같은 seq — 다시 세지 않는다
     assert rec.mem.data["combos"]["cost|yoloe|h|gpu:RTX|m"]["frames"] == 100
     assert (tmp_path / "m.json").exists()
+
+
+# ---------------------------------------------------------------- 단일 Writer · 노드 원천 (M7)
+def test_memory_single_writer(tmp_path):
+    a = mm.ResourceMemory(tmp_path / "m.json")
+    b = mm.ResourceMemory(tmp_path / "m.json")
+    assert a.writer and not b.writer
+    a.record_baseline("pi1", {"boot_id": "x"}, {"cpu_count": 4})
+    assert a.save() and b.save() is False                               # 읽기 전용은 쓰지 않는다
+    assert b.node("pi1")["baseline"] == {"cpu_count": 4}                # 읽을 때 다시 읽는다
+
+
+class FakeSource:
+    def __init__(self, memory=None, log=None):
+        self.rows, self.nets, self.want, self.fail = [], {}, [], False
+
+    def samples(self):
+        if self.fail:
+            raise RuntimeError("k3s down")
+        return [(n, dict(s)) for n, s in self.rows]
+
+    def want_net(self, node, ip):
+        self.want.append(node)
+
+    def net_updates(self):
+        d, self.nets = self.nets, {}
+        return d
+
+
+def S7(boot="a", ready=True, cpu=10.0):
+    return {"role": "robot", "source": "k3s", "ready": ready, "cpu_pct": cpu, "mem_pct": 10.0, "mem_mb": 800.0,
+            "identity": {"boot_id": boot}, "baseline": {"cpu_count": 4}, "ip": "100.0.0.1"}
+
+
+def test_recorder_node_source_lifecycle(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe, "baseline", lambda bench=True: {"cpu_count": 20, "gpus": []})
+    monkeypatch.setattr(probe, "gpus", lambda timeout=2: [])
+    import sys, types
+    mod = types.ModuleType("fake_src_mod")
+    mod.FakeSource = FakeSource
+    sys.modules["fake_src_mod"] = mod
+    r = FakeRedis({})
+    rec = LocalRecorder(r, mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None, bench=False,
+                        node_sources=["fake_src_mod:FakeSource"])
+    src = rec.sources[0]
+    src.rows = [("pi7", S7())]
+    rec.usage.sample()
+    rec.tick()
+    changes = [(x[1]["node"], x[1]["change"]) for x in r.rows]
+    assert ("pi7", "added") in changes and src.want == ["pi7"]
+    assert rec.mem.node("pi7")["baseline"] == {"cpu_count": 4}
+    rec.tick()
+    assert src.want == ["pi7"]                                          # 같은 신원 — 다시 재지 않는다
+    src.rows = [("pi7", S7(boot="b", ready=False))]                     # 재부팅 중
+    src.nets = {"pi7": {"latency_ms": 6.0, "relay": False, "bw_mbps": 80.0}}
+    rec.tick()
+    assert rec.mem.node("pi7")["identity"] == {"boot_id": "b"} and src.want == ["pi7", "pi7"]
+    assert rec.mem.node("pi7")["net"]["bw_mbps"] == 80.0
+    assert ("pi7", "not_ready") in [(x[1]["node"], x[1]["change"]) for x in r.rows]
+    src.rows = []
+    rec.tick()
+    assert ("pi7", "removed") in [(x[1]["node"], x[1]["change"]) for x in r.rows]
+    src.fail = True
+    rec.tick()                                                          # 원천이 죽어도 로컬은 돈다
+    assert "k3s down" in rec.last_error
+
+
+def test_recorder_bad_source_path_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe, "gpus", lambda timeout=2: [])
+    rec = LocalRecorder(FakeRedis({}), mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None,
+                        bench=False, node_sources=["no_such_module:X"])
+    assert rec.sources == []

@@ -63,8 +63,15 @@ def telemetry_records(tel, context_mb=GPU_CONTEXT_MB):
     return out
 
 
+def load_source(path, **kw):
+    """'모듈:클래스' 경로로 노드 원천을 불러온다 — core 가 그 모듈을 import 문으로 모르게(k3s 의존 분리)."""
+    import importlib
+    mod, _, cls = path.partition(":")
+    return getattr(importlib.import_module(mod), cls)(**kw)
+
+
 class LocalRecorder:
-    def __init__(self, redis_client, memory=None, node=None, role="gpu", log=print, bench=True):
+    def __init__(self, redis_client, memory=None, node=None, role="gpu", log=print, bench=True, node_sources=()):
         self.r = redis_client
         self.mem = memory or mem_mod.ResourceMemory(DEFAULT_MEMORY)
         self.node = node or probe.node_name()
@@ -78,6 +85,14 @@ class LocalRecorder:
         self.thread = None
         self.last_error = None
         self.context_mb = registry_context_mb()
+        self.sources = []                             # 노드 원천 플러그인 (예: orchestrator.k3s_source:K3sNodeSource)
+        for path in node_sources or ():
+            try:
+                self.sources.append(load_source(path, memory=self.mem, log=log))
+                log("자원 기록: 노드 원천 %s" % path)
+            except Exception as e:  # noqa: BLE001 — 원천 없이도 로컬 기록은 돈다
+                log("자원 기록: 노드 원천 %s 를 못 불러옴 (%s) — 로컬만 기록" % (path, e))
+        self.source_nodes = {}                        # 원천 → 지난번에 본 노드 이름들
 
     # ------------------------------------------------------------ 한 번
     def check_baseline(self):
@@ -121,10 +136,45 @@ class LocalRecorder:
                   "temp_c": u["temp_c"] if u["temp_c"] is not None else (g[0].get("temp_c") if g else None),
                   "gpu": g, "baseline": (self.mem.node(self.node) or {}).get("baseline")}
         self.writer.nodes(self.filter.observe(self.node, sample))
+        vals_extra = self.tick_sources()
         self.mem.save()
         vals = [u["cpu_pct"], u["mem_pct"]] + [100.0 * x["mem_used_mb"] / x["mem_total_mb"]
-                                               for x in g if x.get("mem_total_mb")]
+                                               for x in g if x.get("mem_total_mb")] + vals_extra
         return self.sched.next(active, vals)
+
+    def tick_sources(self):
+        """노드 원천마다: 기본 자원(처음 · 신원 변화 · recheck) · 네트워크 측정 시작 · 사용량 · 스트림 · 사라진 노드.
+        기억 파일은 이 스레드만 쓴다(단일 Writer)."""
+        vals = []
+        for src in self.sources:
+            try:
+                rows = src.samples()
+            except Exception as e:  # noqa: BLE001 — k3s 가 멈춰도 로컬 기록은 계속
+                self.last_error = "node source: %s" % e
+                continue
+            seen = set()
+            for name, s in rows:
+                seen.add(name)
+                ident, base = s.pop("identity", None), s.get("baseline")
+                if base is not None and self.mem.baseline_due(name, ident):
+                    first = self.mem.node(name) is None or (self.mem.node(name) or {}).get("identity") != ident
+                    self.mem.record_baseline(name, ident, base)
+                    if first and hasattr(src, "want_net"):
+                        src.want_net(name, s.get("ip"))
+                if s.get("cpu_pct") is not None:
+                    self.mem.update_usage(name, s["cpu_pct"], s.get("mem_mb"))
+                    vals.append(s["cpu_pct"])
+                if s.get("mem_pct") is not None:
+                    vals.append(s["mem_pct"])
+                self.writer.nodes(self.filter.observe(name, s))
+            for gone in sorted(self.source_nodes.get(id(src), set()) - seen):
+                self.writer.nodes(self.filter.remove(gone, {"source": "k3s"}))
+            self.source_nodes[id(src)] = seen
+            if hasattr(src, "net_updates"):
+                for name, net in src.net_updates().items():
+                    self.mem.record_net(name, net)
+                    self.log("자원 기억: %s 네트워크 %s" % (name, net))
+        return vals
 
     # ------------------------------------------------------------ 스레드
     def _run(self):

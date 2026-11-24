@@ -2229,6 +2229,10 @@ def main():
     ap.add_argument("--bind", default="0.0.0.0", metavar="주소", help="포트를 열 주소 (기본 0.0.0.0 = 전부)")
     ap.add_argument("--tcp-mss", type=int, default=TCP_MSS, metavar="바이트",
                     help="TCP 세그먼트 상한 (기본 %d — 테일넷 MTU 블랙홀 우회, 0 = 건드리지 않음)" % TCP_MSS)
+    ap.add_argument("--node-source", action="append", metavar="모듈:클래스",
+                    default=[x for x in os.environ.get("DS_NODE_SOURCES", "").split(",") if x],
+                    help="자원 기록기에 붙일 노드 원천 (예: orchestrator.k3s_source:K3sNodeSource — k3s 가 있을 때만). "
+                         "기본 DS_NODE_SOURCES 환경변수")
     ap.add_argument("--no-resource-record", action="store_true",
                     help="이 기기 자원 기록(ds_resources: 기본 자원 · 사용량 · 모델 조합 기억, node_resource_stream)을 끈다")
     ap.add_argument("--unpack", metavar="폴더", help="저장된 .frm 을 .jpg + .json 으로 풀고 끝낸다")
@@ -2275,7 +2279,7 @@ def main():
         try:
             from ds_resources.recorder import LocalRecorder
             recorder = LocalRecorder(redis.Redis.from_url(args.redis, socket_connect_timeout=2, socket_timeout=5),
-                                     log=log)
+                                     log=log, node_sources=args.node_source)
         except Exception as e:  # noqa: BLE001 — 기록기 없이도 서버는 돈다
             log("자원 기록기를 못 띄움 (%s) — 받기 · 저장은 계속" % describe(e))
     servers = []                                   # 포트부터 잡는다 — 못 잡으면 폴더를 만들기 전에 끝낸다

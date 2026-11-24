@@ -11,6 +11,7 @@ k3s 가 없거나 멈춰도 이 기억만으로 배치를 정한다(basis = save
                처음에는 추정치(아는 값 합 × 1.2)로 쓰고, 표본이 200장 또는 60초 쌓이면 실측(measured)으로
                바꾼 뒤 지수 이동 평균으로 갱신한다. 설정 · 레지스트리가 바뀌면 해시가 달라 새 열쇠가 된다.
 """
+import fcntl
 import json
 import os
 import tempfile
@@ -84,14 +85,31 @@ def _p95(values):
 
 
 class ResourceMemory:
-    def __init__(self, path, clock=time.time):
+    """단일 Writer: <파일>.lock 을 잡은 프로세스(자원 기록기)만 저장한다. writer=False 로 연 쪽(컨트롤러 등)은
+    읽을 때마다 파일을 다시 읽고, 저장을 부르면 아무것도 하지 않는다."""
+
+    def __init__(self, path, clock=time.time, writer=True):
         self.path = Path(path)
         self.clock = clock
         self.lock = threading.RLock()
         self.data = {"version": 1, "nodes": {}, "combos": {}}
         self.usage = {}                   # 노드 → deque[(cpu_pct, mem_mb)] (저장하지 않음)
         self.dirty = False
+        self.writer, self._lockf = False, None
+        if writer:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            f = open(str(self.path) + ".lock", "a+")
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.writer, self._lockf = True, f
+            except OSError:
+                f.close()
         self.load()
+
+    def refresh(self):
+        if not self.writer:
+            with self.lock:
+                self.load()
 
     # ------------------------------------------------------------ 저장
     def load(self):
@@ -106,7 +124,7 @@ class ResourceMemory:
 
     def save(self, force=False):
         with self.lock:
-            if not (self.dirty or force):
+            if not self.writer or not (self.dirty or force):
                 return False
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".mem-", dir=str(self.path.parent))
@@ -118,6 +136,7 @@ class ResourceMemory:
 
     # ------------------------------------------------------------ 노드 기본 자원
     def node(self, name):
+        self.refresh()
         with self.lock:
             return json.loads(json.dumps(self.data["nodes"].get(name))) if name in self.data["nodes"] else None
 
@@ -143,6 +162,12 @@ class ResourceMemory:
             self.data["nodes"][name] = n
             self.dirty = True
             return not same
+
+    def record_net(self, name, net):
+        """노드까지의 네트워크 (지연 · 중계 · 대역폭, 측정 시각)"""
+        with self.lock:
+            self.data["nodes"].setdefault(name, {})["net"] = dict(net)
+            self.dirty = True
 
     # ------------------------------------------------------------ 로봇 서비스 몫 (사용량 p95)
     def update_usage(self, name, cpu_pct, mem_mb):
@@ -172,6 +197,7 @@ class ResourceMemory:
     # ------------------------------------------------------------ 모델 조합
     def combo(self, key, estimate=None):
         """기억한 값(measured · learning) 또는 추정치(estimate × 1.2). (값 사전, basis) — basis: measured · learning · estimate"""
+        self.refresh()
         with self.lock:
             c = self.data["combos"].get(key)
             if c is not None:
