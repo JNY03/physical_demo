@@ -3720,6 +3720,32 @@ def add_bearing(dets, W, H, cfg, fov):
     return dets
 
 
+def _go1_ground(cfg):
+    """Go1 바닥선 거리 상수(demo_box.go1_ground) — 없으면 None. 한 번만 읽는다."""
+    if "_go1_ground" not in cfg:
+        try:
+            import cue_catalog as cc
+            from demo_box import go1_ground
+            cfg["_go1_ground"] = go1_ground(cc.load_targets()["demo_box"])
+        except Exception as exc:
+            log("  Go1 바닥선 상수를 못 읽음 (%s: %s) — 바닥선 거리 없음" % (type(exc).__name__, exc))
+            cfg["_go1_ground"] = None
+    return cfg["_go1_ground"]
+
+
+def add_ground_distance(dets, W, H, cfg):
+    """**Go1 프레임의 검출마다 바닥선 거리**(2026-11-24) — ground_distance = {distance_cm, reason, ...}.
+    UniDepth 는 Go1 어안 화면에서 초점 거리를 크게 잡아 거리를 1.75~2.5 배로 부풀린다(시연 박스 높이식과 대조).
+    바닥에 선 물체인지는 여기서 가리지 않는다 — 스캔 창구(scan_assess.distance)가 대상 이름으로 가린다."""
+    g = _go1_ground(cfg)
+    if g is None or (W, H) != tuple(g["frame"]):
+        return dets
+    from demo_box import ground_distance
+    for d in dets:
+        d["ground_distance"] = ground_distance(d["xyxy"], g)
+    return dets
+
+
 def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, wanted):
     """검출 모델 하나 — (모델, 기록, 오버레이, None, 결합용 검출) 와 트래커. wanted 가 아니면 기록은 None."""
     runner = runners[det_model]
@@ -3782,6 +3808,7 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
             ad = cfg["_axes"][akey] = TrackEvidence()
         dets = ad.update(dets)
         add_bearing(dets, W, H, cfg, fov_hint((cfg.get("devices", {}) or {}).get(device, {}), header))
+        add_ground_distance(dets, W, H, cfg)
     reid_ms = _reid_step(cfg, device, det_model, bgr, dets, base)
     if not wanted:
         return (None, None, None, None, dets), stab

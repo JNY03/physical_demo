@@ -211,3 +211,83 @@ def test_ko_table_names_are_valid_target_names():
     db = cc.load_targets()
     for v in ("person", "door", "chair", "desk"):
         assert v in db
+
+
+# ---------------------------------------------------------------- 스캔 하한 · 방위 일치 (2026-11-24 박스 오탐)
+def test_scan_floor_drops_weak_demo_box():
+    """3039번: 선반 아래 골판지 상자 틈 51.5 점 — 관문은 다 통과했지만 한 장 판정으로는 약하다."""
+    found, score, reason = sa.pick(rec(det(label="demo_box", score=51.5), provisional=()), "demo_box")[1:]
+    assert not found and score == 51.5 and reason == "score 52 < 65 (scan floor)"
+    assert sa.pick(rec(det(label="demo_box", score=89.0), provisional=()), "demo_box")[1]
+    assert sa.pick(rec(det(score=51.5)), "demo_door")[1]          # 하한은 대상마다 — 문에는 없다
+
+
+def test_isolated_detection_ranks_below_corroborated():
+    """11:06 판: 진짜 박스는 0° · 45° 에서 같은 방위(34.5 · 35.0), 본체 오탐(78.7)은 225° 한 각도뿐."""
+    b = lambda **k: det(label="demo_box", **k)
+    cap = [{"rotation_deg": 0, "frame_n": 1, "rec": rec(b(score=70.0, offset=34.5), provisional=())},
+           {"rotation_deg": 45, "frame_n": 2, "rec": rec(b(score=68.0, offset=-10.0), provisional=())},
+           {"rotation_deg": 225, "frame_n": 3, "rec": rec(b(score=78.7, offset=67.5), provisional=())}]
+    out = sa.assemble(dict(SCAN, target="box", targets=["demo_box"]), cap)
+    f = {e["rotation_deg"]: e for e in out["frames"]}
+    assert f[0]["seen_at"] == [0, 45] and not f[0]["isolated"]
+    assert f[225]["found"] and f[225]["isolated"] and f[225]["seen_at"] == [225]
+    assert out["best"]["rotation_deg"] == 0 and not out["best"]["isolated"] and out["best"]["seen_at"] == [0, 45]
+
+
+def test_isolated_best_is_kept_and_said():
+    cap = [{"rotation_deg": 90, "frame_n": 1, "rec": rec(det(score=70.0, offset=3.0))}]
+    out = sa.assemble(SCAN, cap)
+    assert out["best"]["isolated"] and out["reason"].endswith("seen at one angle only")
+
+
+def test_corroboration_wraps_around_180():
+    """174.1° 와 -178.8° 는 7.1° 차이 — 같은 물체."""
+    cap = [{"rotation_deg": 135, "frame_n": 1, "rec": rec(det(offset=39.1))},
+           {"rotation_deg": 180, "frame_n": 2, "rec": rec(det(offset=1.2))}]
+    out = sa.assemble(SCAN, cap)
+    assert [e["seen_at"] for e in out["frames"]] == [[135, 180], [135, 180]]
+
+
+# ---------------------------------------------------------------- Go1 거리: 바닥선 · UniDepth 는 valid 아님 (2026-11-24 소화기)
+UD = {"value": 4.294, "space": "metric", "source": "measured", "age": 0}
+GD = {"distance_cm": 168.7, "reason": None}
+
+
+def test_go1_floor_object_uses_ground_line():
+    """13:35 소화기 180°: UniDepth 4.29 m(실제 1.5~2 m) → 바닥선 1.69 m."""
+    d = sa.distance(det(label="fire extinguisher", dist=UD, ground_distance=GD))
+    assert d == {"distance_m": 1.687, "distance_valid": True, "distance_source": "ground_line", "distance_note": None}
+
+
+def test_go1_unidepth_alone_is_not_valid():
+    d = sa.distance(det(label="fire extinguisher", dist=UD, ground_distance={"distance_cm": None,
+                                                                             "reason": "bottom edge touches the frame"}))
+    assert not d["distance_valid"] and d["distance_m"] == 4.294 and d["distance_source"] == "measured"
+    assert d["distance_note"].startswith(sa.GO1_DEPTH_NOTE) and "bottom edge touches the frame" in d["distance_note"]
+
+
+def test_go1_desk_object_does_not_use_ground_line():
+    d = sa.distance(det(label="cup", dist=UD, ground_distance=GD))
+    assert not d["distance_valid"] and "not standing on the floor" in d["distance_note"]
+
+
+def test_go1_box_height_still_wins():
+    bh = {"value": 1.889, "space": "metric", "source": "box_height", "age": 0}
+    d = sa.distance(det(label="demo_box", dist=bh, box_distance={"distance_cm": 188.9, "reason": None},
+                        ground_distance={"distance_cm": 218.0, "reason": None}))
+    assert d["distance_source"] == "box_height" and d["distance_m"] == 1.889 and d["distance_valid"]
+
+
+def test_go1_known_by_bearing_source_too():
+    d = sa.distance(det(label="person", dist=UD, offset=3.0, f_source="go1_box"))
+    assert not d["distance_valid"] and "no ground line" in d["distance_note"]
+
+
+def test_other_camera_unidepth_unchanged():
+    assert sa.distance(det(label="person", dist=UD, offset=3.0, f_source="fov"))["distance_valid"]
+
+
+def test_floor_objects_cover_targets_and_ko_table_floor_items():
+    assert {"demo_box", "demo_door", "person", "door", "fire extinguisher"} <= sa.FLOOR_OBJECTS
+    assert not {"cup", "laptop", "monitor", "keyboard", "bottle"} & sa.FLOOR_OBJECTS

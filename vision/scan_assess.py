@@ -19,6 +19,15 @@ BOX_RANGE_CM = (50.0, 300.0)
 #: 가시화의 target → targeted 대상 이름. object 는 query 그대로
 TARGET_NAMES = {"door": "demo_door", "box": "demo_box"}
 
+#: 스캔 전용 점수 하한(2026-11-24). 대상 파일의 min_score 는 여러 장을 쌓는 실시간 판정의 기준이다(demo_box 25 =
+#: 원본 conf 0.25). 스캔은 **한 장**으로 판정하므로 더 엄격하게 본다. 오늘 박스 세 판: 진짜 89~95 · 오탐 42~52
+#: (선반 아래 골판지 상자 41.7 · 51.5, 가장자리 검은 물체 48.3). 본체(78.7)는 이 하한이 아니라 방위 일치가 거른다
+SCAN_MIN_SCORE = {"demo_box": 65.0}
+#: 같은 물체로 볼 방위 차(도). 제자리 회전이라 같은 물체는 이웃 각도에서 같은 방위로 다시 보인다
+#: (오늘 진짜 박스 쌍의 차 0.5 · 2.3 · 6.2 · 7.1°, 소화기는 가장자리 225° 가 어안 보정 없이 15~16° 어긋났다).
+#: 한 각도에서만 나온 검출은 isolated — 지우지 않고 순위만 내린다
+BEARING_TOL_DEG = 20.0
+
 
 #: 발화 원문(query_ko) → 대상 이름(2026-11-24). **번역보다 먼저 본다** — 가시화의 LLM 번역이 실패 · 시간 초과하거나
 #: 깨진 영어('사람' → 'celedar or person orhumanbeingorhumanh')를 냈다. 등록 대상(person · door · chair · desk)은 그 근거로
@@ -82,15 +91,18 @@ def axes_of(det):
     return bool(glob), local, (None if geom is None else bool(geom))
 
 
-def frame_verdict(det):
+def frame_verdict(det, floor=None):
     """검출 하나의 장 단위 판정 → (found, score, reason). TrackEvidence 의 축 규칙(길이 1 트랙)과 같다:
-    전역이 통과하고, 잰 축 가운데 반대가 없고, 동의가 둘 이상(잰 축이 하나면 하나)."""
+    전역이 통과하고, 잰 축 가운데 반대가 없고, 동의가 둘 이상(잰 축이 하나면 하나).
+    floor = 스캔 전용 점수 하한(SCAN_MIN_SCORE) — 축 규칙을 통과해도 이보다 낮으면 found 가 아니다."""
     a = det.get("assess") or {}
     fr = a.get("frame") or a
     score = fr.get("score")
     glob, local, geom = axes_of(det)
     votes = [v for v in (glob, local, geom) if v is not None]
     ok = glob and False not in votes and votes.count(True) >= (2 if len(votes) >= 2 else 1)
+    if ok and floor is not None and score is not None and float(score) < float(floor):
+        return False, score, "score %.0f < %.0f (scan floor)" % (score, float(floor))
     if ok:
         return True, score, None
     mn = a.get("min_score", 50.0)
@@ -116,10 +128,11 @@ def frame_verdict(det):
 def pick(rec, name):
     """그 장에서 대상 이름의 대표 검출 → (det, found, score, reason). 판정된 것 · 점수 높은 것이 앞."""
     best = None
+    floor = SCAN_MIN_SCORE.get(name)
     for d in rec.get("detections") or []:
         if d.get("label") != name:
             continue
-        found, score, reason = frame_verdict(d)
+        found, score, reason = frame_verdict(d, floor)
         key = (found, -1.0 if score is None else float(score))
         if best is None or key > best[0]:
             best = (key, d, found, score, reason)
@@ -143,10 +156,29 @@ def bearing(rotation_deg, det):
     return wrap180(float(rotation_deg) + float(off)), note
 
 
-def distance(det):
-    """{distance_m, distance_valid, distance_source, distance_note} — §4.3. 하나라도 어긋나면 valid 가 아니다."""
+#: 바닥에 서 있는 대상 — 바닥선 거리(ground_distance)를 이것들에만 쓴다(2026-11-24). 책상 위 물체(컵 · 노트북 ·
+#: 모니터 · 키보드 …)는 아래 변이 바닥보다 높아 **더 멀게** 나오므로 쓰지 않는다 — 멀게 틀리면 로봇이 부딪힌다
+FLOOR_OBJECTS = {"demo_box", "demo_door", "person", "door", "chair", "fire extinguisher", "box", "bag", "backpack",
+                 "trash can", "potted plant", "bicycle", "shelf", "bookshelf", "cart", "traffic cone", "umbrella", "ball"}
+#: Go1 어안 화면의 단안 깊이(UniDepth)는 거리를 1.75~2.5 배로 부풀렸다(같은 장의 시연 박스 높이식과 대조) — valid 아님
+GO1_DEPTH_NOTE = "monocular depth on the Go1 fisheye camera is not calibrated"
+
+
+def _go1(det):
+    return det.get("ground_distance") is not None or (det.get("bearing") or {}).get("f_source") == "go1_box"
+
+
+def distance(det, name=None):
+    """{distance_m, distance_valid, distance_source, distance_note} — §4.3. 하나라도 어긋나면 valid 가 아니다.
+    Go1 프레임: 박스 높이식(demo_box) → 바닥선(FLOOR_OBJECTS) → 둘 다 안 되면 UniDepth 값을 valid 아님으로."""
     v = det.get("dist")
+    name = name or det.get("label")
     out = {"distance_m": None, "distance_valid": False, "distance_source": None, "distance_note": None}
+    gd = det.get("ground_distance") or {}
+    box_ok = bool(v) and v.get("source") == "box_height"
+    if not box_ok and gd.get("distance_cm") is not None and not gd.get("reason") and name in FLOOR_OBJECTS:
+        out.update(distance_m=round(gd["distance_cm"] / 100.0, 3), distance_valid=True, distance_source="ground_line")
+        return out
     if not v:
         bd = det.get("box_distance") or {}
         out["distance_note"] = "box touches the edge" if bd.get("reason") else "no distance"
@@ -168,6 +200,10 @@ def distance(det):
             out["distance_valid"] = True
     elif v.get("value") is None:
         out["distance_note"] = "no distance"
+    elif _go1(det):
+        why = ("not standing on the floor" if name not in FLOOR_OBJECTS else
+               gd.get("reason") or "no ground line")
+        out["distance_note"] = "%s - ground line: %s" % (GO1_DEPTH_NOTE, why)
     else:
         out["distance_valid"] = True
     return out
@@ -204,7 +240,7 @@ def frame_entry(rotation_deg, frame_n, rec, name, frozen_of=None):
     if det is not None and found:
         e["box_xyxy"] = [round(float(x), 1) for x in det.get("bbox") or []] or None
         e["bearing_deg"], e["bearing_note"] = bearing(rotation_deg, det)
-        e.update(distance(det))
+        e.update(distance(det, name))
     if frozen_of is not None:
         e["found"] = False
         e["reason"] = "frozen frame (same as %s°)" % frozen_of
@@ -223,17 +259,25 @@ def assemble(scan, captured):
         frames.append(e)
         dets[c["rotation_deg"]] = (det, c["rec"])
     cand = [e for e in frames if e["found"] and not e["frozen"]]
+    for e in cand:                           # 같은 물체가 다른 각도에서도 같은 방위로 보였나
+        e["seen_at"] = sorted([e["rotation_deg"]] + [o["rotation_deg"] for o in cand if o is not e and
+                                                     abs(wrap180(e["bearing_deg"] - o["bearing_deg"])) <= BEARING_TOL_DEG])
+        e["isolated"] = len(e["seen_at"]) < 2
     best = ev = None
     if cand:
-        top = max(cand, key=lambda e: (e["score"] or 0.0, e.get("distance_valid", False)))
+        top = max(cand, key=lambda e: (not e["isolated"], e["score"] or 0.0, e.get("distance_valid", False)))
         det, rec = dets[top["rotation_deg"]]
         best = {k: top.get(k) for k in ("rotation_deg", "bearing_deg", "bearing_note", "distance_m", "distance_valid",
                                         "distance_source", "distance_note")}
         best["score"] = top["score"]
         best["box_xyxy"] = top["box_xyxy"]
         best["provisional"] = name in (rec.get("provisional") or [])
+        best["isolated"] = top["isolated"]
+        best["seen_at"] = top["seen_at"]
         ev = {"cues": evidence(det), "enough": bool((det.get("assess") or {}).get("enough", True))}
         reason = "found %s at %s° - score %.0f" % (name, top["rotation_deg"], top["score"] or 0.0)
+        if top["isolated"]:
+            reason += " - seen at one angle only"
     else:
         frozen = sum(1 for e in frames if e["frozen"])
         reason = "%s not found in %d angle(s)%s" % (name, len(frames),

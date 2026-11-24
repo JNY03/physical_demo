@@ -42,6 +42,57 @@ def go1_camera(target):
     return tuple(tr.get("go1_frame") or (464, 400)), k / float(tr.get("box_height_cm", 39.0))
 
 
+def go1_ground(target):
+    """Go1 바닥선 거리의 상수(2026-11-24) — demo_box 의 바닥 관문(y2 = a·h + b, crop 좌표)과 높이식(d = k/h − c)을
+    그대로 쓴다. 두 식 모두 이 카메라 · 이 자세에서 실측 20장으로 맞춘 것이라, 둘을 엮으면 **바닥에 닿은 아래 변의
+    높이만으로** 거리가 나온다. 가중치를 올리지 않는다."""
+    tr = dict(target.get("trained") or {})
+    fit = json.loads(_p(tr["fit"]).read_text(encoding="utf-8"))
+    mb = fit["model_B_pinhole_offset"]
+    g = tr.get("ground") or {}
+    gt = [r["gt_cm"] for r in mb.get("lodo_detail") or []] or [50.0, 300.0]
+    return {"frame": tuple(tr.get("go1_frame") or (464, 400)),
+            "crop": tuple(tr.get("border_crop") or (114, 80, 351, 321)),
+            "a": float(g.get("a", 0.803)), "b": float(g.get("b", 135.7)),
+            "k": float(mb["k"]), "c": float(mb["c_cm"]), "edge": float(tr.get("edge_px", 2.0)),
+            "range_cm": [float(min(gt)), float(max(gt))]}
+
+
+def ground_distance(xyxy, g):
+    """**바닥선 거리** — 프레임 좌표 상자의 아래 변 → {distance_cm, reason, ...}.
+
+    바닥 관문의 식을 뒤집어 아래 변(crop 좌표 y2c)에서 '같은 자리의 39 cm 박스라면 몇 px 높이였을지'(h_eq)를 구하고
+    높이식에 넣는다:  h_eq = (y2c − b) / a ,  d = k / h_eq − c.
+    물체가 **바닥에 서 있다**는 가정이 들어간다 — 책상 위 물체는 더 멀게 나온다(가려 쓰는 것은 부르는 쪽).
+    reason 이 있으면 쓰지 않는다: 아래 변이 crop 아래 끝에 닿음(가려졌을 수 있음) · 보정 영역 밖(어안 가장자리) ·
+    수평선 위 · 실측 범위 밖."""
+    x1, y1, x2, y2 = (float(v) for v in xyxy)
+    cx0, cy0, cx1, cy1 = g["crop"]
+    a, b, k, c = g["a"], g["b"], g["k"], g["c"]
+    y2c = y2 - cy0
+    out = {"distance_cm": None, "reason": None, "y2_crop": round(y2c, 1),
+           "formula": "h_eq = (y2c − b) / a ;  distance_cm = k / h_eq − c"}
+    cx = (x1 + x2) / 2.0
+    if not (cx0 <= cx <= cx1):
+        out["reason"] = "outside the calibrated area (fisheye edge)"
+        return out
+    if y2 >= cy1 - g["edge"]:
+        out["reason"] = "bottom edge touches the frame"
+        return out
+    h_eq = (y2c - b) / a
+    if h_eq <= 0:
+        out["reason"] = "bottom edge above the floor line"
+        return out
+    d = k / h_eq - c
+    out["distance_cm"] = round(d, 1)
+    out["h_eq_px"] = round(h_eq, 2)
+    out["substituted"] = f"h_eq = ({y2c:.1f} − {b:g}) / {a:g} = {h_eq:.2f} ;  {k:.1f} / {h_eq:.2f} − {c:.1f} = {d:.1f}"
+    lo, hi = g["range_cm"]
+    if not (lo <= d <= hi):
+        out["reason"] = "outside %d-%d cm" % (lo, hi)
+    return out
+
+
 class TrainedBoxArm:
     """학습 run 하나 = 가중치 + 그 가중치로 실측에 맞춘 거리 계수 + 그때의 imgsz."""
 

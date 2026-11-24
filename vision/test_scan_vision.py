@@ -326,3 +326,50 @@ def test_imgsz_floor_for_small_frames():
     assert vi._arm_imgsz(Arm, np.zeros((400, 464, 3), np.uint8)) == 480
     Arm.min_size = 960
     assert vi._arm_imgsz(Arm, np.zeros((1080, 1920, 3), np.uint8)) == 1280
+
+
+# ---------------------------------------------------------------- 바닥선 거리 (2026-11-24)
+G = {"frame": (464, 400), "crop": (114, 80, 351, 321), "a": 0.803, "b": 135.7, "k": 5214.4, "c": 5.1, "edge": 2.0,
+     "range_cm": [50.0, 300.0]}
+
+
+def test_ground_line_matches_box_height_on_the_fit():
+    """바닥 관문 식 위에 정확히 놓인 박스면 바닥선 = 높이식."""
+    from demo_box import ground_distance
+    h = 26.87
+    y2 = 0.803 * h + 135.7 + 80
+    g = ground_distance([215.5, y2 - h, 254.3, y2], G)
+    assert g["reason"] is None and abs(g["distance_cm"] - (5214.4 / h - 5.1)) < 0.5
+
+
+def test_ground_line_on_saved_extinguisher_frames():
+    """13:35 소화기 135° · 180° — 실제 1.5~2 m."""
+    from demo_box import ground_distance
+    assert 150 <= ground_distance([282.5, 210.0, 295.7, 241.7], G)["distance_cm"] <= 170
+    assert 160 <= ground_distance([169.9, 212.0, 181.6, 239.8], G)["distance_cm"] <= 180
+
+
+def test_ground_line_refusals():
+    from demo_box import ground_distance
+    assert "fisheye" in ground_distance([56.5, 214.3, 68.8, 247.6], G)["reason"]          # 225° — crop 밖
+    assert ground_distance([200, 250, 240, 320], G)["reason"] == "bottom edge touches the frame"
+    assert ground_distance([200, 150, 240, 200], G)["reason"] == "bottom edge above the floor line"
+    far = ground_distance([200, 200, 240, 218], G)
+    assert far["distance_cm"] > 300 and far["reason"] == "outside 50-300 cm"
+
+
+def test_add_ground_distance_only_on_go1_frames():
+    cfg = {"_go1_ground": G}
+    dets = [{"xyxy": [169.9, 212.0, 181.6, 239.8]}]
+    vi.add_ground_distance(dets, 464, 400, cfg)
+    assert dets[0]["ground_distance"]["distance_cm"] is not None
+    other = [{"xyxy": [169.9, 212.0, 181.6, 239.8]}]
+    vi.add_ground_distance(other, 1280, 720, cfg)
+    assert "ground_distance" not in other[0]
+
+
+def test_go1_ground_from_fit_file():
+    import cue_catalog as cc
+    from demo_box import go1_ground
+    g = go1_ground(cc.load_targets()["demo_box"])
+    assert g["frame"] == (464, 400) and g["range_cm"] == [50.0, 300.0] and abs(g["k"] - 5214.4) < 0.1

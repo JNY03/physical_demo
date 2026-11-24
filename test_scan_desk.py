@@ -79,6 +79,7 @@ def door(score=72.0, found=True, x=300.0):
     return {"label": "demo_door", "bbox": [x - 50, 50, x + 50, 350],
             "dist": {"value": 2.35, "space": "metric", "source": "measured", "age": 0},
             "bearing": {"offset_deg": 5.0, "f_px": 300.0, "f_source": "go1_box"},
+            "ground_distance": {"distance_cm": 235.0, "reason": None},
             "assess": {"frame": {"score": score, "suspect": "demo_door" if found else None, "gates_failed": []},
                        "axes": {"global": found, "local": None, "local_declared": False, "geometry": None},
                        "cue_values": {"class": {"pct": 80.0, "role": "score", "passed": None, "w": 0.5}},
@@ -246,6 +247,7 @@ def test_full_scan_flow(env):
     assert res["frames"][0]["frame_n"] == first_n
     assert res["best"]["rotation_deg"] == 90 and res["best"]["bearing_deg"] == 95.0
     assert res["best"]["distance_valid"] and res["best"]["provisional"]
+    assert res["best"]["distance_source"] == "ground_line" and res["best"]["distance_m"] == 2.35
     assert "vision_scan" not in r.kv                        # 끝나면 판 키를 지운다 → 비전이 되돌린다
     assert json.loads((tmp / "scans" / "S1" / "result.json").read_text())["best"]["rotation_deg"] == 90
     assert (tmp / "scans" / "S1" / "90_original.jpg").is_file()
