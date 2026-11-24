@@ -31,73 +31,61 @@ TARGET_DIR = HERE / "assets" / "targets"
 #: 지정 클래스 탐지의 기본 대상 (2026-11-23 사용자 지정). 향후 대상 파일만 더하면 목록에 뜬다
 DEFAULT_TARGETS = ["person", "door", "chair", "desk", "demo_door", "demo_box"]
 
+#: 선택지 · 단서 · 모델 정의는 **vision/model_registry.yaml 한 파일**에 있다 (2026-11-24). 아래 이름들은 그 파일에서 만든다
+REGISTRY = HERE / "model_registry.yaml"
+
+
+def load_registry(path=REGISTRY):
+    """model_registry.yaml → 사전. PyYAML 이 없거나 파일이 틀리면 바로 알린다(이 파일 없이는 선택지가 없다)."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise SystemExit("PyYAML 이 필요합니다 (venv/bin/pip install pyyaml): %s" % exc)
+    with open(path, encoding="utf-8") as f:
+        reg = yaml.safe_load(f) or {}
+    for k in ("options", "cues", "models"):
+        if not isinstance(reg.get(k), dict) or not reg[k]:
+            raise SystemExit("%s 에 %s 구역이 없습니다" % (path, k))
+    for name, c in reg["cues"].items():
+        for m in c.get("needs") or []:
+            if m not in reg["models"] and m not in ("ovd", "depth"):
+                raise SystemExit("%s: 단서 %s 의 needs 에 모르는 모델 %r" % (path, name, m))
+    for name, o in reg["options"].items():
+        if isinstance(o.get("cue_models"), dict):
+            for cue, ms in o["cue_models"].items():
+                for m in ms or []:
+                    if m not in reg["models"]:
+                        raise SystemExit("%s: 선택지 %s 단서 %s 에 모르는 모델 %r" % (path, name, cue, m))
+    return reg
+
+
+_REG = load_registry()
 #: 검출 모델 · 깊이 모델 (vision_infer.py 와 같은 이름)
-DETECT_MODELS = ("yoloe", "river", "targeted")
-DEPTH_MODELS = ("unidepth", "moge2_aerial")
-MODELS = ("yoloe", "river", "targeted", "unidepth", "moge2_aerial")
+MODELS = tuple(_REG["options"])
+DETECT_MODELS = tuple(m for m, o in _REG["options"].items() if o.get("kind") == "detect")
+DEPTH_MODELS = tuple(m for m, o in _REG["options"].items() if o.get("kind") == "depth")
 #: 런처에 보이는 이름 — 괄호·설명 없이
-MODEL_SHOWN = {"yoloe": "yoloe", "river": "river", "targeted": "지정 클래스 탐지",
-               "unidepth": "unidepth", "moge2_aerial": "moge2_aerial"}
+MODEL_SHOWN = {m: str(o.get("shown", m)) for m, o in _REG["options"].items()}
+#: 선택지가 프로세스에 더하는 GPU 어림값 (targeted 는 단서 모델 합으로 따로 센다)
+OPTION_GPU_MB = {m: int(o.get("gpu_mb") or 0) for m, o in _REG["options"].items()}
 
 
 class ProfileError(ValueError):
     """프로필이 틀렸다. 메시지는 사람이 읽는 한 줄 — 런처 상태 줄에 그대로 나간다."""
 
 
-# ---------------------------------------------------------------- 근거 정의
+# ---------------------------------------------------------------- 근거 정의 (model_registry.yaml cues)
 #: key: label(런처) · role(기본) · roles(허용) · weight(기본 무게, score 일 때) · needs(모델 키) ·
 #:      requires(대상 파일 칸 — 하나라도 있으면 됨) · detector(쓸 수 있는 탐지기 종류)
 #: role: score 점수 · gate 필수 · veto 거부 · cond 조건(거리 신뢰) · on 켜기만(후보 넓히기·감점)
-CUES = {
-    # 탐지기 — YOLOE 텍스트 · prompt-free(같은 이름, 중심 명사가 같은 비슷한 이름은 0.7 배) · OVD(YOLO-World ·
-    # GroundingDINO)가 같은 자리를 이 대상으로 부른 확신을 noisy-OR 로 모은다(2026-11-23: 이름과 OVD 동의를 하나로)
-    "class":        {"label": "탐지기", "role": "score", "roles": ("score",), "weight": 0.50,
-                     "needs": [], "requires": [], "detector": ("yoloe_text", "trained")},
-    "free_arm":     {"label": "후보 넓히기", "role": "on", "roles": ("on",), "weight": 0.0,
-                     "needs": ["yoloe_free"], "requires": ["free_vocab"], "detector": ("yoloe_text",)},
-    "semantic":     {"label": "글 설명", "role": "score", "roles": ("score", "gate"), "weight": 0.20,
-                     "needs": ["clip"], "requires": [], "detector": ("yoloe_text", "trained")},
-    "dict_features": {"label": "특징 사전", "role": "score", "roles": ("score", "gate"), "weight": 0.20,
-                      "needs": ["clip"], "requires": ["features"], "detector": ("yoloe_text", "trained")},
-    "shape":        {"label": "형상", "role": "score", "roles": ("score", "gate"), "weight": 0.10,
-                     "needs": [], "requires": ["shape", "size_mm"], "detector": ("yoloe_text",)},
-    "colour":       {"label": "색상", "role": "score", "roles": ("score", "gate"), "weight": 0.15,
-                     "needs": [], "requires": ["colours"], "detector": ("yoloe_text", "trained")},
-    "ovd_pair_iou": {"label": "OVD 짝 IoU", "role": "gate", "roles": ("gate",), "weight": 0.0,
-                     "needs": ["ovd"], "requires": ["pair_iou_min"], "detector": ("yoloe_text",)},
-    "clip_colour":  {"label": "CLIP 색", "role": "gate", "roles": ("gate", "score"), "weight": 0.10,
-                     "needs": ["clip"], "requires": ["clip_colour"], "detector": ("yoloe_text", "trained")},
-    "clip_shape":   {"label": "CLIP 모양", "role": "gate", "roles": ("gate", "score"), "weight": 0.10,
-                     "needs": ["clip"], "requires": ["clip_shape"], "detector": ("yoloe_text", "trained")},
-    "saturation":   {"label": "채도", "role": "gate", "roles": ("gate",), "weight": 0.0,
-                     "needs": [], "requires": ["saturation"], "detector": ("yoloe_text", "trained")},
-    # 부분 — **국소 축**(2026-11-23). 그 물체에만 있는 부분(사람: 머리 · 얼굴 · 손)이 트랙의 절반 이상 장에서
-    # 잡히는가. 점수에 섞지 않고 축으로 따로 센다(전역 외형 근거를 여러 번 세지 않으려고)
-    "parts":        {"label": "부분", "role": "local", "roles": ("local",), "weight": 0.0,
-                     "needs": ["yoloe_text"], "requires": ["parts"], "detector": ("yoloe_text",)},
-    "hue":          {"label": "색상 H", "role": "gate", "roles": ("gate",), "weight": 0.0,
-                     "needs": [], "requires": ["hue"], "detector": ("yoloe_text", "trained")},
-    "aspect":       {"label": "종횡비", "role": "gate", "roles": ("gate", "score"), "weight": 0.10,
-                     "needs": [], "requires": ["aspect", "trained"], "detector": ("yoloe_text", "trained")},
-    "ground":       {"label": "바닥 위치", "role": "gate", "roles": ("gate",), "weight": 0.0,
-                     "needs": [], "requires": ["trained"], "detector": ("trained",)},
-    "height":       {"label": "높이 측정", "role": "cond", "roles": ("cond",), "weight": 0.0,
-                     "needs": [], "requires": ["trained"], "detector": ("trained",)},
-    "calibration":  {"label": "거리 검증 범위", "role": "cond", "roles": ("cond",), "weight": 0.0,
-                     "needs": [], "requires": ["trained"], "detector": ("trained",)},
-    "size_veto":    {"label": "크기 거부", "role": "veto", "roles": ("veto",), "weight": 0.0,
-                     "needs": ["depth"], "requires": ["size_mm"], "detector": ("yoloe_text", "trained")},
-    "lookalike":    {"label": "닮은꼴 감점", "role": "on", "roles": ("on",), "weight": 0.0,
-                     "needs": ["clip"], "requires": ["confusers"], "detector": ("yoloe_text", "trained")},
-}
+CUES = {k: {"label": str(c["label"]), "role": str(c["role"]), "roles": tuple(str(r) for r in c["roles"]),
+            "weight": float(c.get("weight") or 0.0), "needs": list(c.get("needs") or []),
+            "requires": list(c.get("requires") or []), "detector": tuple(c.get("detector") or ())}
+        for k, c in _REG["cues"].items()}
 ROLES = ("score", "gate", "veto", "cond", "on", "local", "off")
 #: 카드(영상 · 웹)에 쓰는 근거 이름 — **카드는 영어로만**(2026-11-23). 런처 화면은 위 label(한글)
-CUE_EN = {"class": "detector", "free_arm": "wider candidates", "semantic": "description",
-          "dict_features": "features", "shape": "shape", "colour": "colour", "ovd_pair_iou": "OVD pair IoU",
-          "clip_colour": "CLIP colour", "clip_shape": "CLIP shape", "saturation": "saturation", "hue": "hue",
-          "aspect": "aspect", "ground": "ground", "height": "height", "calibration": "calibration",
-          "size_veto": "size veto", "lookalike": "look-alike", "distance": "distance",
-          "parts": "parts", "axes": "axes", "track": "track"}
+CUE_EN = {k: str(c.get("label_en", k)) for k, c in _REG["cues"].items()}
+CUE_EN.update(_REG.get("card_rows_en") or {})
 #: 직접 입력(등록하지 않은 이름)에서 쓰는 근거 — 크기·색을 주면 더 붙는다
 DIRECT_ALWAYS = ["class", "free_arm", "semantic"]
 DIRECT_WITH_SIZE = ["shape", "size_veto"]
@@ -137,23 +125,14 @@ def model_files(tcfg):
     return out
 
 
-DEFAULT_FILES = {
-    "yoloe_text": ["models/yoloe-11l-seg.pt", "models/mobileclip_blt.ts"],
-    "yoloe_free": ["models/yoloe-11s-seg-pf.pt"],
-    "clip": ["models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx",
-             "models/clip-vit-base-patch32/onnx/text_model_quantized.onnx",
-             "models/clip-vit-base-patch32/onnx/tokenizer_dictionary.json"],
-    "yolo_world": ["models/yolov8s-worldv2.pt", "models/clip/ViT-B-32.pt"],
-    "gdino": ["models/grounding-dino-tiny/config.json", "models/grounding-dino-tiny/model.safetensors"],
-    "depth": ["~/.cache/huggingface/hub/models--lpiccinelli--unidepth-v2-vitb14",
-              "external/UniDepth"],
-    "trained": [],                   # 대상 파일의 trained.weight · fit 이 정한다
-    "reid": ["models/lightglue_superpoint/model.safetensors",
-             "models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx"],
-}
-#: 프로세스 하나에 더해지는 GPU 메모리 추정(MB). 측정값이 아니라 **분할 계산용 어림**이다
-GPU_MB = {"base": 400, "yoloe_text": 900, "yoloe_free": 500, "clip": 350, "yolo_world": 500,
-          "grounding_dino": 1300, "gdino": 1300, "reid": 700, "depth": 1300, "trained": 120}
+#: 사용 가능 판정용 파일 목록 (model_registry.yaml models.*.files — files_key 가 있으면 그 이름으로)
+DEFAULT_FILES = {str(m.get("files_key", k)): list(m.get("files") or []) for k, m in _REG["models"].items()}
+#: 프로세스 하나에 더해지는 GPU 메모리 추정(MB). 측정값이 아니라 **분할 계산용 어림**이다 (model_registry.yaml)
+GPU_MB = {"base": int(_REG.get("base_gpu_mb", 400))}
+for _k, _m in _REG["models"].items():
+    if _m.get("gpu_mb") is not None:
+        for _name in [_k] + list(_m.get("gpu_mb_alias") or []):
+            GPU_MB[_name] = int(_m["gpu_mb"])
 
 
 def have(key, files):
@@ -552,15 +531,40 @@ def gpu_mb(models, need=()):
     """비전 프로세스 하나의 GPU 메모리 어림(MB)."""
     mb = GPU_MB["base"]
     for m in models:
-        if m == "yoloe":
-            mb += 900
-        elif m == "river":
-            mb += 2400
-        elif m in DEPTH_MODELS:
-            mb += 1500
+        mb += OPTION_GPU_MB.get(m, 0)
     for n in need:
         mb += GPU_MB.get(n, 0)
     return mb
+
+
+def option_cues(files=None, tcfg=None):
+    """선택지 → [{key, label, models: [{key, note, available}]}] — 런처가 「이 선택지는 어떤 단서를 어떤 모델로 쓰나」를
+    보여 준다. targeted 는 cues 구역 전체(needs 의 ovd · depth 를 실제 모델 키로 편다)."""
+    files = model_files(tcfg) if files is None else files
+    labels = dict((k, c["label"]) for k, c in CUES.items())
+    labels.update(_REG.get("cue_type_labels") or {})
+
+    def model_row(m):
+        spec = _REG["models"].get(m, {})
+        return {"key": m, "note": str(spec.get("note", "")), "available": have(str(spec.get("files_key", m)), files)}
+
+    out = {}
+    for opt, o in _REG["options"].items():
+        cm = o.get("cue_models")
+        rows = []
+        if cm == "targeted":
+            for k, c in CUES.items():
+                ms = []
+                for n in c["needs"]:
+                    ms += ["yolo_world", "grounding_dino"] if n == "ovd" else [n]
+                if k == "class":
+                    ms = ["yoloe_text", "trained"]
+                rows.append({"key": k, "label": c["label"], "models": [model_row(m) for m in ms]})
+        else:
+            for k, ms in (cm or {}).items():
+                rows.append({"key": k, "label": labels.get(k, k), "models": [model_row(m) for m in ms or []]})
+        out[opt] = rows
+    return out
 
 
 # ---------------------------------------------------------------- 런처용 카탈로그
@@ -604,7 +608,10 @@ def catalog(cfg=None):
                            {"key": "always", "shown": "항상"}],
             "features": [{"key": k, "shown": v, "available": have(k, files)} for k, v in FEATURES.items()],
             "gpu_mb": {m: gpu_mb([m]) for m in all_models if m != "targeted"},
-            "gpu_mb_targeted": {k: v for k, v in GPU_MB.items()}}
+            "gpu_mb_targeted": {k: v for k, v in GPU_MB.items()},
+            "gpu_mb_base": GPU_MB["base"],
+            "gpu_mb_option": dict(OPTION_GPU_MB),
+            "options": option_cues(files, tcfg)}
 
 
 def overlay_defaults(cfg):

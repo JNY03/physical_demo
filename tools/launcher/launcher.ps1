@@ -31,8 +31,7 @@ $SettingsFile = Join-Path $Here "settings.json"
 $ProfileFile  = Join-Path $Here "profile.json"
 $CatalogCache = Join-Path $Here "catalog_cache.json"
 $ProfileWsl   = "/mnt/c/Users/khw67/DataStreamLauncher/profile.json"
-#: 비전 프로세스 하나의 GPU 메모리 어림(MB) — river 는 실측(2026-11-13), 나머지는 cue_catalog.GPU_MB
-$ModelMB      = @{ "yoloe" = 900; "river" = 2800; "unidepth" = 1500; "moge2_aerial" = 1500 }
+#: 비전 GPU 메모리 어림(MB)은 vision/model_registry.yaml 하나에서 온다 (카탈로그 gpu_mb_base · gpu_mb_option · gpu_mb_targeted)
 
 function Invoke-Wsl([string[]]$argv) {
     $out = & wsl.exe -d $Distro --cd $RepoDir --exec @argv 2>$null
@@ -171,6 +170,20 @@ foreach ($n in $Models) {
     $modelChecks[$n] = New-Check $gVision $ModelShown[$n] $mx $my ($s.models -contains $n)
     $i++
 }
+# 선택지마다 「단서 → 모델」 — vision/model_registry.yaml (카탈로그 options)
+$modelTip = New-Object System.Windows.Forms.ToolTip
+$modelTip.AutoPopDelay = 30000
+function Option-Tip($m) {
+    $lines = @("단서 → 모델")
+    foreach ($r in @($cat.options.$m)) {
+        $ms = @($r.models | ForEach-Object { if ($_.available) { $_.key } else { "{0} (없음)" -f $_.key } })
+        $lines += ("{0}: {1}" -f $r.label, $(if ($ms.Count) { $ms -join ", " } else { "규칙 (모델 없음)" }))
+    }
+    $add = [int]$cat.gpu_mb_option.$m
+    if ($m -eq "targeted") { $lines += "GPU 어림: 고른 단서의 모델 합" } else { $lines += ("GPU 어림: +{0} MB" -f $add) }
+    return ($lines -join "`n")
+}
+foreach ($n in $Models) { if ($null -ne $cat.options) { $modelTip.SetToolTip($modelChecks[$n], (Option-Tip $n)) } }
 # 기능 — 모델과 따로 켜는 것(카탈로그 features). 지금은 객체 재식별
 [void](New-Label $gVision "기능" 14 116)
 $featChecks = @{}
@@ -632,18 +645,19 @@ function Start-Slice {
     $a += " --v $SliceV"
     Start-WslWindow "ds_slice" "360 슬라이스" ("./venv/bin/python e2p/slice360_live.py{0}" -f $a)
 }
-function Targeted-MB {
-    $mb = 400 + 900 + 500 + 350 + 500
+function Targeted-MB {   # targeted 단서 모델 합 (프로세스 기본값 제외) — model_registry.yaml
+    $g = $cat.gpu_mb_targeted
+    $mb = [int]$g.yoloe_text + [int]$g.yoloe_free + [int]$g.clip + [int]$g.yolo_world
     $ts = Checked-Targets
-    if ($ts -contains "demo_door") { $mb += 1300 }
-    if ($ts -contains "demo_box") { $mb += 120 }
-    if ($distOn.Checked) { $mb += 1300 }
+    if ($ts -contains "demo_door") { $mb += [int]$g.grounding_dino }
+    if ($ts -contains "demo_box") { $mb += [int]$g.trained }
+    if ($distOn.Checked) { $mb += [int]$g.depth }
     return $mb
 }
 function Start-Vision($cfg) {
     $mods = Chosen-Models
-    $procMB = 0
-    foreach ($m in $mods) { if ($m -eq "targeted") { $procMB += (Targeted-MB) } else { $procMB += $ModelMB[$m] } }
+    $procMB = [int]$cat.gpu_mb_base           # 프로세스 하나에 한 번 (torch · CUDA)
+    foreach ($m in $mods) { if ($m -eq "targeted") { $procMB += (Targeted-MB) } else { $procMB += [int]$cat.gpu_mb_option.$m } }
     $groups = 1
     $heavy = [bool]($mods | Where-Object { $_ -eq "river" -or $_ -eq "targeted" })
     if ($heavy -and $cfg.onAll.Count -gt 1) {
