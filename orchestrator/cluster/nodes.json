@@ -1,0 +1,15 @@
+{
+  "_doc": "k3s 클러스터 노드 목록 — 자원 기반 비전 오케스트레이션 전용. 이름은 테일넷 호스트 이름(주소는 MagicDNS 로 찾는다). role: gpu · robot · sensor · small. robot · small 은 taint(ds.role=<role>:NoSchedule)를 달아 허용된 작업만 받는다. 새 기기는 agents 에 한 줄 더하고 cluster_up.sh 를 다시 돌린다.",
+  "k3s_version": "v1.35.4+k3s1",
+  "server": {"name": "book-4vg1edpvi5-wsl", "role": "gpu", "source": "data_stream"},
+  "agents": [
+    {"name": "pi1",  "role": "robot",  "source": "ep-001"},
+    {"name": "pi7",  "role": "robot",  "source": "robot1"},
+    {"name": "pi10", "role": "robot",  "source": "a2"},
+    {"name": "ds5",  "role": "robot",  "source": "drone2"},
+    {"name": "pi6",  "role": "sensor", "source": "realsense"},
+    {"name": "pi13", "role": "small",  "source": "pi13"}
+  ],
+  "excluded": ["pi11", "pi12", "pi3"],
+  "taint_roles": ["robot", "small"]
+}

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# cluster_up.sh — nodes.json 의 파이들을 data_stream k3s 클러스터에 붙인다. WSL 에서 **sudo 없이** 실행한다.
+#
+#   bash orchestrator/cluster/cluster_up.sh prep    기존(다른) k3s 제거 · cgroup 설정 · 필요하면 재부팅
+#   bash orchestrator/cluster/cluster_up.sh join    agent 설치 · 라벨 · taint (서버 설치 뒤)
+#   bash orchestrator/cluster/cluster_up.sh all     둘 다
+#   ... <명령> pi7 pi10                              일부 노드만
+#
+# 준비: 파이에 SSH 키 로그인(physical@<이름>). 파이 sudo 에 비밀번호가 필요하면 PI_SUDO_PASS 환경변수로 준다
+#       (파일에 적지 않는다). join 은 install_server.sh 가 만든 ~/.kube/k3s-node-token 을 읽는다.
+# 다시 돌려도 된다 — 이미 된 단계는 건너뛴다.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+NODES="$HERE/nodes.json"
+PI_USER="${PI_USER:-physical}"
+step="${1:-all}"; shift || true
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10)
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"     # k3s 의 kubectl 은 없으면 root 전용 /etc/rancher/k3s/k3s.yaml 을 읽는다
+
+jq_py() { python3 -c "import json,sys; d=json.load(open('$NODES')); $1" "${@:2}"; }
+VERSION="$(jq_py 'print(d["k3s_version"])')"
+TS_IP="$(tailscale ip -4 | head -1)"
+URL="https://$TS_IP:6443"
+mapfile -t ALL < <(jq_py 'print("\n".join("%s %s %d" % (a["name"], a["role"], a["role"] in d["taint_roles"]) for a in d["agents"]))')
+want=("$@")
+
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+declare -A NEEDPASS=()
+needpass() {  # 비밀번호 없는 sudo 면 비밀번호 줄을 보내지 않는다 — 보내면 그 줄이 join 의 토큰 자리로 들어간다
+    local h="$1"
+    if [ -z "${NEEDPASS[$h]:-}" ]; then
+        if "${SSH[@]}" "$PI_USER@$h" "sudo -n true" >/dev/null 2>&1; then NEEDPASS[$h]=0; else NEEDPASS[$h]=1; fi
+    fi
+    [ "${NEEDPASS[$h]}" = 1 ]
+}
+pass_line() { if needpass "$1"; then [ -n "${PI_SUDO_PASS:-}" ] || { echo "$1: sudo 비밀번호 필요 (PI_SUDO_PASS)" >&2; return 1; }; printf '%s\n' "$PI_SUDO_PASS"; fi; }
+rsudo() {  # rsudo <host> <args...> — 원격 root 로 pi_node.sh 실행. 명령이 표준입력으로 받을 줄은 STDIN_EXTRA
+    local h="$1"; shift
+    { pass_line "$h"; [ -n "${STDIN_EXTRA:-}" ] && printf '%s\n' "$STDIN_EXTRA"; true; } |
+        "${SSH[@]}" "$PI_USER@$h" "sudo -S -p '' bash /tmp/pi_node.sh $*"
+}
+wait_ssh() {  # 재부팅 뒤 다시 붙을 때까지 (최대 240초)
+    local h="$1" old="$2"
+    for i in $(seq 48); do
+        sleep 5
+        local now; now="$("${SSH[@]}" "$PI_USER@$h" cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+        [ -n "$now" ] && [ "$now" != "$old" ] && return 0
+    done
+    return 1
+}
+
+for line in "${ALL[@]}"; do
+    read -r name role taint <<<"$line"
+    if [ ${#want[@]} -gt 0 ] && [[ ! " ${want[*]} " =~ " $name " ]]; then continue; fi
+    if ! scp -q -o BatchMode=yes -o ConnectTimeout=10 "$HERE/pi_node.sh" "$PI_USER@$name:/tmp/pi_node.sh"; then
+        log "$name: SSH 안 됨 — 건너뜀"; continue
+    fi
+    if [ "$step" = prep ] || [ "$step" = all ]; then
+        log "$name: $(rsudo "$name" remove-old "$URL")"
+        res="$(rsudo "$name" cgroup)"
+        if [ "$res" = changed ]; then
+            boot="$("${SSH[@]}" "$PI_USER@$name" cat /proc/sys/kernel/random/boot_id)"
+            log "$name: cgroup 설정 바꿈 — 재부팅"
+            { pass_line "$name"; true; } |
+                "${SSH[@]}" "$PI_USER@$name" "sudo -S -p '' systemctl reboot" >/dev/null 2>&1 || true
+            if wait_ssh "$name" "$boot"; then log "$name: 다시 붙음"; else log "$name: 재부팅 뒤 안 돌아옴 — 확인 필요"; continue; fi
+            scp -q -o BatchMode=yes "$HERE/pi_node.sh" "$PI_USER@$name:/tmp/pi_node.sh"
+        fi
+        log "$name: $(rsudo "$name" check | tr '\n' ' ')"
+    fi
+    if [ "$step" = join ] || [ "$step" = all ]; then
+        TOKEN_FILE="$HOME/.kube/k3s-node-token"
+        [ -s "$TOKEN_FILE" ] || { log "토큰 파일이 없습니다 — sudo bash $HERE/install_server.sh 먼저"; exit 1; }
+        if [ "$(kubectl get node "$name" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]; then
+            log "$name: 이미 Ready"
+        else
+            ip="$("${SSH[@]}" "$PI_USER@$name" "tailscale ip -4 | head -1")"
+            log "$name: agent 설치 ($ip, role=$role)"
+            STDIN_EXTRA="$(cat "$TOKEN_FILE")" rsudo "$name" join "$VERSION" "$URL" "$name" "$ip" "$role" "$taint" | sed "s/^/  $name: /"
+        fi
+        kubectl label node "$name" "ds.role=$role" --overwrite >/dev/null 2>&1 || true
+        if [ "$taint" = 1 ]; then kubectl taint node "$name" "ds.role=$role:NoSchedule" --overwrite >/dev/null 2>&1 || true; fi
+    fi
+done
+if [ "$step" != prep ]; then kubectl get nodes -L ds.role -o wide 2>/dev/null || true; fi
