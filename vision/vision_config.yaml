@@ -114,6 +114,11 @@ models:
       classes: [person, boat, life jacket, car]
       text_weight: /home/khw67/data_stream/models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
       text_encoder_dir: /home/khw67/data_stream/models               # mobileclip_blt.ts 가 있는 폴더 (없으면 여기로 받는다)
+      # 학습 임베딩 — 텍스트 인코더가 모르는 고유명(go1 · insta 360)을 classes 에 적으면 이 벡터로 찾는다.
+      # 만들기: python vision/train_custom_pe.py (입력 models/custom_pe/train_list.json · 크롭은 stream_data/{robot1,cam360}/sample)
+      # 예) classes: [person, boat, life jacket, car, go1, insta 360]
+      # 먼 Insta360(1920 프레임에서 30px 안팎)은 imgsz 640 에서 안 잡힌다 — 세션 교차검증에서 1920 이어야 a2 원거리가 잡혔다.
+      learned_pe: /home/khw67/data_stream/models/custom_pe/yoloe-11l_custom.npz
 
   # ── river — 하천 떠내려가는 물체, **학습 없이** 제로샷 ──────────────────────
   # 안동 자료는 현장 1곳·날짜 1일·촬영 1회다(인접 프레임 평균차가 go1 50프레임 간격에도

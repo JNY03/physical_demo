@@ -364,12 +364,21 @@ class YoloeRunner:
             self.weight = pr.get("text_weight") or cfg["weight"]
             if Path(self.weight).stem.endswith("-pf"):
                 raise SystemExit("텍스트 프롬프트에는 prompt-free(-pf) 가 아닌 가중치가 필요합니다 (prompt.text_weight)")
+            import torch
             self.model = YOLOE(self.weight)
-            # ultralytics 는 텍스트 인코더를 작업 폴더나 weights_dir 에서 찾는다 (없으면 받는다 ~570MB)
-            with contextlib.chdir(pr.get("text_encoder_dir") or Path(self.weight).parent):
-                pe = self.model.get_text_pe(classes)
-            self.model.set_classes(classes, pe)
-            log("  yoloe 텍스트 프롬프트 %d종: %s" % (len(classes), ", ".join(classes)))
+            learned = self._learned_pe(pr.get("learned_pe"))
+            texts = [c for c in classes if c.lower() not in learned]
+            text_pe = {}
+            if texts:
+                # ultralytics 는 텍스트 인코더를 작업 폴더나 weights_dir 에서 찾는다 (없으면 받는다 ~570MB)
+                with contextlib.chdir(pr.get("text_encoder_dir") or Path(self.weight).parent):
+                    pe = self.model.get_text_pe(texts)
+                text_pe = {c: pe[0, i] for i, c in enumerate(texts)}
+            dev = next(self.model.model.parameters()).device
+            rows = [learned[c.lower()].to(dev) if c.lower() in learned else text_pe[c].to(dev) for c in classes]
+            self.model.set_classes(classes, torch.stack(rows)[None])
+            log("  yoloe 텍스트 프롬프트 %d종: %s" % (len(classes), ", ".join(
+                c + (" (학습 임베딩)" if c.lower() in learned else "") for c in classes)))
         elif self.mode == "free":
             self.weight = cfg["weight"]
             self.model = YOLOE(self.weight)              # 내장 어휘 그대로, set_classes 안 함
@@ -407,6 +416,26 @@ class YoloeRunner:
         self.max_area = cfg.get("max_area_ratio")       # 박스가 화면의 이 비율보다 크면 버린다 (전체 화면 검출)
         self.area_exempt = {str(n).lower() for n in cfg.get("area_exempt") or []}
         self(np.zeros((480, 640, 3), np.uint8))  # 첫 장 지연을 미리 치른다
+
+    def _learned_pe(self, path):
+        """prompt.learned_pe — vision/train_custom_pe.py 가 만든 NPZ 를 {소문자 이름: 벡터} 로.
+
+        'go1' · 'insta 360' 처럼 텍스트 인코더가 모르는 고유명은 박스 친 이미지에서 뽑은
+        시각 프롬프트 임베딩으로 찾는다. classes 에 그 이름이 있으면 텍스트 임베딩 대신 쓴다.
+        임베딩은 만든 가중치 계열에 묶여 있다 — 다른 가중치에 넣으면 조용히 엉뚱한 것을 찾으므로 거절한다."""
+        if not path:
+            return {}
+        import torch
+        path = Path(str(path)).expanduser()
+        if not path.is_file():
+            raise SystemExit("models.yoloe.prompt.learned_pe 파일이 없습니다: %s" % path)
+        with np.load(path, allow_pickle=False) as z:
+            emb, names, made_for = z["embeddings"], [str(n) for n in z["names"]], str(z["model"])
+        mine = Path(self.weight).stem
+        mine = mine[:-4] if mine.endswith("-seg") else mine
+        if made_for != mine:
+            raise SystemExit("learned_pe 는 %s 용인데 text_weight 는 %s 입니다: %s" % (made_for, mine, path))
+        return {n.strip().lower(): torch.from_numpy(emb[0, i].copy()).float() for i, n in enumerate(names)}
 
     def __call__(self, bgr):
         c = self.cfg
