@@ -111,6 +111,7 @@ import contextlib
 import fcntl
 import json
 import math
+import os
 import re
 import signal
 import socket
@@ -4110,6 +4111,80 @@ class ProfileWatch:
 
 
 # ---------------------------------------------------------------- live (실시간)
+# ---------------------------------------------------------------- 자원 사용량 보고 (2026-11-24)
+#: 프로세스마다 Redis vision_telemetry:<호스트>:<pid> (TTL 60초) 에 보고 주기(report_interval_s)마다 쓴다.
+#: data_stream 서버의 자원 기록기(ds_resources/recorder.py)가 읽어 모델 조합 사용량으로 기억한다.
+#: 가시화용 스트림이 아니다 — 키 하나를 덮어쓴다.
+TELEMETRY_TTL_S = 60
+
+
+def telemetry_cfg_hash(cfg, models):
+    """설정 해시 — 레지스트리 파일 + 이 프로세스 모델들의 설정. 바뀌면 기억한 사용량을 새로 잰다."""
+    import hashlib
+    h = hashlib.sha1()
+    try:
+        h.update((HERE / "model_registry.yaml").read_bytes())
+    except OSError:
+        pass
+    h.update(json.dumps({m: (cfg.get("models") or {}).get(m) for m in sorted(models)},
+                        sort_keys=True, default=str).encode())
+    return h.hexdigest()[:10]
+
+
+def telemetry_device_class():
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_available():
+            return "gpu:" + torch.cuda.get_device_name(0)
+    except Exception:  # noqa: BLE001
+        pass
+    import platform
+    return "cpu:" + platform.machine()
+
+
+def telemetry_gpu(pid):
+    """GPU 메모리 원천별로 따로 (MB) — 어느 것도 못 재면 None 칸.
+      proc_mb        nvidia-smi 프로세스별 값 (onnxruntime 몫까지). **WSL 에서는 [N/A] 라 None**
+      torch_peak_mb  torch 예약 최대치 (CUDA 컨텍스트 · onnxruntime 몫은 빠진다)
+      device_used_mb · device_total_mb  기기 전체 (다른 프로세스 몫까지)
+    합치는 규칙은 기록기(ds_resources/recorder.py)가 정한다."""
+    import shutil
+    import subprocess
+    out = {"proc_mb": None, "torch_peak_mb": None, "device_used_mb": None, "device_total_mb": None}
+    exe = shutil.which("nvidia-smi")
+    if exe:
+        try:
+            txt = subprocess.run([exe, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=2).stdout
+            for line in txt.splitlines():
+                p = [x.strip() for x in line.split(",")]
+                if len(p) == 2 and p[0] == str(pid) and p[1].isdigit():
+                    out["proc_mb"] = float(p[1])
+            txt = subprocess.run([exe, "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=2).stdout.split("\n")[0].split(",")
+            if len(txt) == 2:
+                out["device_used_mb"], out["device_total_mb"] = float(txt[0]), float(txt[1])
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_available():
+            out["torch_peak_mb"] = round(torch.cuda.max_memory_reserved() / 2 ** 20, 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def telemetry_summary(samples):
+    """[(infer_ms, w, h)] → {frames, infer_ms_p50, infer_ms_p90, w, h}"""
+    if not samples:
+        return {"frames": 0}
+    ms = sorted(x[0] for x in samples)
+    pick = lambda q: ms[min(len(ms) - 1, int(round(q * (len(ms) - 1))))]  # noqa: E731
+    w, h = samples[-1][1], samples[-1][2]
+    return {"frames": len(ms), "infer_ms_p50": round(pick(0.5), 1), "infer_ms_p90": round(pick(0.9), 1), "w": w, "h": h}
+
+
 class LiveRunner:
     """Redis camera_stream:<기기> 에서 기기마다 가장 최근 프레임만 꺼내 추론하고
     결과를 Redis vision_stream:<기기>:<모델> (+ depth 는 vision_depth:<기기>:<모델>) 에 넣고
@@ -4151,6 +4226,9 @@ class LiveRunner:
         self.lock_retry = {}
         self.warned = set()
         self.stat = dict((dv, [0, 0.0, 0.0]) for dv in devices)   # 처리 장 수, lag 합, 추론 합 (보고 사이)
+        self.tel = dict((dv, []) for dv in devices)                # 자원 보고: (추론 ms, w, h) (보고 사이)
+        self.tel_seq = 0
+        self.tel_key = "vision_telemetry:%s:%d" % (socket.gethostname(), os.getpid())
 
     def warn_once(self, key, msg):
         if key not in self.warned:
@@ -4260,6 +4338,7 @@ class LiveRunner:
         st[0] += 1
         st[1] += done_ms - recv_ms
         st[2] += infer_ms
+        self.tel[dv].append((infer_ms, w, h))
 
     # -- 구역(웹 화면) · 프로필(런처)
     def read_roi(self, dv):
@@ -4512,6 +4591,27 @@ class LiveRunner:
                 parts.append("%s %.1f장/s 지연 %.2fs (추론 %.0fms)" % (dv, n / dt, lag / n / 1000.0, inf / n))
             self.stat[dv] = [0, 0.0, 0.0]
         log("live  " + (" · ".join(parts) if parts else "새 프레임 없음 (서버가 보내는 중인지 확인)"))
+        self.publish_telemetry(dt)
+
+    def publish_telemetry(self, dt):
+        """보고 주기의 자원 사용량을 vision_telemetry:<호스트>:<pid> 에 덮어쓴다. 실패해도 추론은 계속."""
+        streams = {}
+        for dv in self.devices:
+            sm = telemetry_summary(self.tel[dv])
+            if sm["frames"]:
+                sm["fps"] = round(sm["frames"] / dt, 2) if dt > 0 else None
+            streams[dv] = sm
+            self.tel[dv] = []
+        self.tel_seq += 1
+        if not hasattr(self, "tel_hash"):
+            self.tel_hash = telemetry_cfg_hash(self.cfg, self.models)
+        doc = {"schema": "vtel/1", "proc": self.tel_key.split(":", 1)[1], "seq": self.tel_seq, "window_s": round(dt, 2),
+               "models": sorted(self.models), "cfg_hash": self.tel_hash, "device_class": telemetry_device_class(),
+               "gpu": telemetry_gpu(os.getpid()), "streams": streams, "ts": iso_ms(time.time())}
+        try:
+            self.r.set(self.tel_key, json.dumps(doc, ensure_ascii=False), ex=TELEMETRY_TTL_S)
+        except self.redis_mod.RedisError as e:
+            self.warn_once(("telemetry", str(e)[:60]), "자원 사용량을 Redis 에 못 넣음 (%s) — 추론은 계속" % e)
 
     def run(self):
         keys = dict((dv, "camera_stream:" + dv) for dv in self.devices)

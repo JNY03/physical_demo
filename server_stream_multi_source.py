@@ -2229,6 +2229,8 @@ def main():
     ap.add_argument("--bind", default="0.0.0.0", metavar="주소", help="포트를 열 주소 (기본 0.0.0.0 = 전부)")
     ap.add_argument("--tcp-mss", type=int, default=TCP_MSS, metavar="바이트",
                     help="TCP 세그먼트 상한 (기본 %d — 테일넷 MTU 블랙홀 우회, 0 = 건드리지 않음)" % TCP_MSS)
+    ap.add_argument("--no-resource-record", action="store_true",
+                    help="이 기기 자원 기록(ds_resources: 기본 자원 · 사용량 · 모델 조합 기억, node_resource_stream)을 끈다")
     ap.add_argument("--unpack", metavar="폴더", help="저장된 .frm 을 .jpg + .json 으로 풀고 끝낸다")
     args = ap.parse_args()
 
@@ -2268,6 +2270,14 @@ def main():
     if vision is not None and redis is not None:
         from scan_desk import ScanDesk
         desk = ScanDesk(args.redis, Path(args.save).expanduser().resolve(), ALIASES, log).start()
+    recorder = None                                # 자원 기록기 (ds_resources, k3s 없이 돈다 — 2026-11-24)
+    if redis is not None and redis_ok and not args.no_resource_record:
+        try:
+            from ds_resources.recorder import LocalRecorder
+            recorder = LocalRecorder(redis.Redis.from_url(args.redis, socket_connect_timeout=2, socket_timeout=5),
+                                     log=log)
+        except Exception as e:  # noqa: BLE001 — 기록기 없이도 서버는 돈다
+            log("자원 기록기를 못 띄움 (%s) — 받기 · 저장은 계속" % describe(e))
     servers = []                                   # 포트부터 잡는다 — 못 잡으면 폴더를 만들기 전에 끝낸다
     for s in sources:
         try:
@@ -2307,6 +2317,8 @@ def main():
                                 else "안 됨 — 저장만 합니다 (%s)" % sink.err))
     if fwd_host:
         print("  넘기기 %s 의 같은 포트로 (/push)" % fwd_host)
+    if recorder is not None:
+        print("  자원   %s 기록 → node_resource_stream · 기억 %s" % (recorder.node, recorder.mem.path))
     print("  " + "-" * 70)
 
     pulls = []                                     # 요약을 다 찍은 뒤에 시작한다
@@ -2372,6 +2384,8 @@ def main():
         threading.Thread(target=loop, args=loop_args, daemon=True).start()
         clients.append(start_mqtt(s, host) if s.name in STATE_SOURCES else None)
     threading.Thread(target=report_loop, args=(sources, sink, vision), daemon=True).start()
+    if recorder is not None:
+        recorder.start()
     try:
         while not STOP.is_set():
             time.sleep(0.5)
@@ -2379,6 +2393,8 @@ def main():
         pass
     STOP.set()
     print("\n끝내는 중…", flush=True)
+    if recorder is not None:
+        recorder.close()
     for cli in clients:
         if cli is not None:
             try:

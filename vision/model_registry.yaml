@@ -29,6 +29,9 @@
 
 #: 비전 프로세스 하나의 기본 GPU 메모리 (torch · CUDA 컨텍스트)
 base_gpu_mb: 400
+#: torch 예약량에 잡히지 않는 CUDA 컨텍스트 몫 (MB). WSL 의 nvidia-smi 는 프로세스별 GPU 메모리를 [N/A] 로 내서
+#: 실측 GPU 사용량 = torch 예약 최대치 + 이 값 으로 센다. 2026-11-24 RTX 4050 실측: 기기 증가분 469 − torch 334 = 135 → 150
+gpu_context_mb: 150
 
 #: 런처의 비전 선택지 — 순서대로 런처에 보인다
 #:   kind      detect(검출) | depth(깊이)

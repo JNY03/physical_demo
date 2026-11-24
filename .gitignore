@@ -32,3 +32,6 @@ e2p/slice_angle.json
 
 # 받은 작업 묶음 (가중치 포함, 반영한 뒤에는 저장소 밖 자료)
 result_files/
+
+# 자원 기억 (ds_resources) — 기기마다 다르다
+state/
