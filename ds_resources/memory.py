@@ -39,6 +39,20 @@ def res_bucket(w, h):
     return "xl"
 
 
+def cfg_hash(registry_path, cfg, models):
+    """모델 조합 사용량의 설정 해시 — 레지스트리 파일 + 그 모델들의 설정(vision_config models.<모델>).
+    기록하는 쪽(vision_infer 보고)과 배치하는 쪽(오케스트레이터)이 **이 함수 하나**를 쓴다 — 열쇠가 어긋나지 않게."""
+    import hashlib
+    h = hashlib.sha1()
+    try:
+        h.update(Path(registry_path).read_bytes())
+    except OSError:
+        pass
+    h.update(json.dumps({m: (cfg.get("models") or {}).get(m) for m in sorted(models)},
+                        sort_keys=True, default=str).encode())
+    return h.hexdigest()[:10]
+
+
 def combo_key(kind, models, cfg_hash, device_class, bucket=None):
     parts = [kind, "+".join(sorted(models)), str(cfg_hash), str(device_class)]
     if kind == "cost":

@@ -11,17 +11,18 @@ def S(cpu=10.0, mem=20.0, ready=True, **kw):
 
 # ---------------------------------------------------------------- 계약
 def test_orch_record_fields_are_strings():
-    r = st.orch_record("fallback", "run1", mode="local", basis="saved", reason="k3s 안 됨",
-                       request={"robots": ["ep-001"], "models": ["yoloe"]}, plan={"units": []}, t=0)
+    r = st.orch_record("fallback", "req1", mode="local", basis="saved", reason="k3s 안 됨",
+                       request={"robots": ["ep-001"], "models": ["yoloe"]}, plan={"units": []}, t=0, execution_id="ex1")
     assert r["schema"] == "orch/1" and r["event"] == "fallback" and r["mode"] == "local" and r["basis"] == "saved"
+    assert r["request_id"] == "req1" and r["execution_id"] == "ex1" and len(r["event_id"]) == 32
     assert json.loads(r["request"]) == {"models": ["yoloe"], "robots": ["ep-001"]}
     assert all(isinstance(v, str) for v in r.values())
     assert r["ts"].endswith("+09:00")
 
 
-@pytest.mark.parametrize("kw", [dict(event="nope", run_id="r"), dict(event="planned", run_id=""),
-                                dict(event="planned", run_id="r", mode="docker"),
-                                dict(event="planned", run_id="r", basis="guess")])
+@pytest.mark.parametrize("kw", [dict(event="nope", request_id="r"), dict(event="planned", request_id=""),
+                                dict(event="planned", request_id="r", mode="docker"),
+                                dict(event="planned", request_id="r", basis="guess")])
 def test_orch_record_rejects(kw):
     with pytest.raises(ValueError):
         st.orch_record(**kw)
@@ -33,6 +34,16 @@ def test_node_record_baseline_only_when_relevant():
     assert "baseline" not in st.node_record("pi1", "usage", s)
     with pytest.raises(ValueError):
         st.node_record("pi1", "moved", s)
+
+
+def test_latest_by_execution_dedupes_and_rebuilds():
+    a = st.orch_record("applied", "q", execution_id="e1", event_id="1")
+    b = st.orch_record("running", "q", execution_id="e1", event_id="2")
+    c = st.orch_record("planned", "q2", event_id="3")
+    last = st.latest_by_execution([a, b, b, a, c])                     # 겹친 기록 — 같은 event_id 는 처음 것만 센다
+    assert last["e1"]["event"] == "running"                            # 늦게 다시 온 a(applied)가 running 을 덮지 않는다
+    last = st.latest_by_execution([a, b, c])
+    assert last["e1"]["event"] == "running" and last["request:q2"]["event"] == "planned"
 
 
 # ---------------------------------------------------------------- 기록 억제

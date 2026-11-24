@@ -4119,16 +4119,11 @@ TELEMETRY_TTL_S = 60
 
 
 def telemetry_cfg_hash(cfg, models):
-    """설정 해시 — 레지스트리 파일 + 이 프로세스 모델들의 설정. 바뀌면 기억한 사용량을 새로 잰다."""
-    import hashlib
-    h = hashlib.sha1()
-    try:
-        h.update((HERE / "model_registry.yaml").read_bytes())
-    except OSError:
-        pass
-    h.update(json.dumps({m: (cfg.get("models") or {}).get(m) for m in sorted(models)},
-                        sort_keys=True, default=str).encode())
-    return h.hexdigest()[:10]
+    """설정 해시 — 레지스트리 파일 + 이 프로세스 모델들의 설정. 바뀌면 기억한 사용량을 새로 잰다.
+    배치하는 쪽과 같은 함수를 쓴다(ds_resources.memory.cfg_hash)."""
+    sys.path.insert(0, str(HERE.parent))
+    from ds_resources.memory import cfg_hash
+    return cfg_hash(HERE / "model_registry.yaml", cfg, models)
 
 
 def telemetry_device_class():
@@ -4715,6 +4710,8 @@ def main():
     ap.add_argument("--list", action="store_true", help="기기·실행 폴더·프레임 수만 보여 주고 끝낸다")
     g = ap.add_argument_group("지정 클래스 탐지 · 오버레이 (탐지대상_런처_계획_261123.md)")
     g.add_argument("--profile", metavar="파일", help="프로필 JSON (런처가 만든다). live 에서는 바뀌면 바로 반영")
+    ap.add_argument("--max-fps", nargs="+", metavar="기기=fps",
+                    help="live 기기별 처리 상한 (config live.max_fps 를 덮는다). 오케스트레이터 배치표의 fps 상한")
     g.add_argument("--target", action="append", metavar="대상",
                    help="지정 클래스 대상. 여러 번. 예) door · 'traffic cone:size=300x300x700:colour=orange'")
     g.add_argument("--cues", metavar="근거", help="--target 들의 근거. default · default,aspect=off · class,semantic")
@@ -4733,6 +4730,15 @@ def main():
         print(json.dumps(cc.catalog(load_config(args.config)), ensure_ascii=False))
         return 0
     cfg = load_config(args.config)
+    if args.max_fps:                                       # 배치표 fps 상한 (2026-11-24)
+        mf = {}
+        for item in args.max_fps:
+            dv, _, v = item.partition("=")
+            try:
+                mf[dv.strip()] = float(v)
+            except ValueError:
+                raise SystemExit("--max-fps 는 기기=fps 꼴: %r" % item)
+        cfg.setdefault("live", {})["max_fps"] = mf
     data_root = Path(args.data_root).expanduser().resolve() if args.data_root else cfg["data_root"]
     defaults = cfg.get("defaults", {}) or {}
     devices = normalize(args.devices or defaults.get("devices", list(DEVICES)), DEVICES, DEVICE_ALIASES, "기기")

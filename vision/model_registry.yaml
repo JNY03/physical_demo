@@ -35,6 +35,8 @@ gpu_context_mb: 150
 
 #: 런처의 비전 선택지 — 순서대로 런처에 보인다
 #:   kind      detect(검출) | depth(깊이)
+#:   p90_ms    실측이 없을 때 배치에 쓰는 한 장 처리 시간 p90 (ms), 해상도 구간 s ≤640 · m ≤1280 · l ≤1920 · xl.
+#:             기기_모델_자원표 5장 실측 p90 (2026-11-24, RTX 4050). 잰 적 없는 칸은 옆 칸에서 크게 어림했다
 #:   gpu_mb    프로세스에 더해지는 어림값. targeted 는 고른 단서의 모델 합(cues.*.needs)으로 따로 센다
 #:   cue_models  쓰는 단서 유형 → 그 단서가 쓰는 모델 키. targeted 는 cues 구역 전체가 그 목록이다
 options:
@@ -42,12 +44,14 @@ options:
     shown: yoloe
     kind: detect
     gpu_mb: 900
+    p90_ms: {s: 110, m: 135, l: 140, xl: 510}
     cue_models:
       class: [yoloe_pf_l]
   river:
     shown: river
     kind: detect
     gpu_mb: 2400
+    p90_ms: {s: 1230, m: 1210, l: 1590, xl: 1610}
     cue_models:                         # 판정 무게는 vision/assets/hazard_cues.json decision.weights
       class: [yoloe_text, yoloe_free]   # 텍스트 arm + prompt-free arm
       semantic: [clip_fp32]             # CLIP 글 설명
@@ -60,17 +64,20 @@ options:
     shown: 지정 클래스 탐지
     kind: detect
     gpu_mb: 0
+    p90_ms: {s: 420, m: 650, l: 900, xl: 1300}      # l · xl 은 잰 적 없음 (m 에서 어림)
     cue_models: targeted                # = 아래 cues 구역 (needs 가 모델 키)
   unidepth:
     shown: unidepth
     kind: depth
     gpu_mb: 1500
+    p90_ms: {s: 370, m: 400, l: 390, xl: 650}
     cue_models:
       distance: [unidepth_l]
   moge2_aerial:
     shown: moge2_aerial
     kind: depth
     gpu_mb: 1500
+    p90_ms: {s: 490, m: 480, l: 500, xl: 500}       # l 은 잰 적 없음
     cue_models:
       distance: [moge2_aerial]
 

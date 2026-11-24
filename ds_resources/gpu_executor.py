@@ -128,6 +128,8 @@ class GpuExecutor:
                "--models", *unit["models"]]
         if unit.get("profile_path"):
             cmd += ["--profile", unit["profile_path"]]
+        if unit.get("fps_cap"):                             # 배치표의 기기별 fps 상한을 실제로 건다
+            cmd += ["--max-fps", *["%s=%g" % (d, f) for d, f in sorted(unit["fps_cap"].items())]]
         return cmd
 
     def launch(self, unit, need_mb, calc=None):

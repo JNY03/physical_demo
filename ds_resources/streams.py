@@ -3,8 +3,12 @@
 가시화에 직접 보내지 않는다 — Redis 스트림을 만들기만 하고 가시화는 읽기만 한다.
 
 orchestration_stream  (schema "orch/1")  비전 처리 오케스트레이션 선택 과정의 단계마다 한 건
-    event    requested · cluster_checked · planned · applied · degraded · fallback · replanned · failed
-    run_id   한 번의 선택 과정(런처에서 실행을 누른 한 번)을 묶는 ID
+    event    requested · cluster_checked · planned · applied · running · stopped
+             (사이에 degraded · fallback · replanned · failed)
+             applied = 띄웠다, running = 프로세스가 살아 있고 처리한 장이 있으며 입력 영상이 최근 것이다
+    event_id     기록 한 건마다 고유 — 읽는 쪽은 이것으로 겹친 기록을 거른다
+    request_id   런처에서 한 번 요청한 것
+    execution_id 그 요청을 실제로 띄운 한 번 (다시 배치하면 새로) — 마지막 상태는 이것별로 다시 만든다
     mode     k3s | local          (정해지기 전이면 빈 칸)
     basis    live | saved         (자원 정보가 지금 잰 것인지, 기억해 둔 것인지)
     reason   사람이 읽는 한 줄     request · plan · detail  JSON
@@ -17,13 +21,15 @@ node_resource_stream  (schema "node/1")  노드가 추가 · 제거될 때와 �
 """
 import json
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 ORCH_STREAM = "orchestration_stream"
 NODE_STREAM = "node_resource_stream"
 ORCH_SCHEMA = "orch/1"
 NODE_SCHEMA = "node/1"
-ORCH_EVENTS = ("requested", "cluster_checked", "planned", "applied", "degraded", "fallback", "replanned", "failed")
+ORCH_EVENTS = ("requested", "cluster_checked", "planned", "applied", "running", "stopped",
+               "degraded", "fallback", "replanned", "failed")
 MODES = ("k3s", "local")
 BASES = ("live", "saved")
 NODE_CHANGES = ("added", "removed", "ready", "not_ready", "baseline", "usage")
@@ -42,7 +48,8 @@ def _num(v):
     return "" if v is None else ("%.1f" % v if isinstance(v, float) else str(v))
 
 
-def orch_record(event, run_id, mode=None, basis=None, reason="", request=None, plan=None, detail=None, t=None):
+def orch_record(event, request_id, mode=None, basis=None, reason="", request=None, plan=None, detail=None, t=None,
+                execution_id=None, event_id=None):
     """orchestration_stream 한 건 (Redis 칸 = 글자). 틀린 값은 ValueError."""
     if event not in ORCH_EVENTS:
         raise ValueError("모르는 event %r (가능: %s)" % (event, ", ".join(ORCH_EVENTS)))
@@ -50,9 +57,10 @@ def orch_record(event, run_id, mode=None, basis=None, reason="", request=None, p
         raise ValueError("모르는 mode %r" % mode)
     if basis not in (None,) + BASES:
         raise ValueError("모르는 basis %r" % basis)
-    if not run_id:
-        raise ValueError("run_id 가 없다")
-    rec = {"schema": ORCH_SCHEMA, "event": event, "run_id": str(run_id), "mode": mode or "", "basis": basis or "",
+    if not request_id:
+        raise ValueError("request_id 가 없다")
+    rec = {"schema": ORCH_SCHEMA, "event_id": event_id or uuid.uuid4().hex, "event": event,
+           "request_id": str(request_id), "execution_id": str(execution_id or ""), "mode": mode or "", "basis": basis or "",
            "reason": str(reason or ""), "ts": iso_now(t)}
     if request is not None:
         rec["request"] = _j(request)
@@ -75,6 +83,20 @@ def node_record(node, change, sample, t=None):
     if change in ("added", "baseline") and s.get("baseline") is not None:
         rec["baseline"] = _j(s["baseline"])
     return rec
+
+
+def latest_by_execution(entries):
+    """읽는 쪽 도우미 — 스트림 항목(사전)들에서 event_id 로 겹친 것을 거르고 execution_id 별 마지막 기록을 낸다.
+    소비자가 다시 시작해도 처음부터 다시 읽으면 같은 결과가 나온다."""
+    seen, last = set(), {}
+    for e in entries:
+        eid = e.get("event_id")
+        if not eid or eid in seen:
+            continue
+        seen.add(eid)
+        key = e.get("execution_id") or ("request:" + str(e.get("request_id")))
+        last[key] = e
+    return last
 
 
 class NodeChangeFilter:

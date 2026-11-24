@@ -14,6 +14,7 @@ CPU 작업  role 이 허용된 · ready · stale 아닌 노드. 쓸 수 있는 �
 """
 import hashlib
 import json
+import math
 
 ALGORITHM = "placement/1"
 SPARE_MB = 300.0
@@ -71,9 +72,10 @@ def place_gpu(request, nodes, costs, out):
     degraded = []
     if load(fps) > budget:
         scale = budget / load(fps) if load(fps) else 0
-        fps = {s: max(FPS_FLOOR, round(fps[s] * scale, 2)) for s in fps}
+        # 내림 — 반올림하면 6.296 → 6.30 처럼 올라가 부하가 예산을 살짝 넘고 소스가 통째로 빠진다(2026-11-24 실측 버그)
+        fps = {s: max(FPS_FLOOR, math.floor(fps[s] * scale * 100) / 100.0) for s in fps}
         degraded = sorted(fps)
-    while fps and load(fps) > budget:
+    while fps and load(fps) > budget + 1e-9:
         drop = sorted(fps)[-1]
         out["refused"].append({"item": "gpu:%s:%s" % ("+".join(models), drop),
                                "reason": "GPU 처리량 부족: fps %.1f 까지 낮춰도 p90 합이 예산 %.2f 를 넘음" % (FPS_FLOOR, budget)})

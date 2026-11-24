@@ -57,6 +57,15 @@ def test_throughput_full_scales_fps_by_p90_then_refuses():
     assert out["gpu_units"][0]["sources"] == ["a2"]
 
 
+def test_scaling_never_rounds_over_budget():
+    # 실측 버그: pi13 60 fps × p90 135 ms → 비율 0.1049… → 6.296 이 6.30 으로 올라가 0.8505 > 0.85 로 소스가 빠졌다
+    costs = {"yoloe": {"need_mb": 1560, "p90_ms": {"pi13": 135.0}}}
+    for f in (60.0, 10.0, 7.0, 33.3):
+        out = pl.plan(req(G(["yoloe"], ["pi13"], {"pi13": f})), {"nodes": [gpu_node()], "costs": costs}, "h", "wsl")
+        assert not out["refused"], f
+        assert out["gpu_units"][0]["gpu_util"] <= pl.GPU_BUDGET
+
+
 def test_memory_full_refuses_with_reason_and_counts_earlier_units():
     out = pl.plan(req(G(["yoloe"], ["pi13"]), G(["river"], ["a2"])),
                   {"nodes": [gpu_node(used=1500)], "costs": COSTS}, "h", "wsl")
