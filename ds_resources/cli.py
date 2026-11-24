@@ -30,6 +30,8 @@ from ds_resources.recorder import load_source  # noqa: E402
 from ds_resources.state import StateFile  # noqa: E402
 
 STATE = REPO / "state" / "orchestrator_state.json"
+RETRY_GPU = 6                 # run: GPU 메모리 부족으로 하나도 못 띄웠으면 이만큼 다시 요청 (앞 프로세스가 반납 중일 수 있다)
+RETRY_GAP_S = 5
 MEMORY = REPO / "state" / "resource_memory.json"
 
 
@@ -144,27 +146,40 @@ def main(argv=None):
         stop["flag"] = True
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
+    def nothing_running(rid):
+        return not k.ex.active_units() and not any(
+            u.get("kind") == "cpu" and u.get("status") in ("starting", "running") for u in k.state.units().values()) \
+            and not any(u.get("status") == "local" for u in k.state.units().values() if u.get("request_id") == rid)
+
     rid = k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks)
+    for attempt in range(RETRY_GPU):                    # 바로 앞 프로세스가 GPU 메모리를 아직 반납하는 중일 수 있다
+        req = k.state.data["requests"].get(rid) or {}
+        refused = [x["reason"] for x in (req.get("plan") or {}).get("refused", [])]
+        if stop["flag"] or not nothing_running(rid) or not any("GPU 메모리" in x for x in refused):
+            break
+        log("GPU 메모리 부족 — %d초 뒤 다시 요청 (%d/%d)" % (RETRY_GAP_S, attempt + 1, RETRY_GPU))
+        time.sleep(RETRY_GAP_S)
+        rid = k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks)
     req = k.state.data["requests"].get(rid) or {}
     log("요청 %s — %s" % (rid, (req.get("mode") or "")))
     print(brief({"plan": req.get("plan") or {}, "mode": req.get("mode"), "basis": "live" if req.get("mode") == "k3s"
                  else "saved", "ok": req.get("mode") == "k3s", "why": ""}) if req.get("plan") else "", flush=True)
+    code = 0
     try:
         while not stop["flag"]:
             for e in k.poll():
                 log("%-9s %s" % (e["event"], e["reason"]))
-            if not k.ex.active_units() and not any(u.get("kind") == "cpu" and u.get("status") in ("starting", "running")
-                                                   for u in k.state.units().values()):
-                if not any(u.get("status") == "local" for u in k.state.units().values()
-                           if u.get("request_id") == rid):
-                    log("돌고 있는 작업이 없어 끝냄")
-                    break
+            if nothing_running(rid):
+                why = [x["reason"] for x in ((k.state.data["requests"].get(rid) or {}).get("plan") or {}).get("refused", [])]
+                log("돌고 있는 작업이 없어 끝냄%s" % ((" — " + " / ".join(why)) if why else ""))
+                code = 2
+                break
             time.sleep(a.poll)
     finally:
         k.stop(rid, "오케스트레이터 끝남")
         k.flush_outbox()
         log("끝 — %s" % rid)
-    return 0
+    return code                                         # 0 이 아니면 ds_run 창이 닫히지 않고 이유를 보여 준다
 
 
 if __name__ == "__main__":

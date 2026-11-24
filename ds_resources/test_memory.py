@@ -157,6 +157,13 @@ def test_process_gpu_prefers_process_value():
     assert process_gpu_mb({}) == (None, None)
 
 
+class FixedUsage:
+    """실제 기기 부하를 읽지 않는다 — 부하가 80% 를 넘는 순간 주기가 5초(hot)가 되어 시험이 흔들렸다(2026-11-24)"""
+
+    def sample(self, with_gpu=True):
+        return {"cpu_pct": 20.0, "mem_pct": 40.0, "mem_mb": 6000.0, "temp_c": None, "gpu": []}
+
+
 class FakeRedis:
     def __init__(self, kv):
         self.kv, self.rows = kv, []
@@ -180,7 +187,7 @@ def test_recorder_tick_records_once_per_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(probe, "gpus", lambda timeout=2: [])
     r = FakeRedis({"vision_telemetry:h:1": json.dumps(TEL)})
     rec = LocalRecorder(r, mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None, bench=False)
-    rec.usage.sample()
+    rec.usage = FixedUsage()
     wait = rec.tick()
     assert wait == 10                                                   # 비전이 돌고 있다 → 배치 중 주기
     assert [x[1]["change"] for x in r.rows if x[0] == NODE_STREAM] == ["added"]
@@ -234,7 +241,7 @@ def test_recorder_node_source_lifecycle(tmp_path, monkeypatch):
                         node_sources=["fake_src_mod:FakeSource"])
     src = rec.sources[0]
     src.rows = [("pi7", dict(S7(), source_name="robot1"))]
-    rec.usage.sample()
+    rec.usage = FixedUsage()
     rec.tick()
     assert rec.mem.node("pi7")["usage"]["mode"] == "idle"                # 영상 없음 → 로봇 서비스 쉼
     changes = [(x[1]["node"], x[1]["change"]) for x in r.rows]
@@ -282,7 +289,7 @@ def test_robot_becomes_active_when_its_video_arrives(tmp_path, monkeypatch):
     rec = LocalRecorder(r, mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None, bench=False,
                         node_sources=["fake_src_mod2:FakeSource"])
     rec.sources[0].rows = [("pi7", dict(S7(), source_name="robot1"))]
-    rec.usage.sample()
+    rec.usage = FixedUsage()
     assert rec.tick() == 60                                              # 영상 없음 — 쉼 주기
     r.last = int(_t.time() * 1000)                                       # 로봇 영상이 들어온다
     assert rec.tick() == 10                                              # 바로 배치 중 주기로

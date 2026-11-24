@@ -35,6 +35,8 @@ REPO = Path(__file__).resolve().parent.parent
 MARGIN = 1.2
 SPARE_MB = 300.0
 LOAD_TIMEOUT_S = 180.0
+STOP_WAITS = (6.0, 2.0, 1.0)  # 멈춤: SIGINT 뒤 6초 · SIGTERM 뒤 2초 · SIGKILL 뒤 1초 기다린다 — GPU 메모리를 돌려받은 뒤 돌아간다
+                              # (기다리지 않으면 바로 다음 요청이 아직 반납 전 메모리를 보고 거절됐다, 2026-11-24 런처 E2E)
 MAX_RESTARTS = 2
 TELEMETRY_PREFIX = "vision_telemetry:"
 
@@ -154,7 +156,7 @@ class GpuExecutor:
     def _alive(self, uid, pid):
         p = self.procs.get(uid)
         if p is not None:
-            return p.poll() is None
+            return p.poll() is None                         # 이 프로세스가 띄운 것 — 좀비까지 거둔다
         try:
             os.kill(pid, 0)
             return True
@@ -207,10 +209,17 @@ class GpuExecutor:
         u = self.state.units().get(uid)
         if not u:
             return False
-        try:
-            os.killpg(u["pid"], signal.SIGINT)              # vision_infer 는 SIGINT 에 지금 장까지 저장하고 끝낸다
-        except OSError:
-            pass
+        pid = u["pid"]
+        for sig, wait in zip((signal.SIGINT, signal.SIGTERM, signal.SIGKILL), STOP_WAITS):
+            try:
+                os.killpg(pid, sig)                         # vision_infer 는 SIGINT 에 지금 장까지 저장하고 끝낸다
+            except OSError:
+                break                                       # 이미 없다
+            t0 = time.time()
+            while time.time() - t0 < wait and self._alive(uid, pid):
+                time.sleep(0.1)
+            if not self._alive(uid, pid):
+                break
         self.state.update_unit(uid, status=status, reason=reason, ended_at=self.clock())
         self.procs.pop(uid, None)
         return True

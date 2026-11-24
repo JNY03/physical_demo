@@ -836,6 +836,9 @@ function Self-Test {
     $visOn.Checked = $true
     foreach ($m in $Models) { $modelChecks[$m].Checked = ($m -eq "targeted" -or $m -eq "yoloe") }
     $r.target_tab_enabled = $tTarget.Controls[0].Enabled
+    # 사용자 설정에 기대지 않는다 — 아래 단계가 쓰는 대상을 직접 켠다 (저장된 대상이 person · chair 뿐이면 door 근거
+    # 컨트롤이 없어 시험이 깨졌다, 2026-11-24)
+    foreach ($n in @("person", "door", "chair", "desk")) { if ($script:TargetChecks[$n]) { $script:TargetChecks[$n].Checked = $true } }
     Add-Direct "traffic cone"
     $d = Get-Direct "traffic cone"; $d.size = "300x300x700"; $d.colour = "orange"; Build-CueBoxes
     $script:TargetChecks["desk"].Checked = $false
@@ -873,7 +876,14 @@ function Self-Test {
 }
 # 끝에서 끝까지(창을 실제로 띄운다): 실행 → 실행 중 거리 끄기 → 전부 끄기. 결과를 한 줄씩 찍는다
 function E2E-Test {
-    foreach ($n in $Sources) { $srcChecks[$n].Checked = ($n -eq "robot1") }
+    # 소스: DS_E2E_SOURCE (기본 pi13 — 영상이 오는 소스여야 비전 결과까지 본다), 자원 배분: DS_E2E_ORCH (기본 켬, 0 이면 끔)
+    $src = if ($env:DS_E2E_SOURCE) { $env:DS_E2E_SOURCE } else { "pi13" }
+    # 시험이 사용자 설정 · 프로필을 덮어쓰지 않게 — 끝나면 되돌린다 (Start-All 이 Save-Settings 를 부른다, 2026-11-24)
+    $keep = @{}
+    foreach ($f in @($SettingsFile, $ProfileFile)) { if (Test-Path $f) { $keep[$f] = [System.IO.File]::ReadAllBytes($f) } }
+    $orchOn.Checked = ($env:DS_E2E_ORCH -ne "0")
+    "source=$src orchestrate=" + $orchOn.Checked
+    foreach ($n in $Sources) { $srcChecks[$n].Checked = ($n -eq $src) }
     $sliceOn.Checked = $false
     $visOn.Checked = $true
     foreach ($m in $Models) { $modelChecks[$m].Checked = ($m -eq "targeted") }
@@ -883,6 +893,7 @@ function E2E-Test {
     "started: " + ((Running-Names) -join ",")
     Start-Sleep -Seconds 45
     "after 45s: " + ((Running-Names) -join ",")
+    if ($orchOn.Checked) { "orchestrator: " + (Invoke-Wsl @("./venv/bin/python", "-m", "ds_resources.cli", "status")) }
     $distOn.Checked = $false
     Apply-Changes
     "applied distance off; status=" + $status.Text
@@ -894,9 +905,13 @@ function E2E-Test {
     Apply-Changes
     Start-Sleep -Seconds 5
     "after adding yoloe (vision restarted): " + ((Running-Names) -join ",")
+    Start-Sleep -Seconds 40
+    if ($orchOn.Checked) { "orchestrator after restart: " + (Invoke-Wsl @("./venv/bin/python", "-m", "ds_resources.cli", "status")) }
     Stop-Windows (@(Vision-Names) + @("ds_slice", "ds_server"))
     Start-Sleep -Seconds 2
     "after stop: [" + ((Running-Names) -join ",") + "]"
+    foreach ($f in $keep.Keys) { [System.IO.File]::WriteAllBytes($f, $keep[$f]) }
+    "settings restored: " + ($keep.Keys.Count)
 }
 if ($env:DS_LAUNCHER_SELFTEST) { Self-Test; exit 0 }
 if ($env:DS_LAUNCHER_E2E) { E2E-Test; exit 0 }
