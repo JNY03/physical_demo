@@ -21,7 +21,7 @@ jq_py() { python3 -c "import json,sys; d=json.load(open('$NODES')); $1" "${@:2}"
 VERSION="$(jq_py 'print(d["k3s_version"])')"
 TS_IP="$(tailscale ip -4 | head -1)"
 URL="https://$TS_IP:6443"
-mapfile -t ALL < <(jq_py 'print("\n".join("%s %s %d" % (a["name"], a["role"], a["role"] in d["taint_roles"]) for a in d["agents"]))')
+mapfile -t ALL < <(jq_py 'print("\n".join("%s %s %d %s" % (a["name"], a["role"], a["role"] in d["taint_roles"], a.get("source", "-")) for a in d["agents"]))')
 want=("$@")
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -50,7 +50,7 @@ wait_ssh() {  # 재부팅 뒤 다시 붙을 때까지 (최대 240초)
 }
 
 for line in "${ALL[@]}"; do
-    read -r name role taint <<<"$line"
+    read -r name role taint source <<<"$line"
     if [ ${#want[@]} -gt 0 ] && [[ ! " ${want[*]} " =~ " $name " ]]; then continue; fi
     if ! scp -q -o BatchMode=yes -o ConnectTimeout=10 "$HERE/pi_node.sh" "$PI_USER@$name:/tmp/pi_node.sh"; then
         log "$name: SSH 안 됨 — 건너뜀"; continue
@@ -79,6 +79,8 @@ for line in "${ALL[@]}"; do
             STDIN_EXTRA="$(cat "$TOKEN_FILE")" rsudo "$name" join "$VERSION" "$URL" "$name" "$ip" "$role" "$taint" | sed "s/^/  $name: /"
         fi
         kubectl label node "$name" "ds.role=$role" --overwrite >/dev/null 2>&1 || true
+        # ds.source — 이 노드에 붙은 data_stream 소스. 자원 기록기가 로봇 서비스가 실제로 도는지(그 소스 영상이 오는지) 가른다
+        [ "$source" != "-" ] && kubectl label node "$name" "ds.source=$source" --overwrite >/dev/null 2>&1 || true
         if [ "$taint" = 1 ]; then kubectl taint node "$name" "ds.role=$role:NoSchedule" --overwrite >/dev/null 2>&1 || true; fi
     fi
 done

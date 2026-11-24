@@ -13,7 +13,9 @@ GPU 는 k3s 스케줄링 자원이 아니다. k3s 는 WSL GPU 의 실제 사용�
               실행 직전에 다시 잰다(기억한 값만으로 들이지 않는다).
 예약         띄우면 starting 으로 적는다. 그 프로세스의 vision_telemetry 가 처리한 장과 함께 나오면 loaded —
               그때부터는 기기 사용량에 이미 들어 있으므로 여유 계산에서 빼지 않는다(두 번 세지 않게).
-              LOAD_TIMEOUT_S 안에 loaded 가 안 되면 failed.
+              loaded = 그 프로세스의 비전 보고가 나왔다(모델 적재가 끝나 루프가 돈다) — 처리한 장이 0 이어도 된다.
+              영상이 아직 안 오는 소스(로봇이 꺼짐)는 실패가 아니라 입력 대기다 — running 판정은 컨트롤러 몫.
+              LOAD_TIMEOUT_S 안에 보고가 없으면 failed (모델 적재 실패).
 감시         프로세스가 죽으면 MAX_RESTARTS 번까지 WSL 안에서 다시 띄운다. 넘으면 멈춤(stopped, 이유).
               GPU 작업은 다른 노드(파이)로 옮기지 않는다.
 """
@@ -193,12 +195,11 @@ class GpuExecutor:
                 continue
             if u["status"] == "starting":
                 tel = self._telemetry(u["pid"])
-                frames = sum(int(s.get("frames") or 0) for s in ((tel or {}).get("streams") or {}).values())
-                if tel and frames > 0:
+                if tel:
                     self.state.update_unit(uid, status="loaded", loaded_at=now)
                     changes.append((uid, "loaded"))
                 elif now - u["started_at"] > LOAD_TIMEOUT_S:
-                    self.stop(uid, "적재 · 영상 확인 %d초 넘음 (처리한 장 없음)" % LOAD_TIMEOUT_S, status="failed")
+                    self.stop(uid, "%d초 안에 비전 보고 없음 (모델 적재 실패)" % LOAD_TIMEOUT_S, status="failed")
                     changes.append((uid, "failed"))
         return changes
 

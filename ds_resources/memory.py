@@ -170,29 +170,44 @@ class ResourceMemory:
             self.dirty = True
 
     # ------------------------------------------------------------ 로봇 서비스 몫 (사용량 p95)
-    def update_usage(self, name, cpu_pct, mem_mb):
+    def update_usage(self, name, cpu_pct, mem_mb, mode=None):
+        """사용량 표본. mode: active(로봇 서비스가 실제로 돎 — 그 노드 소스의 영상이 온다) | idle | None(가르지 않음).
+        로봇 노드의 배치 몫은 active p95 로 정한다 — 쉴 때 잰 p95 는 로봇이 돌기 시작하면 맞지 않는다."""
         with self.lock:
-            q = self.usage.setdefault(name, deque(maxlen=USAGE_WINDOW))
-            q.append((float(cpu_pct or 0.0), float(mem_mb or 0.0)))
             n = self.data["nodes"].setdefault(name, {})
             u = n.setdefault("usage", {})
-            for key, val in (("cpu_ewma", cpu_pct), ("mem_ewma_mb", mem_mb)):
-                if val is not None:
-                    u[key] = val if key not in u else (1 - EWMA) * u[key] + EWMA * float(val)
-            if len(q) >= 10:                              # 표본이 조금은 있어야 p95 가 뜻이 있다
-                u["cpu_p95"] = _p95([c for c, _ in q])
-                u["mem_p95_mb"] = _p95([m for _, m in q])
-            u["samples"] = int(u.get("samples", 0)) + 1
-            u["updated_at"] = self.clock()
+            targets = [(name, u)]
+            if mode in ("active", "idle"):
+                targets.append(((name, mode), u.setdefault(mode, {})))
+                u["mode"], u["mode_since"] = (mode, self.clock()) if u.get("mode") != mode else (mode, u.get("mode_since"))
+            for qkey, dst in targets:
+                q = self.usage.setdefault(qkey, deque(maxlen=USAGE_WINDOW))
+                q.append((float(cpu_pct or 0.0), float(mem_mb or 0.0)))
+                for key, val in (("cpu_ewma", cpu_pct), ("mem_ewma_mb", mem_mb)):
+                    if val is not None:
+                        dst[key] = val if key not in dst else (1 - EWMA) * dst[key] + EWMA * float(val)
+                if len(q) >= 10:                          # 표본이 조금은 있어야 p95 가 뜻이 있다
+                    dst["cpu_p95"] = _p95([c for c, _ in q])
+                    dst["mem_p95_mb"] = _p95([m for _, m in q])
+                dst["samples"] = int(dst.get("samples", 0)) + 1
+                dst["updated_at"] = self.clock()
             self.dirty = True
 
     def service_share(self, name):
-        """배치가 그 노드에서 뺄 몫 (cpu_pct, mem_mb) — p95 가 없으면 지수 이동 평균, 그것도 없으면 None"""
+        """배치가 그 노드에서 뺄 몫 {cpu_pct, mem_mb, active_measured, mode} 또는 None.
+        active p95 가 있으면 그것(active_measured=True), 없으면 전체 p95 · EWMA (active_measured=False)."""
+        self.refresh()
         with self.lock:
             u = (self.data["nodes"].get(name) or {}).get("usage") or {}
+            a = u.get("active") or {}
+            if a.get("cpu_p95") is not None:
+                return {"cpu_pct": a["cpu_p95"], "mem_mb": a.get("mem_p95_mb"), "active_measured": True,
+                        "mode": u.get("mode")}
             cpu = u.get("cpu_p95", u.get("cpu_ewma"))
             mem = u.get("mem_p95_mb", u.get("mem_ewma_mb"))
-            return (cpu, mem) if cpu is not None or mem is not None else None
+            if cpu is None and mem is None:
+                return None
+            return {"cpu_pct": cpu, "mem_mb": mem, "active_measured": False, "mode": u.get("mode")}
 
     # ------------------------------------------------------------ 모델 조합
     def combo(self, key, estimate=None):

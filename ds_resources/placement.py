@@ -22,6 +22,10 @@ GPU_BUDGET = 0.85
 FPS_FLOOR = 1.0
 CPU_HEADROOM = 0.20
 LIMIT_FACTOR = 2.0
+#: 로봇 서비스가 실제로 돌 때의 부하를 아직 못 잰 로봇 노드 — 그 몫을 모르니 이만큼 비워 둔다(CPU · 메모리 비율).
+#: 로봇이 돌기 시작하면 기록기가 active p95 를 바로 재기 시작하고, 표본 10개 뒤부터는 실측으로 바뀐다
+ROBOT_UNMEASURED_CPU = 0.5
+ROBOT_UNMEASURED_MEM = 0.3
 RELAY_PENALTY = 0.5
 PRIORITY_CLASS = "ds-vision-low"
 
@@ -99,6 +103,9 @@ def _cpu_room(n):
     share = n.get("service") or {}
     used_cpu = max(float(share.get("cpu_p95_m") or 0), float(n.get("cpu_now_m") or 0))
     used_mem = max(float(share.get("mem_p95_mb") or 0), float(n.get("mem_now_mb") or 0))
+    if n.get("role") == "robot" and share.get("active_measured") is False:
+        used_cpu = max(used_cpu, alloc_cpu * ROBOT_UNMEASURED_CPU)
+        used_mem = max(used_mem, alloc_mem * ROBOT_UNMEASURED_MEM)
     return alloc_cpu - used_cpu - alloc_cpu * CPU_HEADROOM, alloc_mem - used_mem - alloc_mem * CPU_HEADROOM
 
 

@@ -23,6 +23,9 @@ from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "vision" / "model_registry.yaml"
 INPUT_FRESH_S = 5.0
+INPUT_DOWN_S = 15.0                   # 처리하던 소스 영상이 이만큼 끊기면 입력 끊김(degraded) — 들어오면 바로 다시
+WAIT_FPS = 10.0                       # 입력 대기 소스의 예산을 미리 잡을 fps (target_fps 가 이긴다)
+WAIT_RES = (1920, 1080)               # 입력 대기 소스의 해상도를 모를 때 (보수적으로 큰 쪽)
 COMBO_STALE_S = 7 * 86400.0
 DEGRADED_RATIO = 0.8
 DEGRADED_AFTER_S = 30.0
@@ -168,11 +171,15 @@ class Controller:
             except Exception as e:  # noqa: BLE001
                 ok, why = False, "k3s 확인 실패: %s" % e
         mode, basis = ("k3s", "live") if ok else ("local", "saved")
-        infos, missing = {}, []
+        infos, waiting = {}, []
         for s in sorted(sources):
             info = source_info(self.r, s, int(self.clock() * 1000))
             if info is None or info["age_s"] > INPUT_FRESH_S:
-                missing.append(s)
+                # 입력 대기 — 빼지 않는다. 로봇이 켜지면 같은 프로세스가 바로 처리하도록 예산을 미리 잡는다.
+                # 해상도는 Redis 에 남은 옛 프레임에서, 없으면 보수적으로 크게
+                w, h = (info["w"], info["h"]) if info and info.get("w") else WAIT_RES
+                infos[s] = {"age_s": None, "w": w, "h": h, "fps": WAIT_FPS, "waiting": True}
+                waiting.append(s)
             else:
                 infos[s] = info
         snapshot = {"nodes": [self.local_node_snapshot()] + [n for n in nodes if n.get("name") != self.local],
@@ -188,8 +195,8 @@ class Controller:
                "cpu": specs}
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
-        for s in missing:
-            plan["refused"].append({"item": "input:%s" % s, "reason": "입력 영상 없음 또는 %d초 넘게 멈춤" % INPUT_FRESH_S})
+        plan["waiting"] = [{"item": "input:%s" % s, "reason": "입력 대기 — 영상이 들어오면 바로 처리 (예산을 미리 잡음)"}
+                           for s in waiting]
         return {"ok": ok, "why": why, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
 
     def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None):
@@ -217,7 +224,7 @@ class Controller:
         self.emit("planned", rid, mode=mode, basis=basis, plan=plan)
         xid = "exe-" + uuid.uuid4().hex[:10]
         self.state.put_request(rid, dict(request, status="planned", plan=plan, mode=mode, execution_id=xid, at=self.clock()))
-        for item in plan["degraded"]:
+        for item in plan["degraded"] + plan.get("waiting", []):
             self.emit("degraded", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item)
         for item in plan["refused"]:
             self.emit("failed", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item)
@@ -362,16 +369,33 @@ class Controller:
             tel = self.ex._telemetry(u["pid"]) or {}
             streams = tel.get("streams") or {}
             now_ms = int(now * 1000)
-            fresh = {s: (source_info(self.r, s, now_ms) or {}).get("age_s", 1e9) <= INPUT_FRESH_S for s in u["devices"]}
+            age = {s: (source_info(self.r, s, now_ms) or {}).get("age_s") for s in u["devices"]}
+            age = {s: (1e9 if a is None else a) for s, a in age.items()}
             frames = sum(int(x.get("frames") or 0) for x in streams.values())
+            prev_up = set(u.get("sources_up") or [])
+            up = {s for s, a in age.items() if a <= INPUT_FRESH_S}
             if not u.get("running_emitted"):
-                if frames > 0 and all(fresh.values()):
-                    self.state.update_unit(uid, running_emitted=True, running_at=now)
+                if frames > 0 and up:
+                    self.state.update_unit(uid, running_emitted=True, running_at=now, sources_up=sorted(up))
                     events.append(self.emit("running", rid, execution_id=xid, mode="local",
-                                            detail={"unit_id": uid, "fps": {s: x.get("fps") for s, x in streams.items()}}))
+                                            detail={"unit_id": uid, "sources_up": sorted(up),
+                                                    "waiting": sorted(set(u["devices"]) - up),
+                                                    "fps": {s: x.get("fps") for s, x in streams.items()}}))
                 continue
+            down = {s for s in prev_up if age[s] > INPUT_DOWN_S}
+            came = up - prev_up
+            for s in sorted(came):                       # 로봇이 켜졌다 — 이미 띄운 프로세스가 바로 처리한다
+                events.append(self.emit("running", rid, execution_id=xid, mode="local",
+                                        reason="입력 들어옴: %s — 처리 시작" % s, detail={"unit_id": uid, "source_up": s}))
+            for s in sorted(down):
+                events.append(self.emit("degraded", rid, execution_id=xid, mode="local",
+                                        reason="입력 끊김: %s — 들어오면 바로 다시 처리" % s,
+                                        detail={"unit_id": uid, "source_down": s}))
+            if came or down:
+                self.state.update_unit(uid, sources_up=sorted((prev_up | came) - down))
+            live = (prev_up | came) - down
             low = [s for s, cap in (u.get("fps_cap") or {}).items()
-                   if (streams.get(s) or {}).get("fps") is not None and streams[s]["fps"] < DEGRADED_RATIO * cap]
+                   if s in live and (streams.get(s) or {}).get("fps") is not None and streams[s]["fps"] < DEGRADED_RATIO * cap]
             since = u.get("low_since")
             if low and since is None:
                 self.state.update_unit(uid, low_since=now)

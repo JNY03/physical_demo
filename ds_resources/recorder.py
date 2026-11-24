@@ -16,6 +16,7 @@ from ds_resources import probe
 from ds_resources.streams import NodeChangeFilter, StreamWriter
 
 TELEMETRY_PREFIX = "vision_telemetry:"
+SOURCE_FRESH_S = 5.0          # 노드 소스의 영상이 이 안에 왔으면 그 로봇 서비스는 active
 #: torch 예약량에 잡히지 않는 CUDA 컨텍스트 몫 — vision/model_registry.yaml gpu_context_mb 가 이긴다
 GPU_CONTEXT_MB = 150.0
 
@@ -129,6 +130,20 @@ class LocalRecorder:
                 self.mem.record_combo(key, value, frames, secs)
         return active
 
+    def source_active(self, source):
+        """그 소스의 영상이 지금 오는가 (camera_stream 마지막 항목 나이) — 로봇이 켜지면 바로 active 가 된다"""
+        if not source or source == "data_stream":
+            return None
+        try:
+            last = self.r.xrevrange("camera_stream:" + source, "+", "-", count=1)
+        except Exception:  # noqa: BLE001
+            return None
+        if not last:
+            return False
+        eid = last[0][0]
+        ms = int((eid.decode() if isinstance(eid, bytes) else str(eid)).split("-")[0])
+        return time.time() - ms / 1000.0 <= SOURCE_FRESH_S
+
     def tick(self):
         self.check_baseline()
         active = self.read_telemetry()
@@ -140,7 +155,8 @@ class LocalRecorder:
                   "temp_c": u["temp_c"] if u["temp_c"] is not None else (g[0].get("temp_c") if g else None),
                   "gpu": g, "baseline": (self.mem.node(self.node) or {}).get("baseline")}
         self.writer.nodes(self.filter.observe(self.node, sample))
-        vals_extra = self.tick_sources()
+        vals_extra, robots_active = self.tick_sources()
+        active = active or robots_active
         self.mem.save()
         vals = [u["cpu_pct"], u["mem_pct"]] + [100.0 * x["mem_used_mb"] / x["mem_total_mb"]
                                                for x in g if x.get("mem_total_mb")] + vals_extra
@@ -149,7 +165,7 @@ class LocalRecorder:
     def tick_sources(self):
         """노드 원천마다: 기본 자원(처음 · 신원 변화 · recheck) · 네트워크 측정 시작 · 사용량 · 스트림 · 사라진 노드.
         기억 파일은 이 스레드만 쓴다(단일 Writer)."""
-        vals = []
+        vals, any_active = [], False
         for src in self.sources:
             try:
                 rows = src.samples()
@@ -165,8 +181,12 @@ class LocalRecorder:
                     self.mem.record_baseline(name, ident, base)
                     if first and hasattr(src, "want_net"):
                         src.want_net(name, s.get("ip"))
+                act = self.source_active(s.get("source_name"))
+                mode = None if act is None else ("active" if act else "idle")
+                s["service_mode"] = mode
+                any_active = any_active or bool(act)
                 if s.get("cpu_pct") is not None:
-                    self.mem.update_usage(name, s["cpu_pct"], s.get("mem_mb"))
+                    self.mem.update_usage(name, s["cpu_pct"], s.get("mem_mb"), mode=mode)
                     vals.append(s["cpu_pct"])
                 if s.get("mem_pct") is not None:
                     vals.append(s["mem_pct"])
@@ -178,7 +198,7 @@ class LocalRecorder:
                 for name, net in src.net_updates().items():
                     self.mem.record_net(name, net)
                     self.log("자원 기억: %s 네트워크 %s" % (name, net))
-        return vals
+        return vals, any_active
 
     # ------------------------------------------------------------ 스레드
     def _run(self):

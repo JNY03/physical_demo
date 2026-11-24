@@ -110,15 +110,14 @@ def test_launch_command_and_state(tmp_path):
 
 
 # ---------------------------------------------------------------- 감시
-def test_starting_becomes_loaded_only_with_processed_frames(tmp_path):
+def test_starting_becomes_loaded_when_vision_reports(tmp_path):
     c = Clock()
     ex, r = make(tmp_path, clock=c)
     uid = ex.launch({"devices": ["pi13"], "models": ["yoloe"]}, 1560)
     pid = ex.state.units()[uid]["pid"]
+    assert ex.poll() == []                                             # 아직 보고 없음 (적재 중)
     r.kv["vision_telemetry:h:%d" % pid] = json.dumps({"streams": {"pi13": {"frames": 0}}})
-    assert ex.poll() == []                                             # 떴지만 장이 없다 → 아직 starting
-    r.kv["vision_telemetry:h:%d" % pid] = json.dumps({"streams": {"pi13": {"frames": 12}}})
-    assert ex.poll() == [(uid, "loaded")]
+    assert ex.poll() == [(uid, "loaded")]                              # 적재 끝 — 장이 0 이어도(로봇이 꺼져 있어도)
     assert ex.pending_mb() == 0                                        # loaded 는 기기 사용량에 이미 들어 있다
 
 
@@ -129,7 +128,7 @@ def test_load_timeout_fails(tmp_path, monkeypatch):
     uid = ex.launch({"devices": ["pi13"], "models": ["yoloe"]}, 1560)
     c.t += ge.LOAD_TIMEOUT_S + 1
     assert ex.poll() == [(uid, "failed")]
-    assert ex.state.units()[uid]["status"] == "failed" and "처리한 장 없음" in ex.state.units()[uid]["reason"]
+    assert ex.state.units()[uid]["status"] == "failed" and "모델 적재 실패" in ex.state.units()[uid]["reason"]
 
 
 def test_dead_process_restarts_in_place_then_stops(tmp_path):

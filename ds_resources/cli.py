@@ -87,6 +87,8 @@ def brief(p):
         lines.append("CPU %s → %s%s" % (u["task"], u["node"], (" (%s)" % u["reason"]) if u.get("reason") else ""))
     for d in plan["degraded"]:
         lines.append("낮춤: %s — %s" % (d["item"], d["reason"]))
+    for d in plan.get("waiting", []):
+        lines.append("대기: %s — %s" % (d["item"], d["reason"]))
     for d in plan["refused"]:
         lines.append("못 함: %s — %s" % (d["item"], d["reason"]))
     return "\n".join(lines)

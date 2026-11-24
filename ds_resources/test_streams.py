@@ -89,6 +89,14 @@ def test_ready_and_baseline_changes_are_immediate():
     assert json.loads(out[1]["baseline"]) == {"boot": "b"}
 
 
+def test_service_mode_change_is_immediate():
+    f = st.NodeChangeFilter()
+    f.observe("pi7", S(service_mode="idle"), 0)
+    out = f.observe("pi7", S(service_mode="active"), 1)                # 로봇이 돌기 시작
+    assert [r["change"] for r in out] == ["service"] and out[0]["service_mode"] == "active"
+    assert f.observe("pi7", S(service_mode="active"), 2) == []
+
+
 def test_gpu_memory_band_counts_as_usage():
     f = st.NodeChangeFilter()
     g = lambda used: [{"name": "RTX", "mem_used_mb": used, "mem_total_mb": 6000}]  # noqa: E731

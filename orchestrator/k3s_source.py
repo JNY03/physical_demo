@@ -190,8 +190,9 @@ class K3sNodeSource:
             c_now = cpu_m(m["usage"]["cpu"]) if m else None
             m_now = mem_mb(m["usage"]["memory"]) if m else None
             alloc_c, alloc_m = cpu_m(alloc.get("cpu", "0")), mem_mb(alloc.get("memory", "0"))
-            role = n["metadata"].get("labels", {}).get("ds.role", "")
-            out.append({"name": name, "ip": ip, "role": role, "ready": ready, "stale": stale,
+            labels = n["metadata"].get("labels", {})
+            role, source = labels.get("ds.role", ""), labels.get("ds.source")
+            out.append({"name": name, "ip": ip, "role": role, "source_name": source, "ready": ready, "stale": stale,
                         "identity": {"boot_id": info.get("bootID"), "kernel": info.get("kernelVersion"),
                                      "os": info.get("osImage")},
                         "baseline": {"arch": info.get("architecture"), "cpu_count": int(cpu_m(cap.get("cpu", "0")) / 1000),
@@ -216,7 +217,8 @@ class K3sNodeSource:
             out.append((r["name"], {"role": r["role"], "source": "k3s", "ready": r["ready"], "stale": r["stale"],
                                     "cpu_pct": r["cpu_pct"], "mem_pct": r["mem_pct"], "mem_mb": r["mem_now_mb"],
                                     "cpu_m": r["cpu_now_m"], "temp_c": None, "gpu": [],
-                                    "identity": r["identity"], "baseline": r["baseline"], "ip": r["ip"]}))
+                                    "identity": r["identity"], "baseline": r["baseline"], "ip": r["ip"],
+                                    "source_name": r["source_name"]}))
         return out
 
     def want_net(self, node, ip):
@@ -254,10 +256,13 @@ class K3sNodeSource:
             n = {k: r[k] for k in ("name", "role", "ready", "stale", "cpu_alloc_m", "mem_alloc_mb", "cpu_now_m",
                                    "mem_now_mb")}
             mem = (self.mem.node(r["name"]) if self.mem is not None else None) or {}
-            u = mem.get("usage") or {}
-            if r["cpu_alloc_m"]:
-                n["service"] = {"cpu_p95_m": (u.get("cpu_p95") or 0) * r["cpu_alloc_m"] / 100.0,
-                                "mem_p95_mb": u.get("mem_p95_mb") or 0}
+            share = self.mem.service_share(r["name"]) if self.mem is not None else None
+            if r["cpu_alloc_m"] and share:
+                n["service"] = {"cpu_p95_m": (share["cpu_pct"] or 0) * r["cpu_alloc_m"] / 100.0,
+                                "mem_p95_mb": share["mem_mb"] or 0, "active_measured": share["active_measured"],
+                                "mode": share.get("mode")}
+            elif r["role"] == "robot":
+                n["service"] = {"cpu_p95_m": 0, "mem_p95_mb": 0, "active_measured": False}
             n["net"] = mem.get("net") or {}
             out.append(n)
         return out

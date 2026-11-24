@@ -113,6 +113,15 @@ def test_robot_service_p95_and_instant_load_are_reserved():
     assert pl.plan(req(cpu=[TASK]), {"nodes": [spike], "costs": {}}, "h", "wsl")["refused"]
 
 
+def test_robot_with_unmeasured_active_load_keeps_half_free():
+    idle_only = pi("pi7", cpu_now=100, p95=100)
+    idle_only["service"]["active_measured"] = False                    # 로봇이 돌 때를 아직 못 잼
+    big = dict(TASK, cpu_m=1500)                                       # 4000 − max(100, 2000) − 800 = 1200 < 1500
+    assert pl.plan(req(cpu=[big]), {"nodes": [idle_only], "costs": {}}, "h", "wsl")["refused"]
+    idle_only["service"]["active_measured"] = True                     # 재고 나면 실측으로
+    assert pl.plan(req(cpu=[big]), {"nodes": [idle_only], "costs": {}}, "h", "wsl")["cpu_units"]
+
+
 def test_cpu_ledger_within_one_plan():
     t2 = dict(TASK, task="relay2")
     out = pl.plan(req(cpu=[TASK, t2]), {"nodes": [pi("pi1", cpu_now=2000, p95=0)], "costs": {}}, "h", "wsl")

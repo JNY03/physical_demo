@@ -57,11 +57,29 @@ def test_save_load_roundtrip_is_atomic(tmp_path):
 def test_service_share_uses_p95_after_enough_samples(tmp_path):
     m = mm.ResourceMemory(tmp_path / "m.json", clock=Clock())
     m.update_usage("pi7", 10, 500)
-    assert m.service_share("pi7") == (10, 500)                       # 아직 p95 없음 → EWMA
+    s = m.service_share("pi7")
+    assert (s["cpu_pct"], s["mem_mb"], s["active_measured"]) == (10, 500, False)   # 아직 p95 없음 → EWMA
     for i in range(100):
         m.update_usage("pi7", 10 + (40 if i % 20 == 0 else 0), 500)
-    cpu, mem = m.service_share("pi7")
-    assert cpu >= 10 and mem == 500
+    s = m.service_share("pi7")
+    assert s["cpu_pct"] >= 10 and s["mem_mb"] == 500
+
+
+def test_service_share_prefers_active_robot_load(tmp_path):
+    m = mm.ResourceMemory(tmp_path / "m.json", clock=Clock())
+    for _ in range(20):
+        m.update_usage("pi7", 5, 400, mode="idle")                        # 로봇이 쉬는 동안
+    s = m.service_share("pi7")
+    assert s["active_measured"] is False and s["cpu_pct"] == 5 and s["mode"] == "idle"
+    for _ in range(9):
+        m.update_usage("pi7", 60, 1500, mode="active")                   # 로봇이 돌기 시작 — 아직 표본 9개
+    assert m.service_share("pi7")["active_measured"] is False
+    m.update_usage("pi7", 60, 1500, mode="active")
+    s = m.service_share("pi7")
+    assert s["active_measured"] and s["cpu_pct"] == 60 and s["mem_mb"] == 1500 and s["mode"] == "active"
+    for _ in range(5):
+        m.update_usage("pi7", 5, 400, mode="idle")                        # 다시 쉬어도 active 몫을 기억한다
+    assert m.service_share("pi7")["cpu_pct"] == 60
 
 
 # ---------------------------------------------------------------- 모델 조합
@@ -153,6 +171,9 @@ class FakeRedis:
     def xadd(self, stream, fields, maxlen=None, approximate=None):
         self.rows.append((stream, fields))
 
+    def xrevrange(self, key, hi, lo, count=None):
+        return []                                                         # 소스 영상 없음
+
 
 def test_recorder_tick_records_once_per_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(probe, "baseline", lambda bench=True: {"cpu_count": 4, "gpus": []})
@@ -212,9 +233,10 @@ def test_recorder_node_source_lifecycle(tmp_path, monkeypatch):
     rec = LocalRecorder(r, mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None, bench=False,
                         node_sources=["fake_src_mod:FakeSource"])
     src = rec.sources[0]
-    src.rows = [("pi7", S7())]
+    src.rows = [("pi7", dict(S7(), source_name="robot1"))]
     rec.usage.sample()
     rec.tick()
+    assert rec.mem.node("pi7")["usage"]["mode"] == "idle"                # 영상 없음 → 로봇 서비스 쉼
     changes = [(x[1]["node"], x[1]["change"]) for x in r.rows]
     assert ("pi7", "added") in changes and src.want == ["pi7"]
     assert rec.mem.node("pi7")["baseline"] == {"cpu_count": 4}
@@ -239,3 +261,30 @@ def test_recorder_bad_source_path_is_skipped(tmp_path, monkeypatch):
     rec = LocalRecorder(FakeRedis({}), mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None,
                         bench=False, node_sources=["no_such_module:X"])
     assert rec.sources == []
+
+
+def test_robot_becomes_active_when_its_video_arrives(tmp_path, monkeypatch):
+    import time as _t
+    monkeypatch.setattr(probe, "gpus", lambda timeout=2: [])
+    import sys, types
+    mod = types.ModuleType("fake_src_mod2")
+    mod.FakeSource = FakeSource
+    sys.modules["fake_src_mod2"] = mod
+
+    class R(FakeRedis):
+        def __init__(self):
+            super().__init__({})
+            self.last = None
+
+        def xrevrange(self, key, hi, lo, count=None):
+            return [] if self.last is None else [(("%d-0" % self.last).encode(), {})]
+    r = R()
+    rec = LocalRecorder(r, mm.ResourceMemory(tmp_path / "m.json"), node="wsl", log=lambda *_: None, bench=False,
+                        node_sources=["fake_src_mod2:FakeSource"])
+    rec.sources[0].rows = [("pi7", dict(S7(), source_name="robot1"))]
+    rec.usage.sample()
+    assert rec.tick() == 60                                              # 영상 없음 — 쉼 주기
+    r.last = int(_t.time() * 1000)                                       # 로봇 영상이 들어온다
+    assert rec.tick() == 10                                              # 바로 배치 중 주기로
+    assert rec.mem.node("pi7")["usage"]["mode"] == "active"
+    assert ("pi7", "service") in [(x[1]["node"], x[1]["change"]) for x in r.rows]

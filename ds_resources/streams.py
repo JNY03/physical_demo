@@ -15,7 +15,8 @@ orchestration_stream  (schema "orch/1")  비전 처리 오케스트레이션 선
     ts       ISO 밀리초 +09:00     seq  이 프로세스에서 쓴 순번
 
 node_resource_stream  (schema "node/1")  노드가 추가 · 제거될 때와 상태가 바뀔 때만 한 건
-    node · role · source(k3s | local) · change(added · removed · ready · not_ready · baseline · usage)
+    node · role · source(k3s | local) · change(added · removed · ready · not_ready · baseline · service · usage)
+    service_mode   active(그 노드의 로봇 서비스가 실제로 돎 — 소스 영상이 온다) | idle | "" — 바뀌면 바로 남긴다(service)
     ready · cpu_pct · mem_pct · mem_mb · temp_c · gpu(JSON 목록) · baseline(JSON, added · baseline 일 때만) · ts
     잦거나 작은 변화는 남기지 않는다 — NodeChangeFilter.
 """
@@ -32,7 +33,7 @@ ORCH_EVENTS = ("requested", "cluster_checked", "planned", "applied", "running", 
                "degraded", "fallback", "replanned", "failed")
 MODES = ("k3s", "local")
 BASES = ("live", "saved")
-NODE_CHANGES = ("added", "removed", "ready", "not_ready", "baseline", "usage")
+NODE_CHANGES = ("added", "removed", "ready", "not_ready", "baseline", "service", "usage")
 KST = timezone(timedelta(hours=9))
 
 
@@ -79,7 +80,8 @@ def node_record(node, change, sample, t=None):
     rec = {"schema": NODE_SCHEMA, "node": str(node), "change": change, "role": str(s.get("role") or ""),
            "source": str(s.get("source") or ""), "ready": "1" if s.get("ready") else "0",
            "cpu_pct": _num(s.get("cpu_pct")), "mem_pct": _num(s.get("mem_pct")), "mem_mb": _num(s.get("mem_mb")),
-           "temp_c": _num(s.get("temp_c")), "gpu": _j(s.get("gpu") or []), "ts": iso_now(t)}
+           "temp_c": _num(s.get("temp_c")), "gpu": _j(s.get("gpu") or []), "service_mode": str(s.get("service_mode") or ""),
+           "ts": iso_now(t)}
     if change in ("added", "baseline") and s.get("baseline") is not None:
         rec["baseline"] = _j(s["baseline"])
     return rec
@@ -139,7 +141,7 @@ class NodeChangeFilter:
         bands = {k: self._band(v) for k, v in m.items()}
         if st is None:
             self.state[node] = {"ready": bool(sample.get("ready")), "baseline": bl_key, "bands": bands,
-                                "pending": None, "count": 0, "last_usage": now}
+                                "pending": None, "count": 0, "last_usage": now, "mode": sample.get("service_mode")}
             return [node_record(node, "added", sample, now)]
         if bool(sample.get("ready")) != st["ready"]:
             st["ready"] = bool(sample.get("ready"))
@@ -147,6 +149,9 @@ class NodeChangeFilter:
         if bl_key is not None and bl_key != st["baseline"]:
             st["baseline"] = bl_key
             out.append(node_record(node, "baseline", sample, now))
+        if sample.get("service_mode") and sample.get("service_mode") != st.get("mode"):
+            st["mode"] = sample["service_mode"]
+            out.append(node_record(node, "service", sample, now))
         moved = any(self._moved(st["bands"].get(k), v) for k, v in m.items())
         if not moved:
             st["pending"], st["count"] = None, 0

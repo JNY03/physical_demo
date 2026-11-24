@@ -96,13 +96,39 @@ def test_local_fallback_event_sequence_and_fps_cap(tmp_path):
     assert "--max-fps" in cmd and cmd[cmd.index("--max-fps") + 1].startswith("pi13=")
 
 
-def test_missing_input_is_failed_not_applied(tmp_path):
-    k, r, _ = make(tmp_path)
-    r.add_frames("pi13", age_s=30)                                    # 30초 멈춘 영상
-    k.submit(["pi13"], ["yoloe"])
-    assert "applied" not in r.events()
-    f = [x for x in r.rows if x["event"] == "failed"][0]
-    assert "입력 영상 없음" in f["reason"]
+def test_missing_input_waits_instead_of_failing(tmp_path):
+    k, r, c = make(tmp_path)
+    r.add_frames("pi13", age_s=30)                                    # 30초 멈춘 영상 (로봇이 꺼짐)
+    k.submit(["pi13", "a2"], ["yoloe"])                               # a2 는 프레임이 아예 없다
+    assert "applied" in r.events() and "failed" not in r.events()
+    waits = [x["reason"] for x in r.rows if x["event"] == "degraded" and "입력 대기" in x["reason"]]
+    assert len(waits) == 2
+    u = list(k.state.units().values())[0]
+    assert u["devices"] == ["a2", "pi13"]                             # 같은 프로세스에 미리 넣는다
+    plan = json.loads([x for x in r.rows if x["event"] == "planned"][0]["plan"])
+    assert set(plan["gpu_units"][0]["fps_cap"]) == {"a2", "pi13"}       # 예산을 미리 잡는다
+
+
+def test_robot_comes_online_later_and_goes_away(tmp_path):
+    k, r, c = make(tmp_path)
+    k.submit(["pi13", "a2"], ["yoloe"])                               # 둘 다 꺼져 있다
+    u = list(k.state.units().values())[0]
+    key = "vision_telemetry:h:%d" % u["pid"]
+    r.kv[key] = json.dumps({"streams": {"pi13": {"frames": 0}, "a2": {"frames": 0}}})
+    assert k.poll() == []                                              # loaded, 아직 running 아님
+    r.add_frames("pi13")                                               # pi13 로봇이 켜졌다
+    r.kv[key] = json.dumps({"streams": {"pi13": {"frames": 40, "fps": 4.0}, "a2": {"frames": 0}}})
+    ev = k.poll()
+    assert [e["event"] for e in ev] == ["running"]
+    assert json.loads(ev[0]["detail"])["waiting"] == ["a2"]
+    r.add_frames("a2")                                                 # a2 도 켜졌다 — 다시 띄우지 않고 바로
+    ev = k.poll()
+    assert [e["event"] for e in ev] == ["running"] and "입력 들어옴: a2" in ev[0]["reason"]
+    c.t += ctl.INPUT_DOWN_S + 1                                        # pi13 이 꺼졌다 (a2 는 계속)
+    r.add_frames("a2")
+    ev = k.poll()
+    assert [e["event"] for e in ev] == ["degraded"] and "입력 끊김: pi13" in ev[0]["reason"]
+    assert k.ex.procs[u["unit_id"]].rc is None                         # 프로세스는 그대로
 
 
 def test_gpu_refusal_is_failed_with_reason(tmp_path):

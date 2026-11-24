@@ -59,9 +59,19 @@ def test_nodes_attach_service_share_and_net(monkeypatch):
 
     class Mem:
         def node(self, name):
-            return {"usage": {"cpu_p95": 25.0, "mem_p95_mb": 900.0}, "net": {"bw_mbps": 80.0, "relay": False}}
+            return {"net": {"bw_mbps": 80.0, "relay": False}}
+
+        def service_share(self, name):
+            return {"cpu_pct": 25.0, "mem_mb": 900.0, "active_measured": True, "mode": "active"}
     n = ks.K3sNodeSource(memory=Mem(), probe_net=False, clock=lambda: NOW).nodes()[0]
-    assert n["service"] == {"cpu_p95_m": 1000.0, "mem_p95_mb": 900.0} and n["net"]["bw_mbps"] == 80.0
+    assert n["service"] == {"cpu_p95_m": 1000.0, "mem_p95_mb": 900.0, "active_measured": True, "mode": "active"}
+    assert n["net"]["bw_mbps"] == 80.0
+
+
+def test_robot_without_memory_is_unmeasured(monkeypatch):
+    fake(monkeypatch, [node("pi7", "100.72.109.9")], [metric("pi7", 10)])
+    n = ks.K3sNodeSource(memory=None, probe_net=False, clock=lambda: NOW).nodes()[0]
+    assert n["service"]["active_measured"] is False
 
 
 def test_check_reports_failure(monkeypatch):
