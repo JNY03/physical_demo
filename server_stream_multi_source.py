@@ -80,6 +80,8 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
                              image=0 이면 검출만 — 가시화 앱이 MJPEG 위에 카드를 얹을 때 쓴다 (2026-11-13)
   GET  /vision/view?model=river   위 둘로 그린 독립 화면 — 물체에 마우스 → 카드 · 클릭 → 고정 · ✕ 닫기
   GET  /health        받은 개수 · 연결 상태 · 비전 모델별 결과 수/지연 (JSON)
+  POST /scan/prepare · /scan/mark · /scan/finish · /scan/cancel  ·  GET /scan/status · /scan/result · /scan/frame
+                      스캔 탐지 창구 (2026-11-24, scan_desk.py) — 각도마다 targeted 결과 한 장을 잡아 방위 · 거리를 낸다
 
 Redis Stream (최근 --maxlen 개만 유지, 기본 300)
   camera_stream:<소스>  image   = 받은 이미지 바이트 그대로
@@ -227,7 +229,9 @@ ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "d455": "realsense",
            "cam360_slice": "cam360_slice", "slice": "cam360_slice",
            "a2": "a2", "unitree_a2": "a2",
-           "pi11": "pi11", "picam": "pi11", "pi12": "pi12", "pi13": "pi13"}
+           "pi11": "pi11", "picam": "pi11", "pi12": "pi12", "pi13": "pi13",
+           # 가시화가 보내는 장치 ID (스캔 창구, 2026-11-24) — go1-002(pi1)는 EP 로봇으로 바뀔 수 있다
+           "go1-001": "robot1", "go1-002": "robot2", "a2-001": "a2"}
 #: 라즈베리파이 모듈 카메라(CSI imx708) 소스. 같은 picam_mjpeg.py 가 같은 모양으로 내므로
 #: 가져오는 쪽은 하나다 — 기기를 더할 때 여기와 SOURCES·DEFAULT_HOST·--piNN 만 늘린다.
 PICAM_SOURCES = ("pi11", "pi12", "pi13")
@@ -1323,7 +1327,7 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_handler(src, vision=None):
+def make_handler(src, vision=None, desk=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "data-stream"
@@ -1363,6 +1367,8 @@ def make_handler(src, vision=None):
                 return self._roi("GET", None)
             if path == "/control/reid":
                 return self._reid("GET", None, query)
+            if path.startswith("/scan/"):
+                return self._scan("GET", path, query, None)
             if path == "/state":
                 return self._json(200, src.state_snapshot())
             if path == "/frame":
@@ -1372,6 +1378,8 @@ def make_handler(src, vision=None):
                 if vision is not None:
                     h["vision"] = vision.health(src.name)
                     h["vision_error"] = vision.err
+                if desk is not None:                  # 가시화 연결 판의 「확인」 버튼(스캔 창구)
+                    h.setdefault("vision", {}).setdefault("targeted", {})["scan"] = desk.health()
                 return self._json(200, h)
             if path == "/":
                 models = vision.models(src.name) if vision is not None else []
@@ -1561,6 +1569,15 @@ def make_handler(src, vision=None):
             except Exception as e:
                 return self._json(503, {"status": "error", "detail": "Redis 에 못 씀 (%s)" % describe(e)})
 
+        def _scan(self, method, path, query, body):
+            """스캔 탐지 창구 /scan/* (2026-11-24) — scan_desk.py. 판은 서버 전체에 하나, 장치는 이 포트의 소스여야 한다."""
+            if desk is None:
+                return self._json(503, {"error": "no_scan_desk", "detail": "스캔 창구가 꺼져 있음(--no-vision 또는 redis 없음)"})
+            code, out = desk.handle(method, path, src.name, query, body)
+            if isinstance(out, tuple):
+                return self._send(code, out[0], out[1])
+            return self._json(code, out)
+
         def do_OPTIONS(self):
             """CORS 사전 요청 — 가시화 웹(다른 주소)이 /control/roi 에 POST · DELETE 를 보낼 수 있게(2026-11-23)."""
             self.send_response(204)
@@ -1594,6 +1611,8 @@ def make_handler(src, vision=None):
             if body is None:
                 self.close_connection = True
                 return
+            if path.startswith("/scan/"):
+                return self._scan("POST", path, "", body)
             if path == "/control/roi":
                 return self._roi("POST", body)
             if path == "/control/reid":
@@ -2101,11 +2120,15 @@ def main():
     sources = [Source(nm, SOURCES[nm], None, None, sink, None) for nm in names]
 
     vision = None if args.no_vision else VisionView(args.redis, names)
+    desk = None
+    if vision is not None and redis is not None:
+        from scan_desk import ScanDesk
+        desk = ScanDesk(args.redis, Path(args.save).expanduser().resolve(), ALIASES, log).start()
     servers = []                                   # 포트부터 잡는다 — 못 잡으면 폴더를 만들기 전에 끝낸다
     for s in sources:
         try:
             Server.tcp_mss = args.tcp_mss
-            servers.append(Server((args.bind, s.port), make_handler(s, vision)))
+            servers.append(Server((args.bind, s.port), make_handler(s, vision, desk)))
         except OSError as e:
             for srv in servers:
                 srv.server_close()

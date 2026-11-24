@@ -172,6 +172,17 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
 - 로봇 캠 번호는 robot1 · robot2 에만 쓰인다(a2 · pi11~13 은 1 고정). 슬라이스 u 를 비우면 마지막 u, v 는 −30 고정.
 - 시험: `$env:DS_LAUNCHER_SELFTEST=1` 로 실행하면 창 없이 선택을 바꿔 보고 프로필을 찍는다.
 
+#### 스캔 탐지 창구 `/scan/*` (2026-11-24)
+
+- 가시화가 장치를 45° 씩 돌리며 쓰는 창구. 그 장치 소스의 서버 포트(`go1-001` → robot1 `:10003`, `go1-002` → robot2 `:10004`,
+  `a2-001` → a2 `:10007`)에 `prepare → mark × 8 → finish → result`. 돌고 있는 `targeted` 결과에서 각도마다 표시 0.5초 뒤 한 장을 잡아
+  **그 장의 값**으로 판정 · 방위(스캔 시작 기준 −180~180) · 거리를 낸다. 규약은 `스캔탐지창구_요청_VZ_261123.md`, 설계는 `스캔탐지_창구_계획_261124.md`.
+- 그 기기의 `targeted` 비전이 돌고 있어야 한다(아니면 `no_vision`). 판 동안 그 비전 프로세스의 대상은 판 대상 하나뿐이고 거리를 매 장 잰다.
+  판이 끝나면(또는 서버가 죽으면 20초 안에) 원래 대상으로 돌아간다. 판 동안 런처에서 바꾼 것은 끝난 뒤 반영된다(상태 줄 「스캔 중 — 끝나면 반영」).
+- 판 기록: `<--save>/scans/<scan_id>/` (`result.json` · 각도별 `original` · `overlay` 그림).
+- 시험 한 판(로봇 없이, 돌지 않고): `venv/bin/python tools/scan_smoke.py --target door` (`--target object --query chair` 등).
+- 시험: `test_scan_desk.py`(저장소 루트) · `vision/test_scan_assess.py` · `vision/test_scan_vision.py`.
+
 ### 4) 360 카메라 — `360camera_work/stream_to_server.py` (360 카메라 노트북)
 
 360 카메라 Wi-Fi 에 연결된 노트북에서 실행한다 (필요 패키지: `requests`, `opencv-python`).

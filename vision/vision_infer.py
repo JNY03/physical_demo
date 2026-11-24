@@ -110,6 +110,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import math
 import re
 import signal
 import socket
@@ -2225,7 +2226,7 @@ class TrackEvidence(AxisDecider):
                 rows.append(["track", None, "evidence over %d frames" % m["frames"]])
                 card = dict(card, rows=rows, score=None if shown is None else round(shown, 1))
             d["assess"] = dict(a, frame={"score": a.get("score"), "suspect": a.get("suspect"),
-                                         "gates_failed": a.get("gates_failed")},
+                                         "gates_failed": a.get("gates_failed"), "cards": a.get("cards")},
                                score=None if shown is None else round(shown, 1),
                                scores={name: None if shown is None else round(shown, 1)},
                                gate_scores={name: None if score is None else round(score, 1)},
@@ -2719,6 +2720,13 @@ class TargetedRunner:
                 _m = _ilu.module_from_spec(_sp)
                 _sp.loader.exec_module(_m)
                 _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
+
+    def forget_device(self, device):
+        """그 기기의 거리 기억을 비운다(스캔 각도 표시, 2026-11-24) — 앞 각도의 거리가 carried 로 실려 오지 않게."""
+        for k in [k for k in self._streams if k[0] == device]:
+            del self._streams[k]
+        if self.depth is not None and self._stream is not None and self._stream[0] == device:
+            self.depth._mem = {}
 
     def use_stream(self, key):
         """기기마다 거리 기억을 따로 둔다(river 와 같은 이유)."""
@@ -3634,6 +3642,40 @@ def model_ocfg(ocfg, cfg, model, device):
     return o, prefs
 
 
+def _go1_focal(cfg):
+    """Go1 카메라 ((W, H), f px) — demo_box 대상 선언의 거리 계수에서. 없으면 None. 한 번만 읽는다."""
+    if "_go1_cam" not in cfg:
+        try:
+            import cue_catalog as cc
+            from demo_box import go1_camera
+            cfg["_go1_cam"] = go1_camera(cc.load_targets()["demo_box"])
+        except Exception as exc:                      # 대상 파일 · 계수 파일이 없는 PC
+            log("  Go1 초점 거리를 못 읽음 (%s: %s) — Go1 프레임 방위는 화각으로" % (type(exc).__name__, exc))
+            cfg["_go1_cam"] = None
+    return cfg["_go1_cam"]
+
+
+def add_bearing(dets, W, H, cfg, fov):
+    """**검출마다 화면 중심 대비 수평각**(스캔 창구, 2026-11-24) — bearing = {offset_deg, f_px, f_source}.
+    오른쪽 + . 스캔 창구가 rotation_deg 를 더한다(scan_assess.bearing). 초점 거리:
+    Go1 프레임(464x400) → demo_box 거리 계수의 f = k / 39 · 그 밖 → 기기 fov_x_deg · 없으면 offset None."""
+    go1 = _go1_focal(cfg)
+    if go1 is not None and (W, H) == tuple(go1[0]):
+        f, src = go1[1], "go1_box"
+    elif fov:
+        f, src = 0.5 * W / math.tan(math.radians(float(fov)) / 2), "fov"
+    else:
+        f, src = None, None
+    for d in dets:
+        if f is None:
+            d["bearing"] = {"offset_deg": None, "f_px": None, "f_source": None}
+            continue
+        cx = (d["xyxy"][0] + d["xyxy"][2]) / 2.0
+        d["bearing"] = {"offset_deg": round(math.degrees(math.atan((cx - W / 2.0) / f)), 2),
+                        "f_px": round(f, 1), "f_source": src}
+    return dets
+
+
 def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, wanted):
     """검출 모델 하나 — (모델, 기록, 오버레이, None, 결합용 검출) 와 트래커. wanted 가 아니면 기록은 None."""
     runner = runners[det_model]
@@ -3695,6 +3737,7 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
         if ad is None:
             ad = cfg["_axes"][akey] = TrackEvidence()
         dets = ad.update(dets)
+        add_bearing(dets, W, H, cfg, fov_hint((cfg.get("devices", {}) or {}).get(device, {}), header))
     reid_ms = _reid_step(cfg, device, det_model, bgr, dets, base)
     if not wanted:
         return (None, None, None, None, dets), stab
@@ -3715,8 +3758,11 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
                             "roi": bool(mblk.get("roi", True)),
                             "reid": bool((cfg.get("_features") or {}).get("reid")),
                             "show_non_suspect": bool(mblk.get("show_non_suspect", True))}
-    if cfg.get("_profile_label") is not None or cfg.get("_profile_version") is not None:
+    if cfg.get("_profile_label") is not None or cfg.get("_profile_version") is not None or cfg.get("_scan"):
         rec["profile"] = {"label": cfg.get("_profile_label"), "version": cfg.get("_profile_version")}
+        if cfg.get("_scan") and det_model == "targeted":      # 스캔 판의 대상으로 낸 결과 · 몇 번째 각도 표시 뒤인지
+            rec["profile"]["scan"] = cfg["_scan"]
+            rec["profile"]["mark"] = (cfg.get("_scan_mark") or {}).get(device)
     title = "%s  %s/%s #%s" % (det_model, device, base.get("run") or "live", base.get("n"))
     overlay = detect_overlay(bgr, rec["detections"], title, om, det_model, rec=rec, rects=rects)
     return (det_model, rec, overlay, None, dets), stab
@@ -3904,6 +3950,7 @@ def apply_profile(cfg, resolved):
     cfg["_features"] = resolved.get("features") or {}
     cfg["_profile_label"] = resolved.get("label")
     cfg["_profile_version"] = resolved.get("version")
+    cfg["_active"] = resolved                          # 스캔 판이 끝나면 되돌릴 설정(원문은 resolved["_raw"])
     if resolved.get("targeted") is not None:
         cfg["models"].setdefault("targeted", {})["_resolved"] = resolved["targeted"]
 
@@ -3952,7 +3999,9 @@ class ProfileWatch:
         import cue_catalog as cc
         try:
             prof = cli_profile(self.args, self.models, load_profile_file(self.path))
-            return cc.resolve_profile(prof, self.cfg, self.models)
+            resolved = cc.resolve_profile(prof, self.cfg, self.models)
+            resolved["_raw"] = prof
+            return resolved
         except (cc.ProfileError, ValueError, OSError) as exc:
             log("프로필 반영 안 함 — %s (옛 설정 유지)" % exc)
             self.status(False, str(exc))
@@ -3971,6 +4020,10 @@ class LiveRunner:
         from reid import RedisStore
         self.watch = watch
         self.roi_t = {}
+        self.job = None                                 # (종류, 확정 프로필, 적재 스레드, 덧붙임) — 반영 한 건
+        self.scan = self.deferred = self.before = None  # 스캔 판 · 판 동안 미룬 파일 프로필 · 판 전 설정
+        self.scan_t, self.mark_seen, self.scan_failed = 0.0, {}, None
+        self.depth_period = None                        # 판 동안 바꾼 거리 주기 (DepthTracker, 원래 주기)
         self.redis_mod = redis
         lc = cfg.get("live", {}) or {}
         self.lc = lc
@@ -4151,24 +4204,29 @@ class LiveRunner:
         self.cfg["_reid_items"] = items
 
     def check_profile(self):
+        """런처 프로필 파일. **스캔 판 동안 바뀐 파일은 미뤘다가** 판이 끝나면 반영한다(스캔 창구, 2026-11-24)."""
+        self._poll_job()
         w = self.watch
-        if w is None:
-            return
-        if w.pending is not None:
-            resolved, th = w.pending
-            if th.is_alive():
-                return
-            w.pending = None
-            self.swap_profile(resolved, getattr(th, "error", None))
+        if w is None or self.job is not None:
             return
         resolved = w.poll()
         if resolved is None:
             return
+        if self.scan is not None:
+            self.deferred = resolved
+            log("프로필 바뀜 — 스캔 %s 중이라 끝나면 반영" % self.scan["scan_id"])
+            w.status(True, "스캔 중 — 끝나면 반영", resolved.get("version"))
+            return
+        self._start("file", resolved)
+
+    # -- 반영 한 건: 무거운 모델은 다른 스레드에서 미리 올리고(그동안 옛 설정으로 계속) 끝나면 바꾼다
+    def _start(self, kind, resolved, meta=None):
         tr = self.runners.get("targeted")
+        th = None
         if tr is not None and resolved.get("targeted") is not None:
             import threading
 
-            def warm(th_box=[]):
+            def warm():
                 try:
                     tr.prewarm(resolved["targeted"])
                 except Exception as exc:
@@ -4176,31 +4234,173 @@ class LiveRunner:
             th = threading.Thread(target=warm, daemon=True)
             th.error = None
             th.start()
-            w.pending = (resolved, th)
-            log("프로필 바뀜 — 필요한 모델을 미리 적재하는 동안 옛 설정으로 계속")
-            return
-        self.swap_profile(resolved, None)
+            log("%s — 필요한 모델을 미리 적재하는 동안 옛 설정으로 계속" % {
+                "file": "프로필 바뀜", "scan": "스캔 %s 대상으로" % (meta or {}).get("scan_id"),
+                "restore": "스캔 끝 — 원래 대상으로"}[kind])
+        self.job = (kind, resolved, th, meta)
+        self._poll_job()
 
-    def swap_profile(self, resolved, error):
-        w = self.watch
+    def _poll_job(self):
+        if self.job is None:
+            return
+        kind, resolved, th, meta = self.job
+        if th is not None and th.is_alive():
+            return
+        self.job = None
+        self._finish(kind, resolved, getattr(th, "error", None), meta)
+
+    def _finish(self, kind, resolved, error, meta):
+        if not error:
+            try:
+                self.swap_profile(resolved)
+            except Exception as exc:
+                error = "%s: %s" % (type(exc).__name__, exc)
+        what = {"file": "프로필", "scan": "스캔 대상", "restore": "원래 대상"}[kind]
         if error:
-            log("프로필 반영 실패 — %s (옛 설정 유지)" % error)
-            w.status(False, error, resolved.get("version"))
+            log("%s 반영 실패 — %s (옛 설정 유지)" % (what, error))
+        else:
+            log("%s 반영 (번호 %s%s)" % (what, resolved.get("version"),
+                                     (", 스캔 %s" % meta["scan_id"]) if kind == "scan" else ""))
+        if kind == "file" and self.watch is not None:
+            self.watch.status(not error, error or "반영됨", resolved.get("version"))
+        elif kind == "scan":
+            if not error:
+                self.scan = meta
+                self.cfg["_scan"] = meta["scan_id"]
+                self.cfg["_scan_mark"] = {}
+                self.mark_seen = {}
+                self._depth_every_frame(True)
+            else:
+                self.scan_failed = meta["scan_id"]
+            self._ack(meta["scan_id"], error, resolved.get("version"))
+        elif kind == "restore" and self.watch is not None and not error:
+            self.watch.status(True, "반영됨", resolved.get("version"))
+
+    def swap_profile(self, resolved):
+        tr = self.runners.get("targeted")
+        if tr is not None and resolved.get("targeted") is not None:
+            tr.reconfigure(resolved["targeted"])
+            for store in ("_asm", "_stab", "_lab", "_axes"):
+                for k in [k for k in (self.cfg.get(store) or {}) if k[2] == "targeted"]:
+                    del self.cfg[store][k]
+        apply_profile(self.cfg, resolved)
+
+    # -- 스캔 판(스캔 창구, 2026-11-24): Redis vision_scan {scan_id, devices, targets} — 서버 scan_desk.py 가 쓰고
+    #    판이 사는 동안 TTL 을 늘린다. 내 기기가 들어 있으면 targeted 대상을 그 판 대상으로 바꾸고, 키가 사라지면
+    #    (끝 · 취소 · 서버가 죽어 TTL 만료) 판 전 설정(또는 그동안 미룬 파일 프로필)으로 되돌린다.
+    def check_scan(self):
+        now = time.time()
+        if now - self.scan_t < 0.5:
+            return
+        self.scan_t = now
+        if "targeted" not in self.runners:
             return
         try:
-            tr = self.runners.get("targeted")
-            if tr is not None and resolved.get("targeted") is not None:
-                tr.reconfigure(resolved["targeted"])
-                for store in ("_asm", "_stab", "_lab", "_axes"):
-                    for k in [k for k in (self.cfg.get(store) or {}) if k[2] == "targeted"]:
-                        del self.cfg[store][k]
-            apply_profile(self.cfg, resolved)
-        except Exception as exc:
-            log("프로필 반영 실패 — %s: %s (옛 설정 유지)" % (type(exc).__name__, exc))
-            w.status(False, "%s: %s" % (type(exc).__name__, exc), resolved.get("version"))
+            raw = self.r.get("vision_scan")
+        except self.redis_mod.RedisError:
             return
-        log("프로필 반영 (번호 %s)" % resolved.get("version"))
-        w.status(True, "반영됨", resolved.get("version"))
+        try:
+            spec = json.loads(raw) if raw else None
+        except ValueError:
+            spec = None
+        if spec is not None and not (set(spec.get("devices") or []) & set(self.devices)):
+            spec = None
+        busy = self.job[3] if (self.job is not None and self.job[0] == "scan") else None
+        cur = self.scan or busy
+        if spec is not None:
+            if (cur is not None and cur["scan_id"] == spec.get("scan_id")) or spec.get("scan_id") == self.scan_failed:
+                return                                   # 이미 그 판 · 거절한 판은 다시 하지 않는다
+            if self.job is not None:
+                return                                   # 다른 반영이 끝나면 다음 0.5초에
+            if self.scan is None:
+                self.before = self.cfg.get("_active")
+            try:
+                resolved = self.scan_profile(spec)
+            except Exception as exc:
+                log("스캔 %s 대상 거절 — %s" % (spec.get("scan_id"), exc))
+                self._ack(spec.get("scan_id"), str(exc), None)
+                self.scan_failed = spec.get("scan_id")
+                return
+            self._start("scan", resolved, {"scan_id": spec.get("scan_id"), "devices": list(spec.get("devices") or [])})
+        elif self.scan is not None and self.job is None:
+            back = self.deferred or self.before
+            log("스캔 %s 끝 — %s" % (self.scan["scan_id"], "미룬 프로필로" if self.deferred else "원래 대상으로"))
+            self.scan, self.deferred, self.before = None, None, None
+            self.cfg.pop("_scan", None)
+            self.cfg.pop("_scan_mark", None)
+            self._depth_every_frame(False)
+            if back is not None:
+                self._start("restore", back)
+
+    def _depth_every_frame(self, on):
+        """판 동안 UniDepth 를 **매 장** 잰다 — 주기(기본 5장)로 재면 각도 표시 0.5초 뒤 잡힌 장의 거리가 앞 장에서
+        나른 값(carried)이라 창구가 믿지 않는다(2026-11-24 robot1 재생: 8각도 중 6각도). 끝나면 원래 주기로."""
+        dp = getattr(self.runners.get("targeted"), "depth", None)
+        if on and dp is not None:
+            if self.depth_period is None:
+                self.depth_period = (dp, dp.period)
+            dp.period = 1
+        elif not on and self.depth_period is not None:
+            obj, period = self.depth_period
+            obj.period = period
+            self.depth_period = None
+
+    def scan_profile(self, spec):
+        """판 전 프로필(원문) 위에 판 대상만 바꾼 것 → 확정. 판 대상에 맞지 않는 targeted 오버레이는 빼고 다시 해 본다."""
+        import copy
+        import cue_catalog as cc
+        base = (self.deferred or self.cfg.get("_active") or {}).get("_raw") or {}
+        targets = spec.get("targets")
+        if not isinstance(targets, list) or not targets:
+            raise cc.ProfileError("스캔 대상이 없음")
+        prof = copy.deepcopy(base)
+        tm = prof.setdefault("models", {}).setdefault("targeted", {})
+        tm["targets"], tm["distance"] = targets, True
+        try:
+            resolved = cc.resolve_profile(prof, self.cfg, self.models)
+        except cc.ProfileError:
+            tm.pop("overlay", None)
+            for part in (prof.get("devices") or {}).values():
+                ((part or {}).get("models") or {}).pop("targeted", None)
+            resolved = cc.resolve_profile(prof, self.cfg, self.models)
+        resolved["_raw"] = base                          # 판이 끝나도 되돌릴 원문은 판 전 것
+        return resolved
+
+    def _ack(self, scan_id, error, version):
+        try:
+            self.r.set("vision_scan_ack:%s" % scan_id,
+                       json.dumps({"ok": not error, "error": error, "version": version, "devices": self.devices,
+                                   "at": iso_ms()}, ensure_ascii=False), ex=600)
+        except self.redis_mod.RedisError as e:
+            log("스캔 %s 응답을 못 씀 (%s)" % (scan_id, e))
+
+    def check_marks(self):
+        """vision_scan_mark:<기기> 번호가 바뀌면(각도 표시) 그 기기의 targeted 트랙 · 이름 · 거리 기억을 비운다
+        — 회전 뒤 같은 화면 자리의 상자가 앞 각도의 근거 · 판정 · 거리를 물려받지 않게.
+        **판 동안 매 바퀴** 본다(장을 꺼내기 전에 비워야 한다). 결과의 profile.mark 에 번호를 싣는다 — 창구는
+        그 번호 뒤의 장만 그 각도의 대표로 잡는다."""
+        if self.scan is None:
+            return
+        for dv in self.devices:
+            if dv not in self.scan["devices"]:
+                continue
+            try:
+                v = self.r.get("vision_scan_mark:" + dv)
+            except self.redis_mod.RedisError:
+                return
+            if v is None or self.mark_seen.get(dv) == v:
+                continue
+            self.mark_seen[dv] = v
+            try:
+                self.cfg.setdefault("_scan_mark", {})[dv] = int(v)
+            except ValueError:
+                pass
+            for store in ("_asm", "_stab", "_lab", "_axes"):
+                for k in [k for k in (self.cfg.get(store) or {}) if k[0] == dv and k[2] == "targeted"]:
+                    del self.cfg[store][k]
+            tr = self.runners.get("targeted")
+            if tr is not None and hasattr(tr, "forget_device"):
+                tr.forget_device(dv)
 
     # -- 반복
     def report(self, dt):
@@ -4222,6 +4422,8 @@ class LiveRunner:
         try:
             while not STOP:
                 now = time.time()
+                self.check_scan()
+                self.check_marks()
                 self.check_profile()
                 if now - t_rep >= every:
                     self.report(now - t_rep)
@@ -4387,7 +4589,9 @@ def main():
     import cue_catalog as cc
     try:
         base = load_profile_file(args.profile) if args.profile and Path(args.profile).exists() else {}
-        resolved = cc.resolve_profile(cli_profile(args, models, base), cfg, models)
+        raw = cli_profile(args, models, base)
+        resolved = cc.resolve_profile(raw, cfg, models)
+        resolved["_raw"] = raw
     except (cc.ProfileError, ValueError, OSError) as exc:
         raise SystemExit("프로필이 틀렸습니다 — %s" % exc)
     apply_profile(cfg, resolved)

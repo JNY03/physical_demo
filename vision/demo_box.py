@@ -33,6 +33,15 @@ def _p(path):
     return p if p.is_absolute() else REPO / p
 
 
+def go1_camera(target):
+    """Go1 카메라 (프레임 크기 (W, H), 초점 거리 px) — 거리 계수 k 와 박스 앞면 높이로 f = k / 39.
+    가중치를 올리지 않는다(스캔 방위가 demo_box 를 고르지 않은 판에도 쓴다, 2026-11-24)."""
+    tr = dict(target.get("trained") or {})
+    fit = json.loads(_p(tr["fit"]).read_text(encoding="utf-8"))
+    k = float(fit["model_B_pinhole_offset"]["k"])
+    return tuple(tr.get("go1_frame") or (464, 400)), k / float(tr.get("box_height_cm", 39.0))
+
+
 class TrainedBoxArm:
     """학습 run 하나 = 가중치 + 그 가중치로 실측에 맞춘 거리 계수 + 그때의 imgsz."""
 
