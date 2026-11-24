@@ -274,3 +274,55 @@ def test_go1_focal_from_fit_file():
         import pytest
         pytest.skip("demo_box 거리 계수 파일이 없음")
     assert size == (464, 400) and 100 < f < 2000
+
+
+# ---------------------------------------------------------------- 문 후보 (2026-11-24)
+def _runner_for_proposals():
+    tr = vi.TargetedRunner.__new__(vi.TargetedRunner)
+    tr.targets = [{"name": "demo_door", "ovd_propose": {"grounding_dino": {"min_score": 0.30, "max_area": 0.5}}}]
+    tr.names, tr.alias = ["demo_door"], {}
+    return tr
+
+
+def test_gdino_proposes_far_door_that_yoloe_missed():
+    """스캔 45°: YOLOE 0.12(후보 하한 0.15 미만) · GroundingDINO 0.52 — 후보가 하나 생기고, YOLOE 의 약한 상자가 근거로 붙는다."""
+    tr = _runner_for_proposals()
+    raw = [{"cls_name": "demo_door", "prompt": "door", "conf": 0.12, "xyxy": [104, 117, 153, 230], "arm": "yoloe"}]
+    ovd = {"demo_door": [{"xyxy": [104, 118, 154, 231], "conf": 0.52, "arm": "grounding_dino", "prompt": "door"},
+                         {"xyxy": [0, 0, 464, 399], "conf": 0.48, "arm": "grounding_dino", "prompt": "door"},
+                         {"xyxy": [35, 168, 96, 267], "conf": 0.26, "arm": "grounding_dino", "prompt": "door"}]}
+    out = tr._ovd_proposals([], raw, ovd, 464 * 400)
+    assert len(out) == 1                              # 테두리 전체(넓이) · 0.26(점수) 는 거른다
+    d = out[0]
+    assert d["proposed_by"] == "grounding_dino" and d["conf"] == 0.52
+    assert d["_by_arm"] == {"yoloe": {"door": (0.12, False)}} and d["arms"] == ["grounding_dino", "yoloe"]
+
+
+def test_gdino_does_not_duplicate_an_existing_candidate():
+    tr = _runner_for_proposals()
+    dets = [{"name": "demo_door", "xyxy": [211, 116, 260, 228]}]
+    ovd = {"demo_door": [{"xyxy": [210, 116, 261, 229], "conf": 0.78, "arm": "grounding_dino", "prompt": "door"}]}
+    assert tr._ovd_proposals(dets, [], ovd, 464 * 400) == []
+
+
+def test_proposed_candidate_counts_gdino_once_and_pairs_with_yoloe():
+    import target_assess as ta
+    d = {"name": "demo_door", "conf": 0.52, "xyxy": [104, 118, 154, 231], "lead": "door", "proposed_by": "grounding_dino",
+         "_by_arm": {}, "_pair_with": []}
+    ovd = [{"xyxy": [104, 118, 154, 231], "conf": 0.52, "arm": "grounding_dino"}]
+    pct, txt, _ = ta.detector_support(d, ovd)
+    assert abs(pct - 52.0) < 1e-6 and txt == "gdino 0.52"   # 0.52 를 두 번 세면 77
+    d["_by_arm"] = {"yoloe": {"door": (0.12, False)}}
+    assert abs(ta.detector_support(d, ovd)[0] - 100 * (1 - 0.88 * 0.48)) < 1e-6
+
+
+def test_imgsz_floor_for_small_frames():
+    import numpy as np
+
+    class Arm:
+        imgsz, follow_frame, min_size = 1280, True, 960
+    assert vi._arm_imgsz(Arm, np.zeros((400, 464, 3), np.uint8)) == 960
+    Arm.min_size = None
+    assert vi._arm_imgsz(Arm, np.zeros((400, 464, 3), np.uint8)) == 480
+    Arm.min_size = 960
+    assert vi._arm_imgsz(Arm, np.zeros((1080, 1920, 3), np.uint8)) == 1280

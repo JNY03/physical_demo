@@ -178,7 +178,7 @@ def test_prepare_object_uses_query(env):
     desk, r, v, _ = env
     code, out = prep(desk, target="object", query="fire extinguisher", query_ko="소화기")
     assert out["targets"] == ["fire extinguisher"]
-    assert prep(desk, "S2", target="object")[0] == 400                      # query 없음
+    assert prep(desk, "S2", target="object")[0] == 400                      # query · query_ko 없음
 
 
 def test_prepare_is_idempotent_and_busy_is_409(env):
@@ -365,3 +365,18 @@ def test_health_and_unknown_paths(env):
     assert desk.handle("GET", "/scan/nope", "robot1", "", None)[0] == 404
     assert desk.handle("GET", "/scan/status", "robot1", "scan_id=ZZ", None)[0] == 404
     assert desk.handle("POST", "/scan/mark", "robot1", "", b"not json")[0] == 400
+
+
+# ---------------------------------------------------------------- 질의 정리 (2026-11-24)
+def test_prepare_object_uses_query_ko_table(env):
+    desk, r, v, _ = env
+    code, out = prep(desk, target="object", query="celedar or person orhumanbeingorhumanh", query_ko="사람")
+    assert code == 200 and out["targets"] == ["person"] and out["query_source"] == "query_ko"
+    assert json.loads(r.kv["vision_scan"])["targets"] == [{"name": "person"}]
+
+
+def test_prepare_object_rejects_broken_query(env):
+    desk, *_ = env
+    code, out = prep(desk, target="object", query="a or b", query_ko="낯선 것")
+    assert code == 400 and out["error"] == "bad_query"
+    assert prep(desk, "S3", target="object", query_ko="의자")[1]["targets"] == ["chair"]

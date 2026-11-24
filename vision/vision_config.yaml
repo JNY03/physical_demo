@@ -612,6 +612,8 @@ models:
     arm_conf: 0.05
     imgsz: 1280                   # 텍스트 arm 상한. 프레임 긴 변이 더 작으면 그것(imgsz_follow_frame)
     imgsz_follow_frame: true
+    imgsz_min: 960                # 텍스트 · prompt-free arm 하한 — 작은 프레임(Go1 464x400 → 480)에서 먼 물체가
+                                  # 후보 하한에 못 미쳤다(2026-11-24 스캔: 4~5 m 문 0.12 → 960 에서 0.30). 0 이면 끔
     max_det: 100
     merge_iou: 0.5
     max_area_ratio: 0.9           # 화면을 거의 덮는 상자는 장면이다

@@ -183,3 +183,31 @@ def test_assemble_not_found_is_best_null():
     out = sa.assemble(SCAN, [{"rotation_deg": 0, "frame_n": 1, "rec": rec()}])
     assert out["best"] is None and out["evidence"] == {"cues": [], "enough": False}
     assert out["frames"][0]["reason"] == "no candidate"
+
+
+# ---------------------------------------------------------------- 질의 정리 (2026-11-24)
+def test_query_ko_table_wins_over_broken_translation():
+    """실제 임무 111600: 발화 '사람' → 번역 'celedar or person orhumanbeingorhumanh'."""
+    assert sa.resolve_query("celedar or person orhumanbeingorhumanh", "사람") == ("person", "query_ko")
+    assert sa.resolve_query(None, "소화기") == ("fire extinguisher", "query_ko")
+
+
+def test_query_synonyms_and_plain_names():
+    assert sa.resolve_query("Human being", None) == ("person", "query_synonym")
+    assert sa.resolve_query(" Fire  Extinguisher ", "빨간 통") == ("fire extinguisher", "query")
+
+
+def test_broken_query_without_table_is_rejected():
+    name, why = sa.resolve_query("celedar or person orhumanbeingorhumanh", "낯선 것")
+    assert name is None and "plain English" in why
+    assert sa.resolve_query("", "") == (None, "no query")
+    assert sa.resolve_query("사람", None)[0] is None
+
+
+def test_ko_table_names_are_valid_target_names():
+    import cue_catalog as cc
+    for v in list(sa.KO_NAMES.values()) + list(sa.EN_SYNONYMS.values()):
+        assert cc._NAME_RE.match(v), v
+    db = cc.load_targets()
+    for v in ("person", "door", "chair", "desk"):
+        assert v in db

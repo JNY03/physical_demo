@@ -1099,6 +1099,9 @@ def _arm_imgsz(arm, bgr):
     floor = getattr(arm, "crop_floor", None)       # 구역을 잘라 볼 때만(_upscale_crop) — 작은 crop 을 이만큼까지 키운다
     if floor:
         size = max(size, int(floor))
+    low = getattr(arm, "min_size", None)           # 작은 프레임 하한(targeted imgsz_min) — 먼 물체가 후보 하한에 못 미치지 않게
+    if low:
+        size = max(size, int(low))
     return int(min(arm.imgsz, size))
 
 
@@ -2613,6 +2616,8 @@ class TargetedRunner:
                     self.missing.append(("yoloe_free", str(exc)))
         else:
             self.decoys = []
+        for _label, a in self.arms:                    # 작은 프레임에서도 이만큼은 키워 본다(imgsz_min)
+            a.min_size = int(cfg.get("imgsz_min") or 0) or None
         self.trained = []
         for t in trained_t:
             try:
@@ -2861,6 +2866,7 @@ class TargetedRunner:
                     continue
                 keep.append(d)
             ovd[n] = keep
+        dets += self._ovd_proposals(dets, raw, ovd, img_area)
         dets.sort(key=lambda d: -d["conf"])
         del dets[self.max_det:]
         depth_ms = 0.0
@@ -2885,6 +2891,44 @@ class TargetedRunner:
                 "missing_arms": [m[0] for m in self.missing], "depth_ms": depth_ms, "assess_ms": assess_ms,
                 "decoy_dropped": decoyed, "rejected_candidates": rejected, "rejected_by_gates": by_gates,
                 "ovd_boxes": sum(len(v) for v in ovd.values()), "prompt": "targeted"}, dets
+
+    def _ovd_proposals(self, dets, raw, ovd, img_area):
+        """**OVD 가 후보를 낸다**(대상 파일 ovd_propose, 2026-11-24) — 먼 시연 문을 YOLOE 가 후보 하한(conf) 아래로 보는데
+        GroundingDINO 는 0.46~0.78 로 잡았다(스캔 45°). main 문 탐지가 GroundingDINO 를 provider 로 쓴 것과 같다.
+        조건: 그 arm 의 규칙(min_score · max_area — 어안 테두리 전체를 door 로 잡는 오탐을 넓이로 거른다), 같은 대상의 후보와
+        IoU 0.5 미만. 근거가 두 번 세어지지 않게 탐지기 근거는 **하한 아래로 버려진 YOLOE 상자**(_by_arm)와 그 OVD 상자로만,
+        짝 IoU 는 자기 자신이 아니라 **YOLOE 상자**(_pair_with)와 잰다 — '서로 다른 탐지기 동의' 의 뜻 그대로."""
+        out = []
+        for t in self.targets:
+            prop = t.get("ovd_propose") or {}
+            if not prop:
+                continue
+            n = t["name"]
+            owners = {n} | {src for src, names in self.alias.items() if n in names}
+            weak = [r for r in raw if r["cls_name"] in owners and r.get("arm") in ("yoloe", "yoloe_free")]
+            for o in sorted(ovd.get(n) or [], key=lambda o: -o["conf"]):
+                rule = prop.get(o["arm"])
+                if rule is None or o["conf"] < float(rule.get("min_score", 0.3)):
+                    continue
+                x1, y1, x2, y2 = o["xyxy"]
+                if (x2 - x1) * (y2 - y1) > float(rule.get("max_area", 0.5)) * img_area:
+                    continue
+                if any(d["name"] == n and float(box_iou([d["xyxy"]], [o["xyxy"]])[0, 0]) >= 0.5 for d in dets + out):
+                    continue
+                by_arm = {}
+                for r in weak:
+                    if float(box_iou([r["xyxy"]], [o["xyxy"]])[0, 0]) >= 0.5:
+                        w = r.get("prompt") or r["cls_name"]
+                        prev = by_arm.setdefault(r["arm"], {}).get(w, (0.0, False))
+                        if r["conf"] > prev[0]:
+                            by_arm[r["arm"]][w] = (float(r["conf"]), bool(r.get("similar")))
+                out.append({"cls": self.names.index(n), "name": n, "conf": round(float(o["conf"]), 4),
+                            "xyxy": [round(float(v), 1) for v in o["xyxy"]], "agree": 1 + len(by_arm),
+                            "arms": sorted({o["arm"]} | set(by_arm)), "lead": str(o.get("prompt") or n),
+                            "votes": {str(o.get("prompt") or n): round(float(o["conf"]), 4)},
+                            "_poly": None, "_by_arm": by_arm, "proposed_by": o["arm"],
+                            "_pair_with": [{"xyxy": r["xyxy"], "conf": r["conf"], "arm": r["arm"]} for r in weak]})
+        return out
 
     def _labels(self, name):
         t = next((t for t in self.targets if t["name"] == name), {})

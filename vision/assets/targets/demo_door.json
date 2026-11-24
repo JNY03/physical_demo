@@ -95,7 +95,7 @@
     ],
     "tolerance": 0.012
   },
-  "_clip_colour": "main 2026-09-14: '1등과 차이 0.012 이내'. 실제 문 -0.0074, 목재 유리책장 오탐 -0.0159",
+  "_clip_colour": "main 2026-09-14: '1등과 차이 0.012 이내'. 실제 문 -0.0074, 목재 유리책장 오탐 -0.0159 · 2026-11-24 관문 → 점수: 스캔에서 4~5 m 시연 문이 -0.0126 · -0.0175 로 2/2 탈락(오탐 책장 -0.0159 와 겹침) — 멀고 작은 상자에서는 CLIP 색이 구별을 못 한다. 색은 hue 관문(H 85~112)이 지킨다",
   "hue": {
     "min": 85,
     "max": 112
@@ -106,7 +106,7 @@
     "free_arm": "on",
     "dict_features": "score",
     "aspect": "gate",
-    "clip_colour": "gate",
+    "clip_colour": "score",
     "clip_shape": "gate",
     "saturation": "gate",
     "hue": "gate",
@@ -130,5 +130,12 @@
     "scale": 0.05,
     "_scale": "부분의 크기(물체 긴 변 대비, 사실): 손잡이 ≈ 문 높이의 5%",
     "_what": "국소 축 — 닮은꼴(마네킹 · 외투 건 의자 / 화이트보드 · 창문 · 캐비닛)에 없는 이 대상만의 부분"
-  }
+  },
+  "ovd_propose": {
+    "grounding_dino": {
+      "min_score": 0.3,
+      "max_area": 0.5
+    }
+  },
+  "_ovd_propose": "2026-11-24: 스캔 45° 의 먼 문을 YOLOE 는 0.12(후보 하한 0.15 미만), GroundingDINO 는 0.46~0.52 로 봤다 — main 처럼 GroundingDINO 도 후보를 낸다. 라벨 정확히 door(ovd_rules) · 0.30 이상 · 화면 절반 미만(어안 테두리 전체를 door 로 잡는 0.4~0.5 오탐)"
 }

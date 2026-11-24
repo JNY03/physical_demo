@@ -9,6 +9,8 @@ bearing · box_distance). 판정은 **그 장의 값**(score_basis "frame")이�
 """
 from __future__ import annotations
 
+import re
+
 #: 국소 축의 부분 하한 — target_assess.PART_FLOOR 와 같아야 한다(시험이 묶는다)
 PART_FLOOR = 0.05
 #: 박스 높이 거리식의 검증 범위(cm) — Box_Detection calibration_range
@@ -16,6 +18,37 @@ BOX_RANGE_CM = (50.0, 300.0)
 
 #: 가시화의 target → targeted 대상 이름. object 는 query 그대로
 TARGET_NAMES = {"door": "demo_door", "box": "demo_box"}
+
+
+#: 발화 원문(query_ko) → 대상 이름(2026-11-24). **번역보다 먼저 본다** — 가시화의 LLM 번역이 실패 · 시간 초과하거나
+#: 깨진 영어('사람' → 'celedar or person orhumanbeingorhumanh')를 냈다. 등록 대상(person · door · chair · desk)은 그 근거로
+#: 판정되고, 나머지는 직접 입력(제로샷) 이름이다
+KO_NAMES = {"사람": "person", "사람들": "person", "인간": "person", "문": "door", "출입문": "door",
+            "의자": "chair", "책상": "desk", "소화기": "fire extinguisher", "상자": "box", "박스": "box",
+            "가방": "bag", "배낭": "backpack", "노트북": "laptop", "모니터": "monitor", "키보드": "keyboard",
+            "쓰레기통": "trash can", "휴지통": "trash can", "컵": "cup", "병": "bottle", "물병": "bottle",
+            "화분": "potted plant", "자전거": "bicycle", "프린터": "printer", "선반": "shelf", "책장": "bookshelf",
+            "카트": "cart", "콘": "traffic cone", "라바콘": "traffic cone", "우산": "umbrella", "공": "ball"}
+#: 영어 질의의 같은 말 → 등록 대상 이름
+EN_SYNONYMS = {"human": "person", "humans": "person", "people": "person", "human being": "person", "man": "person",
+               "woman": "person", "pedestrian": "person", "persons": "person", "doorway": "door", "seat": "chair",
+               "table": "desk"}
+_QUERY_RE = re.compile(r"^[a-z][a-z \-]{0,40}$")
+
+
+def resolve_query(query, query_ko=None):
+    """object 판의 대상 이름 → (이름, 출처) 또는 (None, 이유). 출처: query_ko(표) · query · query_synonym."""
+    ko = str(query_ko or "").strip()
+    if ko in KO_NAMES:
+        return KO_NAMES[ko], "query_ko"
+    q = " ".join(str(query or "").strip().lower().replace("_", " ").split())
+    if q in EN_SYNONYMS:
+        return EN_SYNONYMS[q], "query_synonym"
+    if not q:
+        return None, "no query"
+    if not _QUERY_RE.match(q) or " or " in " %s " % q:
+        return None, "query is not a plain English name: %r" % query
+    return q, "query"
 
 
 def target_name(target, query=None):

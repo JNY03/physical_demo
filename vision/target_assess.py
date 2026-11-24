@@ -134,7 +134,7 @@ def detector_support(d, ovd_boxes):
         elif similar:
             w, c = max(similar, key=lambda t: t[1])
             parts.append((c * SIMILAR_WEIGHT, ("%s ~%s %.2fx%.1f" % (ARM_SHOWN.get(arm, arm), w, c, SIMILAR_WEIGHT)).strip()))
-    if not parts:
+    if not parts and not d.get("proposed_by"):     # OVD 가 낸 후보는 그 확신이 아래 OVD 칸에서 한 번만 들어간다
         parts.append((float(d["conf"]), "%s %.2f" % (d.get("lead") or d["name"], d["conf"])))
     best_ovd = {}
     for o in ovd_boxes:
@@ -443,7 +443,9 @@ class TargetEvidence:
                 add("colour", pct, " · ".join("%s %.2f" % kv for kv in per.items()), passed=pct >= 50)
         # OVD 짝 IoU (main 2026-09-15) — 동의 자체는 탐지기 근거에 들어갔다
         if "ovd_pair_iou" in cues:
-            best_iou = max([_iou(box, o["xyxy"]) for o in ovd_boxes] + [0.0])
+            # OVD 가 낸 후보(proposed_by)는 짝을 YOLOE 상자(하한 아래 것 포함)에서 찾는다 — 자기 자신과 재면 늘 1 이다
+            partners = d["_pair_with"] if d.get("proposed_by") else ovd_boxes
+            best_iou = max([_iou(box, o["xyxy"]) for o in partners] + [0.0])
             mn = float(t.get("pair_iou_min", 0.42))
             ok = best_iou >= mn
             add("ovd_pair_iou", 100.0 if ok else 0.0, "pair IoU %.2f %s %.2f" % (best_iou, ">=" if ok else "<", mn),

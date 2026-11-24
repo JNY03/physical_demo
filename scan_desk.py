@@ -72,7 +72,8 @@ class Scan:
         self.device, self.source = req["device"], source
         self.target, self.query, self.query_ko = req["target"], req.get("query"), req.get("query_ko")
         self.steps, self.step_deg = req.get("steps"), req.get("step_deg")
-        self.targets = [sa.target_name(self.target, self.query)]
+        self.query_used, self.query_source = req.get("_query_used"), req.get("_query_source")
+        self.targets = [sa.target_name(self.target, self.query_used)]
         self.state, self.error = "loading", None
         self.profile_version = None
         self.created = self.touched = now
@@ -162,7 +163,9 @@ class ScanDesk:
             self.active = sc.scan_id
             self.r.set("vision_scan", json.dumps({"scan_id": sc.scan_id, "devices": [src],
                                                   "targets": [{"name": t} for t in sc.targets]}), ex=KEY_TTL_S)
-            self.log("스캔 %s 준비 — %s(%s) · %s → %s" % (sc.scan_id, req["device"], src, sc.target, sc.targets[0]))
+            self.log("스캔 %s 준비 — %s(%s) · %s → %s%s" % (sc.scan_id, req["device"], src, sc.target, sc.targets[0],
+                                                       (" (query %r · query_ko %r → %s)" % (sc.query, sc.query_ko, sc.query_source))
+                                                       if sc.target == "object" else ""))
             self._check_ready(sc)
             return self._state_body(sc, prepare=True)
 
@@ -176,12 +179,20 @@ class ScanDesk:
             raise ScanError(400, "bad_request", "device is required")
         if tgt not in ("door", "box", "object"):
             raise ScanError(400, "bad_request", "target must be door | box | object")
-        if tgt == "object" and not (isinstance(body.get("query"), str) and body["query"].strip()):
-            raise ScanError(400, "bad_request", "query (English name) is required for target object")
+        out = dict(body, scan_id=sid.strip())
+        if tgt == "object":
+            q = body.get("query") if isinstance(body.get("query"), str) else None
+            ko = body.get("query_ko") if isinstance(body.get("query_ko"), str) else None
+            if not (q and q.strip()) and not (ko and ko.strip()):
+                raise ScanError(400, "bad_request", "query (English name) or query_ko is required for target object")
+            name, why = sa.resolve_query(q, ko)        # 원문 표가 먼저 — 번역이 깨져도 등록 대상으로 간다(2026-11-24)
+            if name is None:
+                raise ScanError(400, "bad_query", why)
+            out["_query_used"], out["_query_source"] = name, why
         for k in ("steps", "step_deg"):
             if body.get(k) is not None and not isinstance(body[k], (int, float)):
                 raise ScanError(400, "bad_request", "%s must be a number" % k)
-        return dict(body, scan_id=sid.strip())
+        return out
 
     def _check_streams(self, src):
         now = self.now_ms()
@@ -247,6 +258,8 @@ class ScanDesk:
         out = {"scan_id": sc.scan_id, "state": sc.state, "profile_version": sc.profile_version, "error": sc.error}
         if prepare:
             out.update(stream=sc.source, model="targeted", targets=list(sc.targets))
+            if sc.target == "object":
+                out.update(query_used=sc.query_used, query_source=sc.query_source)
         else:
             out["angles_captured"] = sorted(sc.frames)
         return out
@@ -350,6 +363,8 @@ class ScanDesk:
                 cap.sort(key=lambda c: c["rotation_deg"])
                 out = sa.assemble({"scan_id": sc.scan_id, "target": sc.target, "query": sc.query,
                                    "targets": sc.targets, "profile_version": sc.profile_version}, cap)
+                if sc.target == "object":
+                    out.update(query_ko=sc.query_ko, query_used=sc.query_used, query_source=sc.query_source)
                 sc.computed_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
                 out["computed_at"] = sc.computed_at
                 sc.result = out
