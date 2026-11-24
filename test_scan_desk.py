@@ -198,7 +198,7 @@ def test_prepare_wrong_port_and_unknown_device(env):
 
 
 def test_prepare_device_table():
-    assert sd.DEVICE_IDS == {"go1-001": "robot1", "go1-002": "robot2", "a2-001": "a2"}
+    assert sd.DEVICE_IDS == {"go1-001": "robot1", "ep-001": "ep-001", "a2-001": "a2"}
 
 
 def test_prepare_no_stream_no_vision(tmp_path):

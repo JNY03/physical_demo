@@ -63,7 +63,7 @@ Redis 가 꺼져 있어도 스트림은 멈추지 않지만, **파일로만 저�
 ### 2) 데이터 스트림 — `server_stream_multi_source.py` (터미널 1)
 
 ```bash
-python server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · robot2 · realsense · cam360_slice)
+python server_stream_multi_source.py                    # 전체 소스 (cam360 · drone · robot1 · ep-001 · realsense · cam360_slice)
 python server_stream_multi_source.py --on drone         # 드론만
 python server_stream_multi_source.py --on drone robot1  # 골라 켜기
 python server_stream_multi_source.py --drone 100.85.243.54   # 주소를 직접 지정 (기본은 hosts.local.json)
@@ -92,7 +92,7 @@ python server_stream_multi_source.py --on pi11 pi12 pi13       # 모듈 카메�
 | 10001 | cam360 | 360 노트북이 보내는 업로드 (`/upload_pano`) + 상태 (`/state`: GPS · 배터리 · 온도) |
 | 10002 | drone | pi3 `:8890/api/frame?cam=0` + MQTT `:1883` |
 | 10003 | robot1 | pi7 `:8090/stream/1` + MQTT `:1883` |
-| 10004 | robot2 | pi1 `:8090/stream/1` + MQTT `:1883` |
+| 10004 | ep-001 | pi1 RoboMaster EP — `ws://…:8091/ws/ep-001`(H.264 → JPEG, 원본은 실행 폴더 `video.h264`) + MQTT `:1883` ep-001 토픽만 (2026-11-24, 옛 robot2 자리) |
 | 10005 | realsense | pi6 `:8090/stream/1` (컬러만, 상태 없음 · 11-13 ds5 로 옮겼다가 11-16 pi6 로 되돌림) |
 | 10006 | cam360_slice | 같은 노트북의 `e2p/slice360_live.py` 가 cam360 파노라마를 잘라 올림 (`/upload`, 상태 없음) — 5) |
 | 10007 | a2 | pi10 `:8090/stream/1` + MQTT `:1883` (a2-bridge) |
@@ -169,12 +169,12 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
   틀린 지정이면 옛 설정을 유지하고 아래 상태 줄에 이유가 나온다.
 - 창마다 이름표(`tools/ds_run.sh`, `/tmp/ds_launcher/`)가 붙는다. ✕ 로 닫으면 확인한 뒤 전부 끈다.
   런처가 비정상으로 꺼져도 창은 남고, 다시 열면 '실행 중' 으로 이어받는다. 손으로 끄기: `tools/ds_stop.sh <이름>`, 목록: `tools/ds_status.sh`.
-- 로봇 캠 번호는 robot1 · robot2 에만 쓰인다(a2 · pi11~13 은 1 고정). 슬라이스 u 를 비우면 마지막 u, v 는 −30 고정.
+- 로봇 캠 번호는 robot1 에만 쓰인다(ep-001 · a2 · pi11~13 은 카메라가 하나). 슬라이스 u 를 비우면 마지막 u, v 는 −30 고정.
 - 시험: `$env:DS_LAUNCHER_SELFTEST=1` 로 실행하면 창 없이 선택을 바꿔 보고 프로필을 찍는다.
 
 #### 스캔 탐지 창구 `/scan/*` (2026-11-24)
 
-- 가시화가 장치를 45° 씩 돌리며 쓰는 창구. 그 장치 소스의 서버 포트(`go1-001` → robot1 `:10003`, `go1-002` → robot2 `:10004`,
+- 가시화가 장치를 45° 씩 돌리며 쓰는 창구. 그 장치 소스의 서버 포트(`go1-001` → robot1 `:10003`, `ep-001` → ep-001 `:10004`,
   `a2-001` → a2 `:10007`)에 `prepare → mark × 8 → finish → result`. 돌고 있는 `targeted` 결과에서 각도마다 표시 0.5초 뒤 한 장을 잡아
   **그 장의 값**으로 판정 · 방위(스캔 시작 기준 −180~180) · 거리를 낸다. 규약은 `스캔탐지창구_요청_VZ_261123.md`, 설계는 `스캔탐지_창구_계획_261124.md`.
 - 그 기기의 `targeted` 비전이 돌고 있어야 한다(아니면 `no_vision`). 판 동안 그 비전 프로세스의 대상은 판 대상 하나뿐이고 거리를 매 장 잰다.

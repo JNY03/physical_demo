@@ -4,6 +4,7 @@
 accelerate==1.15.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
+av==19.0.2                # ep-001 영상(H.264 웹소켓)을 푼다 — 2026-11-24
 anyio==4.15.1
 certifi==2026.7.22
 charset-normalizer==3.5.2
@@ -116,4 +117,5 @@ urllib3==2.8.0
 utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183
 wandb==0.30.0
 wcwidth==0.9.1
+websocket-client==1.9.2   # ep-001 카메라 중계 ws://<pi1>:8091/ws/ep-001 — 2026-11-24
 xxhash==4.0.1

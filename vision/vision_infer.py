@@ -126,7 +126,7 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
-DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",   # cam360_slice 2026-11-11 (DS 10006)
+DEVICES = ("cam360", "drone", "robot1", "ep-001", "realsense", "cam360_slice",   # cam360_slice 2026-11-11 (DS 10006) · ep-001 2026-11-24 (DS 10004, robot2 자리)
            "a2",                                                                 # a2 2026-11-12 (DS 10007, Unitree A2)
            "pi11", "pi12",                                                        # 모듈 카메라 파이 2026-11-12 (DS 10008·10009)
            "pi13",                                                                # 모듈 카메라 파이 2026-11-13 (DS 10011)
@@ -134,7 +134,8 @@ DEVICES = ("cam360", "drone", "robot1", "robot2", "realsense", "cam360_slice",  
 MODELS = ("yoloe", "river", "targeted", "unidepth", "moge2_aerial")
 DEVICE_ALIASES = {"camera": "cam360", "360": "cam360",
                   "pi6": "realsense", "rs": "realsense", "d455": "realsense",
-                  "slice": "cam360_slice"}
+                  "slice": "cam360_slice",
+                  "robot2": "ep-001", "ep": "ep-001", "pi1": "ep-001"}
 MODEL_ALIASES = {"yoloe-pf": "yoloe", "yoloe_pf": "yoloe",
                  "moge": "moge2_aerial", "moge2": "moge2_aerial", "moge2-aerial": "moge2_aerial",
                  "moge2aerial": "moge2_aerial",

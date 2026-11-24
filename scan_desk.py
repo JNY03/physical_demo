@@ -29,8 +29,8 @@ _spec = importlib.util.spec_from_file_location("scan_assess", HERE / "vision" / 
 sa = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sa)
 
-#: 가시화가 보내는 장치 ID → 소스 (2026-11-24 확인). go1-002(pi1)는 EP 로봇으로 바뀔 수 있다
-DEVICE_IDS = {"go1-001": "robot1", "go1-002": "robot2", "a2-001": "a2"}
+#: 가시화가 보내는 장치 ID → 소스 (2026-11-24 확인). pi1 이 Go1(go1-002)에서 EP(ep-001)로 바뀌어 go1-002 는 뺐다
+DEVICE_IDS = {"go1-001": "robot1", "ep-001": "ep-001", "a2-001": "a2"}
 
 KEY_TTL_S = 20            # vision_scan 수명 — 이 서버가 죽으면 이 안에 비전이 원래 대상으로 돌아간다
 LOADING_S = 60            # prepare → ready 한도

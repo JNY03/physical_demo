@@ -10,6 +10,11 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   업로드 폼의 _file 은 붙이지 않고 JSON 칸(meta)이 같은 이름의 글자 칸을 이긴다, GO1 MJPEG 의 Frame-Meta 를 sender 로,
   드론 롱폴은 sequence_id 를 먼저 본다(없으면 옛 frame_seq). 새 이름을 먼저 읽고, 없으면 옛 이름을 읽는다.
   /health · 업로드 응답 · /push 응답의 source · host 는 그대로 둔다(V2 — VZ 비전 카드가 그 모양을 읽는다).
+2026-11-24 · pi1 을 Go1(robot2)에서 **RoboMaster EP(ep-001)** 로 바꿨다(포트 10004 는 그대로). EP 영상은 MJPEG 가 아니라
+  웹소켓 H.264(:8091/ws/ep-001)라 ep_video_loop 가 받아 풀어 JPEG 로 흘리고, 받은 H.264 원본은 실행 폴더의
+  video.h264 에 그대로 이어 쓴다(frames.jsonl 의 sender.raw_offset · raw_bytes 가 그 장의 자리). 상태는 같은
+  브로커지만 다른 기기(go1-001/nav_state · wl-001)도 올라와서 ep-001 토픽만 구독한다(MQTT_TOPICS).
+  필요 패키지 av · websocket-client — 없으면 EP 영상만 멈추고 나머지는 돈다.
 2026-11-16 · 리얼센스를 다시 **ds5 에서 pi6 로**(10005). 별칭 ds5 는 뺐다 — ds5 에는 이제 drone2 만 있다.
 2026-11-15 · 둘째 드론 drone2(10012). ds5 의 drone-agent(x500-002)가 pi3 와 같은 모양(:8890/api/frame · MQTT 1883)으로
   내므로 drone_video_loop · start_mqtt 를 그대로 쓴다. (이때 ds5 에 리얼센스도 있었다 — 11-16 pi6 로 옮김)
@@ -35,7 +40,12 @@ server_stream_multi_source.py — 로봇·드론·360 카메라 데이터 스트
   10001 cam360  영상: 카메라 노트북의 stream_to_server.py 가 POST 로 보낸다 (/upload_pano)
   10002 drone   영상: pi3 :8890/api/frame?cam=0 (Arducam) 롱폴   상태: pi3 MQTT :1883 전체 구독
   10003 robot1  영상: pi7 :8090/stream/1 을 계속 읽는다        상태: pi7 MQTT :1883 전체 구독
-  10004 robot2  영상: pi1 :8090/stream/1 을 계속 읽는다        상태: pi1 MQTT :1883 전체 구독
+  10004 ep-001  영상: pi1 ws://…:8091/ws/ep-001 (H.264, 1280x720 약 31fps)   상태: pi1 MQTT :1883 ep-001 토픽만
+                  RoboMaster EP. 첫 글자 메시지 {"t":"hello","codec":…} 뒤 이진 메시지 한 개 = 한 장:
+                  [0] 키프레임 1/0 · [1:9] 찍은 시각 ms(big-endian double) · [9:] Annex-B H.264 액세스 유닛.
+                  약 1초마다 AUD 만 든 빈 장이 섞여 온다 — 원본 파일엔 쓰고 풀기는 건너뛴다.
+                  토픽 zoneA/robot/ep-001/{status,state,heartbeat} (JSON) · terminal/ep-001/uplink (protobuf → base64)
+                  옛 robot2(pi1 Go1)는 없앴다. 별칭 robot2 · pi1 은 이 소스로 간다
   10005 realsense 영상: pi6 :8090/stream/1 을 계속 읽는다      상태: 없음 (리얼센스 쪽은 상태를 내지 않는다)
                   pi6 에 USB 로 붙은 RealSense D455 의 **컬러** 스트림이다(깊이가 아니다).
                   깊이도 UVC 로는 나온다(/dev/video0 의 Z16). 다만 단위·내부/외부 파라미터·
@@ -180,14 +190,15 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
 
 준비
   pip install redis paho-mqtt        (파이썬 3.8 이상)
+  pip install av websocket-client opencv-python   (ep-001 영상 — H.264 웹소켓을 풀어 JPEG 로)
   Redis 5.0 이상 (Stream 기능). 기본으로 이 기기 127.0.0.1:6380 의 전용 Redis 에 넣는다 (--redis 로 바꿈).
   tailnet 의 다른 기기도 구독하려면 Redis 를 tailscale 주소에도 묶는다 (띄우는 명령은 vision/vision_infer.py 맨 위).
     다른 기기에서: redis.Redis.from_url("redis://100.114.96.78:6380/0")   (100.114.96.78 = 이 PC tailscale 주소)
   Redis 나 paho-mqtt 가 없어도 멈추지 않는다. 저장은 계속하고 경고만 낸다.
 
 주소 설정: 기기 주소(테일넷 IP)는 코드에 두지 않는다. hosts.example.json 을 hosts.local.json 으로
-  복사해 채우거나 환경변수 PD_HOST_ROBOT1 / PD_HOST_ROBOT2 / PD_HOST_DRONE /
-  PD_HOST_REALSENSE / PD_HOST_A2 를 쓴다.
+  복사해 채우거나 환경변수 PD_HOST_ROBOT1 / PD_HOST_EP_001 / PD_HOST_DRONE /
+  PD_HOST_REALSENSE / PD_HOST_A2 를 쓴다 (소스 이름의 - 는 환경변수 · 명령행 칸에서 _ 로 바뀐다).
   hosts.local.json 은 .gitignore 대상 — 공개 저장소에 올리지 않는다.
 """
 import argparse
@@ -198,6 +209,7 @@ import os
 import signal
 import socket
 import socketserver
+import struct
 import sys
 import threading
 import time
@@ -217,27 +229,42 @@ try:
 except ImportError:
     mqtt = None
 
+try:                                              # ep-001 영상(H.264 웹소켓)에만 쓴다 — 없으면 그 영상만 멈춘다
+    import av
+    import cv2
+    import websocket
+except ImportError as _e:
+    av = cv2 = websocket = None
+    EP_IMPORT_ERROR = str(_e)
+else:
+    EP_IMPORT_ERROR = None
+
 
 # ---------------------------------------------------------------- 고정값
-SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "robot2": 10004,
+SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "ep-001": 10004,
            "realsense": 10005, "cam360_slice": 10006, "a2": 10007,
            "pi11": 10008, "pi12": 10009, "pi13": 10011,
            "drone2": 10012}
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
-           "drone": "drone", "drone2": "drone2", "x500-002": "drone2", "robot1": "robot1", "robot2": "robot2",
+           "drone": "drone", "drone2": "drone2", "x500-002": "drone2", "robot1": "robot1",
+           "ep-001": "ep-001", "ep": "ep-001", "ep1": "ep-001", "robomaster": "ep-001", "pi1": "ep-001",
+           "robot2": "ep-001",            # 옛 이름 — pi1 이 Go1 에서 EP 로 바뀌었다 (2026-11-24)
            "realsense": "realsense", "pi6": "realsense", "rs": "realsense",
            "d455": "realsense",
            "cam360_slice": "cam360_slice", "slice": "cam360_slice",
            "a2": "a2", "unitree_a2": "a2",
            "pi11": "pi11", "picam": "pi11", "pi12": "pi12", "pi13": "pi13",
-           # 가시화가 보내는 장치 ID (스캔 창구, 2026-11-24) — go1-002(pi1)는 EP 로봇으로 바뀔 수 있다
-           "go1-001": "robot1", "go1-002": "robot2", "a2-001": "a2"}
+           # 가시화가 보내는 장치 ID (스캔 창구, 2026-11-24). go1-002 는 뺐다 — pi1 이 EP(ep-001)가 됐고,
+           # Go1 ID 로 EP 카메라를 고르면 다른 기기의 결과를 Go1 것으로 돌려주게 된다
+           "go1-001": "robot1", "a2-001": "a2"}
 #: 라즈베리파이 모듈 카메라(CSI imx708) 소스. 같은 picam_mjpeg.py 가 같은 모양으로 내므로
 #: 가져오는 쪽은 하나다 — 기기를 더할 때 여기와 SOURCES·DEFAULT_HOST·--piNN 만 늘린다.
 PICAM_SOURCES = ("pi11", "pi12", "pi13")
 #: MQTT 로 상태를 받는 소스. 여기 없는 소스는 영상만 받는다 — 브로커가 없는 기기에
 #: 붙으러 가면 끝없이 재접속만 하고 로그가 그 경고로 덮인다.
-STATE_SOURCES = {"drone", "drone2", "robot1", "robot2", "a2"}
+STATE_SOURCES = {"drone", "drone2", "robot1", "ep-001", "a2"}
+#: 전체(#) 대신 구독할 토픽. pi1 브로커에는 다른 기기(go1-001/nav_state · wl-001)도 올라온다 (2026-11-24)
+MQTT_TOPICS = {"ep-001": ("+/robot/ep-001/#", "terminal/ep-001/#")}
 #: drone-agent(/api/frame 롱폴)로 영상을 내는 드론 소스. 가져오는 쪽은 drone_video_loop 하나다.
 DRONE_SOURCES = ("drone", "drone2")
 #: 가져오지 않고 POST 로 받기만 하는 소스 (기기 주소 · 가져오기 스레드 없음).
@@ -249,9 +276,10 @@ HOSTS_FILE = Path(__file__).resolve().parent / "hosts.local.json"   # 실제 주
 
 
 def load_default_hosts():
-    """기본 주소: 환경변수 PD_HOST_<소스> > hosts.local.json > 없음. 명령행 --robot1 / --robot2 / --drone 이 가장 우선."""
+    """기본 주소: 환경변수 PD_HOST_<소스> > hosts.local.json > 없음. 명령행 --robot1 / --ep-001 / --drone 이 가장 우선.
+    소스 이름의 - 는 환경변수에서 _ 로 쓴다 (PD_HOST_EP_001)."""
     hosts = {"robot1": None,         # pi7 (go1-camview 8090 · mosquitto 1883)
-             "robot2": None,         # pi1 (go1-camview 8090 · mosquitto 1883)
+             "ep-001": None,         # pi1 (RoboMaster EP — 카메라 웹소켓 8091 · mosquitto 1883)
              "drone": None,          # pi3 (drone-agent 8890 · mosquitto 1883)
              "drone2": None,         # ds5 (drone-agent 8890 · mosquitto 1883 — x500-002)
              "realsense": None,      # pi6 (realsense_mjpeg.py 8090 · 상태 없음)
@@ -266,7 +294,7 @@ def load_default_hosts():
             raise SystemExit("%s 을 못 읽었습니다: %s" % (HOSTS_FILE.name, e))
         hosts.update((k, data[k]) for k in hosts if data.get(k))
     for k in hosts:
-        v = os.environ.get("PD_HOST_" + k.upper())
+        v = os.environ.get("PD_HOST_" + k.upper().replace("-", "_"))
         if v:
             hosts[k] = v
     return hosts
@@ -276,6 +304,10 @@ DEFAULT_HOST = load_default_hosts()
 ROBOT_VIDEO_PORT = 8090      # go1_cam_view.py — GET /stream/<카메라 번호> (MJPEG, VZ 카드가 쓰는 주소)
 DRONE_VIDEO_PORT = 8890      # 드론 agent    — GET /api/frame?cam=&since=&wait= (meta JSON + JPEG)
 DRONE_MJPEG_PORT = 8080      # pi3 cam-stream.service (~/cam_stream.py 0 1) — GET /cam<번호>.mjpg (MJPEG)
+EP_VIDEO_PORT = 8091         # EP 카메라 중계 — ws://<pi1>:8091/ws/<cam> (H.264 웹소켓, status.media.url 과 같다)
+EP_CAM = "ep-001"            #   그 <cam>
+EP_JPEG_QUALITY = 90         # 푼 장을 JPEG 로 (실측 1280x720 약 150KB · 인코딩 6.5ms)
+EP_RAW_FILE = "video.h264"   # 받은 H.264 원본을 그대로 이어 쓰는 파일 (실행 폴더 안, ffplay 로 바로 열린다)
 MQTT_PORT = 1883             # 파이 mosquitto (프로그램용 입구. 9001 은 같은 브로커의 브라우저용 입구)
 DRONE_CAM = 0                # drone agent 카메라 번호: 0 = Arducam(AR0234, CAM0) · 1 = imx708 wide
 DRONE_ARDUCAM = False        # True: drone agent 대신 cam-stream.service :8080/cam<DRONE_ARDUCAM_CAM>.mjpg 에서 받는다
@@ -1796,6 +1828,115 @@ def robot_video_loop(src, host, cam, port=ROBOT_VIDEO_PORT, path=None):
                 conn.close()
 
 
+# ---------------------------------------------------------------- 가져오는 쪽: EP 영상 (H.264 웹소켓)
+def _has_slice(au):
+    """Annex-B 액세스 유닛에 화면 조각(NAL 1~5)이 있나. EP 중계는 약 1초마다 AUD 만 든 빈 장을 섞어 보내는데
+    그것을 디코더에 넣으면 InvalidDataError 가 난다(2026-11-24 실측)."""
+    i = au.find(b"\x00\x00\x01")
+    while i != -1 and i + 3 < len(au):
+        if 1 <= (au[i + 3] & 0x1F) <= 5:
+            return True
+        i = au.find(b"\x00\x00\x01", i + 3)
+    return False
+
+
+def ep_video_loop(src, host, cam=EP_CAM, port=EP_VIDEO_PORT):
+    """ws://<host>:8091/ws/<cam> 의 H.264 를 받아 (1) 원본을 실행 폴더 video.h264 에 그대로 이어 쓰고
+    (2) 풀어서 JPEG 로 add_frame 한다 — 나머지(Redis · /stream · 비전)는 다른 소스와 같다."""
+    url = "ws://%s:%d/ws/%s" % (host, port, cam)
+    if EP_IMPORT_ERROR:
+        src.set_status("video", "패키지 없음 (%s) — pip install av websocket-client opencv-python" % EP_IMPORT_ERROR)
+        log("%s 영상: 패키지가 없어 받지 않습니다 (%s) — pip install av websocket-client opencv-python"
+            % (src.name, EP_IMPORT_ERROR))
+        return
+    raw_rel = src.rel + "/" + EP_RAW_FILE
+    via = "pull:" + url
+    fails, receiving = 0, False
+    src.set_status("video", "붙는 중 " + url)
+    while not STOP.is_set():
+        ws = raw = None
+        try:
+            ws = websocket.create_connection(url, timeout=10)
+            raw = open(src.dir / EP_RAW_FILE, "ab")             # 다시 붙어도 같은 파일에 이어 쓴다
+            dec = av.CodecContext.create("h264", "r")
+            hello, metas, got_key = {}, {}, False
+            while not STOP.is_set():
+                op, data = ws.recv_data()
+                if op == websocket.ABNF.OPCODE_TEXT:
+                    try:
+                        hello = json.loads(data.decode("utf-8"))
+                    except ValueError:
+                        warn(src.name + "-hello", "%s 글자 메시지를 못 풀었음: %r" % (src.name, data[:200]))
+                    continue
+                if op == websocket.ABNF.OPCODE_CLOSE:
+                    raise RuntimeError("상대가 닫음")
+                if op != websocket.ABNF.OPCODE_BINARY or len(data) < 10:
+                    continue
+                key = bool(data[0])
+                ts_ms = struct.unpack(">d", data[1:9])[0]
+                au = data[9:]
+                offset = raw.tell()
+                try:
+                    raw.write(au)                               # 원본은 빈 장까지 전부 그대로
+                    raw.flush()                                 # 데몬 스레드라 끝낼 때 close 가 안 불릴 수 있다 — frames.jsonl 처럼
+                                                                # 장마다 내보낸다 (안 하면 끝의 장들이 파일 밖을 가리켰다, 2026-11-24)
+                except OSError as e:
+                    warn("raw-" + src.name, "%s H.264 원본 저장 실패 (%s) — 영상은 계속합니다" % (src.name, describe(e)))
+                    offset = None
+                if not got_key:                                 # 키프레임 전의 장은 풀 수 없다
+                    if not key:
+                        continue
+                    got_key = True
+                if not _has_slice(au):
+                    continue
+                sender = {"camera_id": hello.get("cam", cam), "codec": hello.get("codec"),
+                          "timestamp": datetime.fromtimestamp(ts_ms / 1000.0, KST).isoformat(timespec="milliseconds"),
+                          "ts_ms": ts_ms, "key": key,
+                          "raw_file": raw_rel if offset is not None else None,
+                          "raw_offset": offset, "raw_bytes": len(au)}
+                pkt = av.Packet(au)
+                pkt.pts = int(ts_ms)                            # 디코더가 장을 미뤄 내도 짝이 맞게
+                metas[pkt.pts] = sender
+                try:
+                    frames = dec.decode(pkt)
+                except av.error.InvalidDataError as e:
+                    metas.pop(pkt.pts, None)
+                    warn(src.name + "-decode", "%s H.264 한 장을 못 풀었음 (%s) — 건너뜀" % (src.name, describe(e)))
+                    continue
+                for fr in frames:
+                    meta = metas.pop(fr.pts, None) or sender
+                    ok, jpg = cv2.imencode(".jpg", fr.to_ndarray(format="bgr24"),
+                                           [cv2.IMWRITE_JPEG_QUALITY, EP_JPEG_QUALITY])
+                    if not ok:
+                        warn(src.name + "-jpeg", "%s JPEG 로 못 바꿈 — 건너뜀" % src.name)
+                        continue
+                    if not receiving:
+                        receiving, fails = True, 0
+                        src.set_status("video", "받는 중 " + url)
+                        log("%s 영상 받는 중 — %s (%dx%d, 원본 → %s)"
+                            % (src.name, url, fr.width, fr.height, raw_rel))
+                    src.add_frame(jpg.tobytes(), meta, via)
+                if len(metas) > 64:                             # 못 나온 장의 짝이 쌓이지 않게
+                    metas.clear()
+            if not STOP.is_set():
+                raise RuntimeError("영상 스트림이 끝남")
+        except Exception as e:
+            if STOP.is_set():
+                break
+            receiving = False
+            fails += 1
+            src.set_status("video", "끊김 (%s) — 다시 붙는 중" % describe(e))
+            warn(src.name + "-video", "%s 영상 안 됨 %s (%s) — 다시 붙는 중" % (src.name, url, describe(e)))
+            STOP.wait(min(5.0, 0.5 * fails))
+        finally:
+            for x in (ws, raw):
+                if x is not None:
+                    try:
+                        x.close()
+                    except Exception:
+                        pass
+
+
 # ---------------------------------------------------------------- 가져오는 쪽: 드론 영상 (/api/frame 롱폴)
 def drone_video_loop(src, host, cam):
     base = "http://%s:%d" % (host, DRONE_VIDEO_PORT)
@@ -1885,9 +2026,10 @@ def start_mqtt(src, host):
                 src.set_status("state", "접속 거부 (%s)" % rc)
                 warn(src.name + "-mqtt", "%s 상태 %s 접속 거부 (%s)" % (src.name, url, rc))
                 return
-            client.subscribe("#", qos=1)
+            topics = MQTT_TOPICS.get(src.name, ("#",))
+            client.subscribe([(t, 1) for t in topics])
             src.set_status("state", "받는 중 " + url)
-            log("%s 상태 받는 중 — %s 전체 토픽(#)" % (src.name, url))
+            log("%s 상태 받는 중 — %s %s" % (src.name, url, "전체 토픽(#)" if topics == ("#",) else " · ".join(topics)))
         except Exception as e:
             log("%s 상태 구독 오류 (%s)" % (src.name, describe(e)))
 
@@ -2035,16 +2177,17 @@ def main():
     ap = argparse.ArgumentParser(
         description="로봇·드론·360 카메라 데이터를 받아 Redis Stream 으로 흘리고 전부 파일로 저장한다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · robot2 10004 · realsense 10005 · "
+        epilog="포트: cam360 10001 · drone 10002 · robot1 10003 · ep-001 10004 · realsense 10005 · "
                "cam360_slice 10006 · a2 10007 · pi11 10008 · pi12 10009 · pi13 10011 · drone2 10012\n"
                "자세한 설명은 파일 맨 위 주석.")
     ap.add_argument("--on", nargs="+", metavar="소스",
-                    help="켤 소스만 고른다: cam360 drone robot1 robot2 realsense cam360_slice a2 "
+                    help="켤 소스만 고른다: cam360 drone robot1 ep-001 realsense cam360_slice a2 "
                          "pi11 pi12 pi13 drone2 (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
                     help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
-    ap.add_argument("--robot2", default=DEFAULT_HOST["robot2"], metavar="주소",
-                    help="로봇2 파이(pi1) 주소. 기본 hosts.local.json / PD_HOST_* 값")
+    ap.add_argument("--ep-001", "--robot2", dest="ep_001", default=DEFAULT_HOST["ep-001"], metavar="주소",
+                    help="RoboMaster EP 파이(pi1) 주소. 기본 hosts.local.json / PD_HOST_EP_001 값 "
+                         "(--robot2 는 옛 이름 — pi1 이 Go1 에서 EP 로 바뀌었다)")
     ap.add_argument("--realsense", default=DEFAULT_HOST["realsense"], metavar="주소",
                     help="pi6 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
     ap.add_argument("--realsense-cam", type=int, default=1, metavar="번호",
@@ -2105,11 +2248,12 @@ def main():
         names = sorted(SOURCES, key=lambda nm: SOURCES[nm])
     hosts = {}
     for k in DEFAULT_HOST:
-        if getattr(args, k):
-            hosts[k] = clean_host(getattr(args, k), "--" + k)
+        v = getattr(args, k.replace("-", "_"))       # ep-001 → args.ep_001
+        if v:
+            hosts[k] = clean_host(v, "--" + k)
         elif k in names and not args.no_pull:
             raise SystemExit("%s 주소가 없습니다: --%s 로 주거나 hosts.local.json / PD_HOST_%s 에 적으세요"
-                             % (k, k, k.upper()))
+                             % (k, k, k.upper().replace("-", "_")))
     fwd_host = clean_host(args.forward, "--forward") if args.forward else None
 
     sink = RedisSink(args.redis, args.maxlen)
@@ -2195,6 +2339,10 @@ def main():
                 cam = args.realsense_cam
                 video = "http://%s:%d/stream/%d" % (host, ROBOT_VIDEO_PORT, cam)
                 pulls.append((robot_video_loop, (s, host, cam), s, host))
+            elif s.name == "ep-001":
+                # RoboMaster EP — MJPEG 가 아니라 H.264 웹소켓이다 (2026-11-24)
+                video = "ws://%s:%d/ws/%s  (H.264 → JPEG, 원본 %s)" % (host, EP_VIDEO_PORT, EP_CAM, EP_RAW_FILE)
+                pulls.append((ep_video_loop, (s, host), s, host))
             elif s.name == "a2":
                 # a2-bridge 카메라는 /stream/1 하나뿐이다 (GO1 의 --robot-cam 1~5 와 무관)
                 video = "http://%s:%d/stream/1" % (host, ROBOT_VIDEO_PORT)
@@ -2210,7 +2358,8 @@ def main():
                 pulls.append((robot_video_loop, (s, host, args.robot_cam), s, host))
             print("  %-9s :%d  영상 ← %s" % (s.name, s.port, video))
             if s.name in STATE_SOURCES:
-                print("  %-9s %6s  상태 ← mqtt://%s:%d (전체 토픽)" % ("", "", host, MQTT_PORT))
+                print("  %-9s %6s  상태 ← mqtt://%s:%d (%s)" % ("", "", host, MQTT_PORT,
+                                                              " · ".join(MQTT_TOPICS.get(s.name, ("전체 토픽",)))))
             else:
                 print("  %-9s %6s  상태 없음 (이 기기에 브로커가 없다)" % ("", ""))
     print("  " + "-" * 70)
