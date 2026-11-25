@@ -23,7 +23,12 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
   > /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
 apt-get update -qq
-apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nvidia-container-toolkit qemu-user-static binfmt-support
+# arm64 에뮬레이션: Ubuntu 25.10+ 는 qemu-user(정적) + qemu-user-binfmt, 그 전은 qemu-user-static
+QEMU=qemu-user-static
+apt-cache policy qemu-user-static 2>/dev/null | grep -q 'Candidate: (none)' && QEMU="qemu-user qemu-user-binfmt"
+apt-cache show qemu-user-static >/dev/null 2>&1 || QEMU="qemu-user qemu-user-binfmt"
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nvidia-container-toolkit $QEMU
 
 # 테일넷 사설 레지스트리(이 기기 :5000)를 http 로 허용 + NVIDIA 런타임 등록
 TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
