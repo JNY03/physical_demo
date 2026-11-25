@@ -1,0 +1,613 @@
+{
+ "models": [
+  {
+   "key": "yoloe",
+   "shown": "yoloe"
+  },
+  {
+   "key": "river",
+   "shown": "river"
+  },
+  {
+   "key": "targeted",
+   "shown": "지정 클래스 탐지"
+  },
+  {
+   "key": "unidepth",
+   "shown": "unidepth"
+  },
+  {
+   "key": "moge2_aerial",
+   "shown": "moge2_aerial"
+  }
+ ],
+ "overlay_defaults": {
+  "yoloe": {
+   "label": [
+    "name",
+    "conf"
+   ],
+   "cards": null,
+   "count": false,
+   "roi": true,
+   "show_non_suspect": true,
+   "show_rejected": false,
+   "title": true,
+   "pose": null
+  },
+  "river": {
+   "label": [
+    "lead",
+    "dist"
+   ],
+   "cards": "hover",
+   "count": false,
+   "roi": true,
+   "show_non_suspect": true,
+   "show_rejected": false,
+   "title": true,
+   "pose": null
+  },
+  "targeted": {
+   "label": [
+    "name",
+    "dist"
+   ],
+   "cards": "hover",
+   "count": false,
+   "roi": true,
+   "show_non_suspect": true,
+   "show_rejected": false,
+   "title": true,
+   "pose": null
+  },
+  "unidepth": {
+   "label": [
+    "name",
+    "conf",
+    "range",
+    "gps"
+   ],
+   "cards": null,
+   "count": false,
+   "roi": null,
+   "show_non_suspect": true,
+   "show_rejected": false,
+   "title": true,
+   "pose": true
+  },
+  "moge2_aerial": {
+   "label": [
+    "name",
+    "conf",
+    "range",
+    "gps"
+   ],
+   "cards": null,
+   "count": false,
+   "roi": null,
+   "show_non_suspect": true,
+   "show_rejected": false,
+   "title": true,
+   "pose": true
+  }
+ },
+ "targets": [
+  {
+   "name": "person",
+   "shown": "person",
+   "default": true,
+   "cues": [
+    {
+     "key": "class",
+     "label": "탐지기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "free_arm",
+     "label": "후보 넓히기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "semantic",
+     "label": "글 설명",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "dict_features",
+     "label": "특징 사전",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "shape",
+     "label": "형상",
+     "default": false,
+     "needs_distance": false
+    },
+    {
+     "key": "parts",
+     "label": "부분",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "size_veto",
+     "label": "크기 거부",
+     "default": true,
+     "needs_distance": true
+    }
+   ]
+  },
+  {
+   "name": "door",
+   "shown": "door",
+   "default": true,
+   "cues": [
+    {
+     "key": "class",
+     "label": "탐지기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "free_arm",
+     "label": "후보 넓히기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "semantic",
+     "label": "글 설명",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "dict_features",
+     "label": "특징 사전",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "shape",
+     "label": "형상",
+     "default": false,
+     "needs_distance": false
+    },
+    {
+     "key": "ovd_pair_iou",
+     "label": "OVD 짝 IoU",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "clip_shape",
+     "label": "CLIP 모양",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "saturation",
+     "label": "채도",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "parts",
+     "label": "부분",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "aspect",
+     "label": "종횡비",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "size_veto",
+     "label": "크기 거부",
+     "default": true,
+     "needs_distance": true
+    }
+   ]
+  },
+  {
+   "name": "chair",
+   "shown": "chair",
+   "default": true,
+   "cues": [
+    {
+     "key": "class",
+     "label": "탐지기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "free_arm",
+     "label": "후보 넓히기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "semantic",
+     "label": "글 설명",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "dict_features",
+     "label": "특징 사전",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "shape",
+     "label": "형상",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "size_veto",
+     "label": "크기 거부",
+     "default": true,
+     "needs_distance": true
+    },
+    {
+     "key": "lookalike",
+     "label": "닮은꼴 감점",
+     "default": true,
+     "needs_distance": false
+    }
+   ]
+  },
+  {
+   "name": "desk",
+   "shown": "desk",
+   "default": true,
+   "cues": [
+    {
+     "key": "class",
+     "label": "탐지기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "free_arm",
+     "label": "후보 넓히기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "semantic",
+     "label": "글 설명",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "dict_features",
+     "label": "특징 사전",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "shape",
+     "label": "형상",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "size_veto",
+     "label": "크기 거부",
+     "default": true,
+     "needs_distance": true
+    },
+    {
+     "key": "lookalike",
+     "label": "닮은꼴 감점",
+     "default": true,
+     "needs_distance": false
+    }
+   ]
+  },
+  {
+   "name": "demo_door",
+   "shown": "demo door",
+   "default": true,
+   "cues": [
+    {
+     "key": "class",
+     "label": "탐지기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "free_arm",
+     "label": "후보 넓히기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "semantic",
+     "label": "글 설명",
+     "default": false,
+     "needs_distance": false
+    },
+    {
+     "key": "dict_features",
+     "label": "특징 사전",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "shape",
+     "label": "형상",
+     "default": false,
+     "needs_distance": false
+    },
+    {
+     "key": "ovd_pair_iou",
+     "label": "OVD 짝 IoU",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "clip_colour",
+     "label": "CLIP 색",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "clip_shape",
+     "label": "CLIP 모양",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "saturation",
+     "label": "채도",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "parts",
+     "label": "부분",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "hue",
+     "label": "색상 H",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "aspect",
+     "label": "종횡비",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "size_veto",
+     "label": "크기 거부",
+     "default": false,
+     "needs_distance": true
+    }
+   ]
+  },
+  {
+   "name": "demo_box",
+   "shown": "demo box",
+   "default": true,
+   "cues": [
+    {
+     "key": "class",
+     "label": "탐지기",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "semantic",
+     "label": "글 설명",
+     "default": false,
+     "needs_distance": false
+    },
+    {
+     "key": "aspect",
+     "label": "종횡비",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "ground",
+     "label": "바닥 위치",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "height",
+     "label": "높이 측정",
+     "default": true,
+     "needs_distance": false
+    },
+    {
+     "key": "calibration",
+     "label": "거리 검증 범위",
+     "default": true,
+     "needs_distance": false
+    }
+   ]
+  }
+ ],
+ "direct": {
+  "always": [
+   {
+    "key": "class",
+    "label": "탐지기",
+    "needs_distance": false
+   },
+   {
+    "key": "free_arm",
+    "label": "후보 넓히기",
+    "needs_distance": false
+   },
+   {
+    "key": "semantic",
+    "label": "글 설명",
+    "needs_distance": false
+   }
+  ],
+  "with_size": [
+   {
+    "key": "shape",
+    "label": "형상",
+    "needs_distance": false
+   },
+   {
+    "key": "size_veto",
+    "label": "크기 거부",
+    "needs_distance": true
+   }
+  ],
+  "with_colour": [
+   {
+    "key": "colour",
+    "label": "색상",
+    "needs_distance": false
+   }
+  ]
+ },
+ "colours": [
+  "red",
+  "orange",
+  "yellow",
+  "green",
+  "light_blue",
+  "blue",
+  "purple",
+  "brown",
+  "white",
+  "gray",
+  "black"
+ ],
+ "distance_default": true,
+ "distance_available": true,
+ "overlay": {
+  "yoloe": {
+   "name": true,
+   "conf": true,
+   "id": true,
+   "dist": true,
+   "gps": true,
+   "count": true,
+   "roi": true,
+   "cards": "판정 카드가 없는 모델",
+   "show_non_suspect": "판정 카드가 없는 모델",
+   "show_rejected": "demo_box 를 고를 때",
+   "title": true,
+   "pose": "깊이 모델 전용"
+  },
+  "river": {
+   "name": true,
+   "conf": true,
+   "id": true,
+   "dist": true,
+   "gps": true,
+   "count": true,
+   "roi": true,
+   "cards": true,
+   "show_non_suspect": true,
+   "show_rejected": "demo_box 를 고를 때",
+   "title": true,
+   "pose": "깊이 모델 전용"
+  },
+  "targeted": {
+   "name": true,
+   "conf": true,
+   "id": true,
+   "dist": true,
+   "gps": true,
+   "count": true,
+   "roi": true,
+   "cards": true,
+   "show_non_suspect": true,
+   "show_rejected": true,
+   "title": true,
+   "pose": "깊이 모델 전용"
+  },
+  "unidepth": {
+   "name": true,
+   "conf": "검출 모델이 아님",
+   "id": "검출 모델이 아님",
+   "dist": true,
+   "gps": true,
+   "count": "검출 모델이 아님",
+   "roi": "검출 모델이 아님",
+   "cards": "판정 카드가 없는 모델",
+   "show_non_suspect": "판정 카드가 없는 모델",
+   "show_rejected": "demo_box 를 고를 때",
+   "title": true,
+   "pose": true
+  },
+  "moge2_aerial": {
+   "name": true,
+   "conf": "검출 모델이 아님",
+   "id": "검출 모델이 아님",
+   "dist": true,
+   "gps": true,
+   "count": "검출 모델이 아님",
+   "roi": "검출 모델이 아님",
+   "cards": "판정 카드가 없는 모델",
+   "show_non_suspect": "판정 카드가 없는 모델",
+   "show_rejected": "demo_box 를 고를 때",
+   "title": true,
+   "pose": true
+  }
+ },
+ "card_modes": [
+  {
+   "key": "off",
+   "shown": "끔"
+  },
+  {
+   "key": "hover",
+   "shown": "마우스 올릴 때"
+  },
+  {
+   "key": "always",
+   "shown": "항상"
+  }
+ ],
+ "features": [
+  {
+   "key": "reid",
+   "shown": "객체 재식별",
+   "available": true
+  }
+ ],
+ "gpu_mb_option": {
+  "yoloe": 900,
+  "river": 2400,
+  "targeted": 0,
+  "unidepth": 1500,
+  "moge2_aerial": 1500
+ },
+ "options": {
+  "yoloe": [
+   {
+    "key": "class",
+    "label": "탐지기",
+    "models": [
+     {
+      "key": "yoloe_pf_l",
+      "note": "YOLOE-11l-seg prompt-free (내장 어휘 4585종) — yoloe 선택지",
+      "available": true
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -172,6 +172,16 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
 - 로봇 캠 번호는 robot1 에만 쓰인다(ep-001 · a2 · pi11~13 은 카메라가 하나). 슬라이스 u 를 비우면 마지막 u, v 는 −30 고정.
 - 시험: `$env:DS_LAUNCHER_SELFTEST=1` 로 실행하면 창 없이 선택을 바꿔 보고 프로필을 찍는다.
 
+#### 웹 런처 (2026-11-25, Docker 계획 D7)
+
+- `python -m ds_resources.weblauncher [--host 127.0.0.1] [--port 10080] [--redis redis://127.0.0.1:6380/0] [--state-dir state]`
+  → 브라우저로 `http://localhost:10080/`. 화면과 규칙은 위 런처와 같다(탭 셋 · 1초 뒤 반영 · 배치 보기 · 상태 줄).
+- **원하는 상태(`ds_desired` · `state/desired.json`)만 쓴다.** 프로세스를 띄우고 끄는 것은 감독자(`ds_resources.supervisor`)다.
+  상태 줄은 감독자 보고(`ds_reported:<역할>`)의 `converged` · 구성 요소 상태 · 이유(「반영 안 됨」)를 보여 준다.
+- 화면 선택은 원하는 상태의 `ui` 칸(런처 settings.json 과 같은 모양)에 남아 다시 열면 그대로다.
+- **인증이 없다.** 기본은 127.0.0.1 에만 연다. `--host 0.0.0.0` 은 그 망의 누구나 실행 · 끄기를 할 수 있다 — 테일넷처럼 믿는 망에서만.
+- Windows 바로가기: `tools/launcher/web_launcher.cmd [URL]` — 브라우저만 연다(주소: 인자 → `DS_WEB_LAUNCHER_URL` → `http://localhost:10080/`).
+
 #### 스캔 탐지 창구 `/scan/*` (2026-11-24)
 
 - 가시화가 장치를 45° 씩 돌리며 쓰는 창구. 그 장치 소스의 서버 포트(`go1-001` → robot1 `:10003`, `ep-001` → ep-001 `:10004`,

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>데이터 스트림 실행</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app">
+  <header class="top">
+    <h1>데이터 스트림 실행</h1>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="stream" class="on">스트림</button>
+      <button type="button" role="tab" data-tab="target">지정 클래스</button>
+      <button type="button" role="tab" data-tab="overlay">오버레이</button>
+    </nav>
+  </header>
+
+  <section id="tab-stream" class="tab on">
+    <fieldset class="group">
+      <legend>데이터 스트림</legend>
+      <div class="row"><span class="lab">소스</span><div id="sources" class="grid6"></div></div>
+      <div class="row"><span class="lab">로봇 캠</span><select id="robotCam"></select></div>
+      <div class="row"><span class="lab">슬라이스</span>
+        <label><input type="checkbox" id="slice"> 켜기</label>
+        <label class="inl">u <input type="text" id="sliceU" size="6" inputmode="decimal"></label>
+        <span id="sliceV" class="muted"></span>
+      </div>
+    </fieldset>
+    <fieldset class="group">
+      <legend>비전 추론</legend>
+      <div class="row">
+        <label><input type="checkbox" id="vision"> 켜기</label>
+        <label><input type="checkbox" id="orchestrate"> 자원 배분</label>
+        <button type="button" id="planBtn">배치 보기</button>
+      </div>
+      <div class="row"><span class="lab">모델</span><div id="models" class="grid4"></div></div>
+      <div class="row"><span class="lab">기능</span><div id="features" class="grid4"></div></div>
+    </fieldset>
+  </section>
+
+  <section id="tab-target" class="tab">
+    <fieldset class="group" id="targetGroup">
+      <legend>대상</legend>
+      <div id="targets" class="flow"></div>
+      <div class="row">
+        <input type="text" id="directBox" placeholder="traffic cone" maxlength="41">
+        <button type="button" id="directAdd">추가</button>
+        <label><input type="checkbox" id="distance"> 거리 측정</label>
+      </div>
+      <div id="cues"></div>
+    </fieldset>
+  </section>
+
+  <section id="tab-overlay" class="tab">
+    <fieldset class="group" id="overlayGroup">
+      <legend>오버레이</legend>
+      <div id="overlay"></div>
+    </fieldset>
+  </section>
+
+  <footer class="bottom">
+    <div id="status" class="status" aria-live="polite"></div>
+    <div class="buttons">
+      <button type="button" id="runBtn" class="primary">실행</button>
+      <button type="button" id="stopBtn" class="danger" hidden>끄기</button>
+    </div>
+  </footer>
+
+  <details class="more">
+    <summary>구성 요소 · 오케스트레이션 · 프로필</summary>
+    <div id="components"></div>
+    <div id="orch"></div>
+    <pre id="profileView"></pre>
+  </details>
+</main>
+
+<dialog id="planDlg">
+  <h2>배치 보기</h2>
+  <pre id="planText"></pre>
+  <details><summary>JSON</summary><pre id="planJson"></pre></details>
+  <form method="dialog"><button>닫기</button></form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

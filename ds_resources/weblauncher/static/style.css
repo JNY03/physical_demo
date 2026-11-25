@@ -1,0 +1,59 @@
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2125; --muted: #6b737c; --line: #d6dadf;
+  --accent: #2463c9; --accent-text: #ffffff; --danger: #c23a3a; --ok: #1f8a4c; --warn: #b7791f;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #16191d; --panel: #1f2328; --text: #e6e8eb; --muted: #9aa3ad; --line: #353b42;
+          --accent: #5b8def; --accent-text: #0d1117; --danger: #e06666; --ok: #4cc38a; --warn: #e0b050; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 15px/1.45 "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif; }
+.app { max-width: 760px; margin: 0 auto; padding: 12px 16px 24px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 18px; margin: 4px 0; }
+.tabs { display: flex; gap: 4px; }
+.tabs button { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 14px;
+               border-radius: 6px 6px 0 0; cursor: pointer; font: inherit; }
+.tabs button.on { border-bottom-color: var(--panel); font-weight: 600; color: var(--accent); }
+.tabs button:disabled { opacity: .45; cursor: default; }
+.tab { display: none; }
+.tab.on { display: block; }
+.group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 8px 12px 12px; min-width: 0; }
+.group legend { padding: 0 6px; color: var(--muted); }
+fieldset:disabled { opacity: .55; }
+.row { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; margin: 8px 0; }
+.lab { width: 56px; flex: none; color: var(--muted); }
+.grid6, .grid4, .flow { display: flex; flex-wrap: wrap; gap: 6px 16px; flex: 1; min-width: 0; }
+.grid6 label { min-width: 82px; } .grid4 label { min-width: 120px; }
+label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+label.dis { opacity: .5; cursor: default; }
+label.bold { font-weight: 700; }
+.inl input { width: 64px; }
+input[type=text], select { font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px;
+                          background: var(--bg); color: var(--text); }
+button { font: inherit; padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px;
+         background: var(--panel); color: var(--text); cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); min-width: 100px; }
+button.danger { background: var(--danger); color: #fff; border-color: var(--danger); min-width: 100px; }
+.muted { color: var(--muted); }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--line); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--danger); }
+.box { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin: 8px 0; }
+.box h3 { font-size: 14px; margin: 2px 0 4px; }
+.bottom { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.status { flex: 1; min-height: 40px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+          background: var(--panel); white-space: pre-wrap; overflow-wrap: anywhere; }
+.status.err { border-color: var(--danger); }
+.status.ok { border-color: var(--ok); }
+.more { margin-top: 10px; }
+.more summary { cursor: pointer; color: var(--muted); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 6px 0; }
+td, th { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+pre { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12.5px;
+      overflow: auto; max-height: 50vh; white-space: pre-wrap; }
+dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text);
+         width: min(680px, calc(100vw - 32px)); }
+dialog h2 { font-size: 16px; margin: 0 0 8px; }
+@media (max-width: 520px) { .lab { width: 100%; } .bottom { flex-direction: column; align-items: stretch; } }
