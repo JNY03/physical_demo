@@ -40,3 +40,4 @@ result_files/
 
 # 자원 기억 (ds_resources) — 기기마다 다르다
 state/
+.claude/worktrees/
