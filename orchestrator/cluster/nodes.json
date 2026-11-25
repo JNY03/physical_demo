@@ -11,5 +11,6 @@
     {"name": "pi13", "role": "small",  "source": "pi13"}
   ],
   "excluded": ["pi11", "pi12", "pi3"],
-  "taint_roles": ["robot", "small"]
+  "taint_roles": ["robot", "small"],
+  "registry_port": 5000
 }

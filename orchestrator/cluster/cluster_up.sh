@@ -3,7 +3,8 @@
 #
 #   bash orchestrator/cluster/cluster_up.sh prep    기존(다른) k3s 제거 · cgroup 설정 · 필요하면 재부팅
 #   bash orchestrator/cluster/cluster_up.sh join    agent 설치 · 라벨 · taint (서버 설치 뒤)
-#   bash orchestrator/cluster/cluster_up.sh all     둘 다
+#   bash orchestrator/cluster/cluster_up.sh registry 사설 레지스트리(이 기기 테일넷 :REGISTRY_PORT, 기본 5000)를 파이 containerd 에 등록
+#   bash orchestrator/cluster/cluster_up.sh all     prep · join · registry
 #   ... <명령> pi7 pi10                              일부 노드만
 #
 # 준비: 파이에 SSH 키 로그인(physical@<이름>). 파이 sudo 에 비밀번호가 필요하면 PI_SUDO_PASS 환경변수로 준다
@@ -21,6 +22,7 @@ jq_py() { python3 -c "import json,sys; d=json.load(open('$NODES')); $1" "${@:2}"
 VERSION="$(jq_py 'print(d["k3s_version"])')"
 TS_IP="$(tailscale ip -4 | head -1)"
 URL="https://$TS_IP:6443"
+REGISTRY="${DS_REGISTRY:-$TS_IP:$(jq_py 'print(d.get("registry_port", 5000))')}"
 mapfile -t ALL < <(jq_py 'print("\n".join("%s %s %d %s" % (a["name"], a["role"], a["role"] in d["taint_roles"], a.get("source", "-")) for a in d["agents"]))')
 want=("$@")
 
@@ -82,6 +84,9 @@ for line in "${ALL[@]}"; do
         # ds.source — 이 노드에 붙은 data_stream 소스. 자원 기록기가 로봇 서비스가 실제로 도는지(그 소스 영상이 오는지) 가른다
         [ "$source" != "-" ] && kubectl label node "$name" "ds.source=$source" --overwrite >/dev/null 2>&1 || true
         if [ "$taint" = 1 ]; then kubectl taint node "$name" "ds.role=$role:NoSchedule" --overwrite >/dev/null 2>&1 || true; fi
+    fi
+    if [ "$step" = registry ] || [ "$step" = all ]; then
+        log "$name: 레지스트리 $REGISTRY — $(rsudo "$name" registry "$REGISTRY")"
     fi
 done
 if [ "$step" != prep ]; then kubectl get nodes -L ds.role -o wide 2>/dev/null || true; fi

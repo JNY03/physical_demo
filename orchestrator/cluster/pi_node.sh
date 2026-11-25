@@ -5,6 +5,7 @@
 #   remove-old <server_url>     연결 주소가 <server_url> 이 아닌 k3s agent 를 백업 후 지운다
 #   cgroup                      부팅 줄에 cgroup_memory=1 cgroup_enable=memory 를 더한다 (재부팅 필요하면 "changed")
 #   join <ver> <url> <name> <ip> <role> <taint 0|1>   k3s agent 설치 — 토큰은 표준입력 첫 줄
+#   registry <host:port>        사설 레지스트리(http)를 containerd 미러로 등록. 바뀌었을 때만 k3s-agent 재시작 ("changed" | "same")
 set -euo pipefail
 cmd="${1:-}"; shift || true
 SVC_ENV=/etc/systemd/system/k3s-agent.service.env
@@ -12,6 +13,20 @@ SVC_ENV=/etc/systemd/system/k3s-agent.service.env
 current_url() { grep -h '^K3S_URL' "$SVC_ENV" 2>/dev/null | cut -d= -f2- | tr -d "'\"" || true; }
 
 case "$cmd" in
+registry)
+    reg="$1"; f=/etc/rancher/k3s/registries.yaml
+    want="# data_stream 사설 레지스트리 (테일넷 http) — Docker 계획 D8. cluster_up.sh registry 가 쓴다
+mirrors:
+  \"$reg\":
+    endpoint:
+      - \"http://$reg\""
+    if [ -f "$f" ] && [ "$(cat "$f")" = "$want" ]; then echo "same"; exit 0; fi
+    mkdir -p /etc/rancher/k3s
+    [ -f "$f" ] && cp "$f" "$f.bak_$(date +%y%m%d_%H%M%S)"
+    printf '%s\n' "$want" > "$f"
+    systemctl restart k3s-agent
+    echo "changed"
+    ;;
 check)
     echo "cgroup_mem=$(grep -qw memory /sys/fs/cgroup/cgroup.controllers 2>/dev/null && echo yes || echo no)"
     echo "k3s_url=$(current_url)"
