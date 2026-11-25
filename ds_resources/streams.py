@@ -13,6 +13,7 @@ orchestration_stream  (schema "orch/1")  비전 처리 오케스트레이션 선
     basis    live | saved         (자원 정보가 지금 잰 것인지, 기억해 둔 것인지)
     reason   사람이 읽는 한 줄     request · plan · detail  JSON
     ts       ISO 밀리초 +09:00     seq  이 프로세스에서 쓴 순번
+    desired_version · converged   (선택, 감독자 — Docker 계획 §5) 원하는 상태 버전 · 맞음 "1" | 안 맞음 "0". 없으면 칸이 없다
 
 node_resource_stream  (schema "node/1")  노드가 추가 · 제거될 때와 상태가 바뀔 때만 한 건
     node · role · source(k3s | local) · change(added · removed · ready · not_ready · baseline · service · usage)
@@ -50,7 +51,7 @@ def _num(v):
 
 
 def orch_record(event, request_id, mode=None, basis=None, reason="", request=None, plan=None, detail=None, t=None,
-                execution_id=None, event_id=None):
+                execution_id=None, event_id=None, desired_version=None, converged=None):
     """orchestration_stream 한 건 (Redis 칸 = 글자). 틀린 값은 ValueError."""
     if event not in ORCH_EVENTS:
         raise ValueError("모르는 event %r (가능: %s)" % (event, ", ".join(ORCH_EVENTS)))
@@ -69,6 +70,10 @@ def orch_record(event, request_id, mode=None, basis=None, reason="", request=Non
         rec["plan"] = _j(plan)
     if detail is not None:
         rec["detail"] = _j(detail)
+    if desired_version is not None:
+        rec["desired_version"] = str(int(desired_version))
+    if converged is not None:
+        rec["converged"] = "1" if converged else "0"
     return rec
 
 
