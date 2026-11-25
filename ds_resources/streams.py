@@ -12,6 +12,8 @@ orchestration_stream  (schema "orch/1")  비전 처리 오케스트레이션 선
     mode     k3s | local          (정해지기 전이면 빈 칸)
     basis    live | saved         (자원 정보가 지금 잰 것인지, 기억해 둔 것인지)
     reason   사람이 읽는 한 줄     request · plan · detail  JSON
+    code     이유 코드 (REASON_CODES, M11 에 더함) — 거절 · 실패 · 낮춤 · 대기에 붙는다. 읽는 쪽은 문구 대신 이것을 본다
+             배치표의 refused · degraded · waiting 항목도 {item, code, reason} 이다
     ts       ISO 밀리초 +09:00     seq  이 프로세스에서 쓴 순번
     desired_version · converged   (선택, 감독자 — Docker 계획 §5) 원하는 상태 버전 · 맞음 "1" | 안 맞음 "0". 없으면 칸이 없다
 
@@ -32,6 +34,25 @@ ORCH_SCHEMA = "orch/1"
 NODE_SCHEMA = "node/1"
 ORCH_EVENTS = ("requested", "cluster_checked", "planned", "applied", "running", "stopped",
                "degraded", "fallback", "replanned", "failed")
+#: 이유 코드 — 한 곳에만 둔다. 새 이유는 여기에 한 줄 더하고, 모르는 코드는 reason_item · orch_record 가 거부한다
+#: (문구 비교로 되돌아가지 않게). 사람이 읽는 문구(reason)는 따로 그대로 둔다.
+REASON_CODES = {
+    "gpu_mem": "GPU 메모리 부족 (배치표 · 실행 직전 들이기 모두)",
+    "gpu_throughput": "GPU 처리량 예산을 fps 하한까지 낮춰도 넘음",
+    "gpu_exclusive": "단독 측정 실행 중이라 다른 GPU 작업을 들이지 않음",
+    "gpu_unreadable": "nvidia-smi 를 못 읽어 들이지 않음",
+    "no_gpu_node": "쓸 수 있는 GPU 노드가 없음",
+    "remote_gpu": "원격 GPU Executor 없음",
+    "no_cost": "비용표에 그 모델 조합이 없음",
+    "fps_lowered": "GPU 예산 때문에 fps 상한을 낮춤",
+    "no_node": "CPU · 메모리 조건을 맞는 노드가 없음",
+    "no_bandwidth": "대역폭이 모자람 (장당 전송이 장당 처리보다 김)",
+    "unknown_bandwidth": "대역폭 아직 모름 (측정 전 · 실패 뒤 다시 재는 중)",
+    "bandwidth_unsupported": "대역폭을 잴 수 없는 설치 (테일넷 주소 없음 등)",
+    "no_cpu_capability": "k3s 노드는 읽히지만 CPU 작업을 올릴 수 없음 (클러스터 객체 없음 등)",
+    "cpu_launch_failed": "CPU 작업을 띄우지 못함",
+    "input_wait": "입력 영상 대기",
+}
 MODES = ("k3s", "local")
 BASES = ("live", "saved")
 NODE_CHANGES = ("added", "removed", "ready", "not_ready", "baseline", "service", "usage")
@@ -50,9 +71,28 @@ def _num(v):
     return "" if v is None else ("%.1f" % v if isinstance(v, float) else str(v))
 
 
+def check_code(code):
+    """이유 코드가 REASON_CODES 에 있는지 — 없으면 ValueError"""
+    if code not in REASON_CODES:
+        raise ValueError("모르는 이유 코드 %r (가능: %s)" % (code, ", ".join(sorted(REASON_CODES))))
+    return code
+
+
+def reason_item(item, code, reason, **extra):
+    """배치표 · 요청 기록의 거절 · 낮춤 · 대기 한 건 {item, code, reason, ...}"""
+    return dict(extra, item=item, code=check_code(code), reason=str(reason))
+
+
+def item_codes(items):
+    """항목 목록의 코드 집합 (코드 없는 옛 항목은 건너뛴다)"""
+    return {x.get("code") for x in items or [] if isinstance(x, dict) and x.get("code")}
+
+
 def orch_record(event, request_id, mode=None, basis=None, reason="", request=None, plan=None, detail=None, t=None,
-                execution_id=None, event_id=None, desired_version=None, converged=None):
-    """orchestration_stream 한 건 (Redis 칸 = 글자). 틀린 값은 ValueError."""
+                execution_id=None, event_id=None, code=None, desired_version=None, converged=None):
+    """orchestration_stream 한 건 (Redis 칸 = 글자). 틀린 값은 ValueError. code 는 REASON_CODES 중 하나(있을 때만 칸이 생김)."""
+    if code is not None:
+        check_code(code)
     if event not in ORCH_EVENTS:
         raise ValueError("모르는 event %r (가능: %s)" % (event, ", ".join(ORCH_EVENTS)))
     if mode not in (None,) + MODES:
@@ -64,6 +104,8 @@ def orch_record(event, request_id, mode=None, basis=None, reason="", request=Non
     rec = {"schema": ORCH_SCHEMA, "event_id": event_id or uuid.uuid4().hex, "event": event,
            "request_id": str(request_id), "execution_id": str(execution_id or ""), "mode": mode or "", "basis": basis or "",
            "reason": str(reason or ""), "ts": iso_now(t)}
+    if code is not None:
+        rec["code"] = code
     if request is not None:
         rec["request"] = _j(request)
     if plan is not None:

@@ -317,3 +317,98 @@ def test_image_less_task_never_goes_to_pi(tmp_path):
     k.submit([], [], cpu_tasks=["cam360_slice"])                       # 레지스트리 — image: null
     u = [x for x in k.state.units().values() if x.get("kind") == "cpu"][0]
     assert u["node"] == "wsl" and u["status"] == "local" and k.cpu_ex.launched == []
+
+
+# ---------------------------------------------------------------- check() 셋째 상태 (M11 R2a)
+class CapsNodes(Nodes):
+    """새 플러그인 — check() 가 (ok, why, caps). 노드는 읽히지만 CPU 작업은 못 올린다(PriorityClass 없음)"""
+
+    def __init__(self, caps):
+        super().__init__()
+        self.caps = caps
+
+    def check(self):
+        return True, "", dict(self.caps)
+
+
+def test_third_state_keeps_k3s_mode_and_nodes_but_refuses_pi_cpu(tmp_path):
+    k, r, c = make(tmp_path)
+    k.cluster, k.cpu_ex = CapsNodes({"cpu_tasks": False, "why": "PriorityClass ds-vision-low 없음"}), FakeCpu()
+    r.add_frames("pi13")
+    p = k.prepare(["pi13"], ["yoloe"], cpu_tasks=["probe"], task_specs=PROBE)
+    assert p["mode"] == "k3s" and p["basis"] == "live" and p["ok"]
+    assert {n["name"] for n in p["snapshot"]["nodes"]} == {"wsl", "pi6", "pi13"}        # 노드 정보 유지
+    rid = k.submit(["pi13"], ["yoloe"], cpu_tasks=["probe"], task_specs=PROBE)
+    assert "fallback" not in r.events() and k.cpu_ex.launched == []
+    assert [x for x in r.rows if x["event"] == "planned"][0]["mode"] == "k3s"
+    cc = [x for x in r.rows if x["event"] == "cluster_checked"][0]
+    assert json.loads(cc["detail"])["caps"]["cpu_tasks"] is False and "PriorityClass" in cc["reason"]
+    fail = [x for x in r.rows if x["event"] == "failed"]
+    assert [x["code"] for x in fail] == ["no_cpu_capability"] and "PriorityClass ds-vision-low 없음" in fail[0]["reason"]
+    assert any(u.get("kind") == "gpu" for u in k.state.units().values())                # GPU 는 그대로 돈다
+    assert k.state.data["requests"][rid]["refused"][0]["code"] == "no_cpu_capability"
+
+
+def test_caps_ok_places_pi_cpu_and_old_two_tuple_still_works(tmp_path):
+    k, r, c = make(tmp_path)
+    k.cluster, k.cpu_ex = CapsNodes({"cpu_tasks": True}), FakeCpu()
+    k.submit([], [], cpu_tasks=["probe"], task_specs=PROBE)
+    assert [u["node"] for u in k.cpu_ex.launched] == ["pi6"]
+    assert ctl.check_cluster(Cluster(True)) == (True, "", {})            # 옛 플러그인 (ok, why)
+    assert ctl.check_cluster(Cluster(False))[:2] == (False, "API 응답 없음")
+    assert ctl.check_cluster(None)[0] is False
+
+    class Boom:
+        def check(self):
+            raise RuntimeError("x")
+    assert ctl.check_cluster(Boom())[0] is False
+
+
+# ---------------------------------------------------------------- 이유 코드 · admit 거절 → 재시도 (M11 R4)
+def _admit_refusal(tmp_path, reason_text=None, monkeypatch=None):
+    k, r, c = make(tmp_path)
+    r.add_frames("pi13")
+    k.state.put_unit("old", {"kind": "gpu", "status": "starting", "reserved_mb": 5000, "pid": 1})   # 앞 실행이 반납 중
+    if reason_text is not None:
+        orig = k.ex.admit
+
+        def admit(*a, **kw):
+            ok, why, calc = orig(*a, **kw)
+            return ok, (why if ok else reason_text), calc
+        k.ex.admit = admit
+    rid = k.submit(["pi13"], ["yoloe"])
+    return k, r, rid
+
+
+def test_admit_refusal_is_recorded_with_code(tmp_path):
+    k, r, rid = _admit_refusal(tmp_path)
+    req = k.state.data["requests"][rid]
+    assert req["plan"]["refused"] == []                                  # 배치표는 통과했다
+    assert [(x["code"], x["stage"]) for x in req["refused"]] == [("gpu_mem", "admit")]
+    fail = [x for x in r.rows if x["event"] == "failed"][-1]
+    assert fail["code"] == "gpu_mem"
+
+
+def test_cli_retries_on_admit_refusal_even_if_text_changes(tmp_path):
+    from ds_resources import cli
+    for text in (None, "Not enough VRAM (문구가 바뀌어도)"):
+        k, r, rid = _admit_refusal(tmp_path / ("t%d" % (text is None)), text)
+        assert cli.should_retry(k.state.data["requests"][rid])
+    assert cli.should_retry({"plan": {"refused": [{"item": "gpu:x", "code": "gpu_mem", "reason": "?"}]}})   # 옛 기록
+    assert not cli.should_retry({"refused": [{"item": "cpu:x", "code": "no_node", "reason": "GPU 메모리 부족"}]})
+
+
+def test_submit_with_retry_resubmits_until_launched(tmp_path):
+    from ds_resources import cli
+    k, r, rid = _admit_refusal(tmp_path)
+    sleeps, n = [], {"submits": 0}
+
+    def submit():
+        n["submits"] += 1
+        if n["submits"] == 3:
+            k.state.update_unit("old", status="stopped")                # 앞 프로세스가 GPU 를 돌려줬다
+        return k.submit(["pi13"], ["yoloe"])
+    mine = lambda: [u for uid, u in k.ex.active_units().items() if uid != "old"]  # noqa: E731
+    rid = cli.submit_with_retry(k, submit, lambda rid: not mine(), sleep=sleeps.append, retries=5, gap=0)
+    assert n["submits"] == 3 and len(sleeps) == 2
+    assert k.state.data["requests"][rid]["refused"] == [] and mine()

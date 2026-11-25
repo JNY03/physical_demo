@@ -18,6 +18,11 @@ GPU 는 k3s 스케줄링 자원이 아니다. k3s 는 WSL GPU 의 실제 사용�
               LOAD_TIMEOUT_S 안에 보고가 없으면 failed (모델 적재 실패).
 감시         프로세스가 죽으면 MAX_RESTARTS 번까지 WSL 안에서 다시 띄운다. 넘으면 멈춤(stopped, 이유).
               GPU 작업은 다른 노드(파이)로 옮기지 않는다.
+              다시 띄우기는 단위 기록의 spec(배치표가 준 실행 조건 전체 — devices · models · profile_path · fps_cap ·
+              gpu_util · request_id · execution_id …)으로 한다(M11 R3). 실행 중 상태(pid · status …)와 섞지 않으므로
+              칸이 늘어도 복사 목록을 고칠 일이 없다. spec 이 없는 옛 기록은 남은 칸(fps_cap · gpu_util 포함)으로 되살린다.
+              exclusive 는 admit.mode 에서 다시 계산된다.
+들이기 거절  계산 근거(calc)에 이유 코드 code 를 단다 — gpu_mem · gpu_exclusive · gpu_unreadable (streams.REASON_CODES).
 """
 import json
 import os
@@ -39,6 +44,10 @@ STOP_WAITS = (6.0, 2.0, 1.0)  # 멈춤: SIGINT 뒤 6초 · SIGTERM 뒤 2초 · S
                               # (기다리지 않으면 바로 다음 요청이 아직 반납 전 메모리를 보고 거절됐다, 2026-11-24 런처 E2E)
 MAX_RESTARTS = 2
 TELEMETRY_PREFIX = "vision_telemetry:"
+#: 단위 기록 중 실행 중에 생기는 칸 — spec 이 없는 옛 기록을 되살릴 때 이것을 뺀 나머지를 실행 조건으로 본다
+RUNTIME_KEYS = ("unit_id", "kind", "pid", "status", "reserved_mb", "admit", "exclusive", "started_at", "restarts", "log",
+                "loaded_at", "ended_at", "reason", "running_emitted", "running_at", "sources_up", "low_since",
+                "degraded_emitted", "spec")
 
 
 def _catalog():
@@ -109,10 +118,10 @@ class GpuExecutor:
         """(들일 수 있나, 이유, 계산 근거). 계산 근거의 mode: normal | exclusive. 지금 nvidia-smi 를 읽는다."""
         free, err = self.live_free_mb()
         if free is None:
-            return False, "GPU 상태를 지금 확인할 수 없어 들이지 않음 (%s)" % err, {}
+            return False, "GPU 상태를 지금 확인할 수 없어 들이지 않음 (%s)" % err, {"code": "gpu_unreadable"}
         active = self.active_units()
         if any(u.get("exclusive") for u in active.values()):
-            return False, "단독 측정 실행 중 — 실측이 끝날 때까지 다른 GPU 작업을 들이지 않음", {}
+            return False, "단독 측정 실행 중 — 실측이 끝날 때까지 다른 GPU 작업을 들이지 않음", {"code": "gpu_exclusive"}
         pend = self.pending_mb()
         room = free - pend - SPARE_MB
         calc = {"free_mb": round(free), "pending_mb": round(pend), "spare_mb": SPARE_MB,
@@ -123,6 +132,7 @@ class GpuExecutor:
         if basis == "estimate" and not active and est <= free - SPARE_MB:
             calc["mode"] = "exclusive"
             return True, "실측이 없어 단독 측정 실행으로 들임 (추정 %d MB, 여유 %d MB)" % (est, free), calc
+        calc["code"] = "gpu_mem"
         return False, "GPU 메모리 부족: 필요 %d MB > 여유 %d MB (지금 여유 %d − 적재 중 예약 %d − 남김 %d)" % (
             need_mb, room, free, pend, SPARE_MB), calc
 
@@ -146,11 +156,20 @@ class GpuExecutor:
             p = self.popen(self.command(unit), cwd=str(REPO), env=env, stdout=lf, stderr=subprocess.STDOUT,
                            start_new_session=True)
         self.procs[uid] = p
+        spec = json.loads(json.dumps(unit.get("spec") or {k: v for k, v in unit.items() if k not in RUNTIME_KEYS}))
         rec = dict(unit, unit_id=uid, kind="gpu", pid=p.pid, status="starting", reserved_mb=round(need_mb),
                    admit=calc or {}, exclusive=(calc or {}).get("mode") == "exclusive",
-                   started_at=self.clock(), restarts=unit.get("restarts", 0), log=str(log_path))
+                   started_at=self.clock(), restarts=unit.get("restarts", 0), log=str(log_path), spec=spec)
         self.state.put_unit(uid, rec)
         return uid
+
+    @staticmethod
+    def relaunch_spec(u):
+        """다시 띄울 실행 조건 — spec 이 있으면 그대로, 없으면(옛 기록) 실행 중 칸을 뺀 나머지(fps_cap · gpu_util 포함)"""
+        spec = u.get("spec")
+        if not isinstance(spec, dict):
+            spec = {k: v for k, v in u.items() if k not in RUNTIME_KEYS}
+        return json.loads(json.dumps(spec))
 
     # ------------------------------------------------------------ 감시
     def _alive(self, uid, pid):
@@ -185,9 +204,8 @@ class GpuExecutor:
             if not alive:
                 if u.get("restarts", 0) < MAX_RESTARTS:
                     self.log("%s 프로세스가 끝남 — WSL 안에서 다시 띄움 (%d/%d)" % (uid, u.get("restarts", 0) + 1, MAX_RESTARTS))
-                    nu = {k: u[k] for k in ("unit_id", "devices", "models", "profile_path", "request_id",
-                                            "execution_id") if k in u}
-                    nu["restarts"] = u.get("restarts", 0) + 1
+                    nu = self.relaunch_spec(u)
+                    nu.update(unit_id=uid, restarts=u.get("restarts", 0) + 1)
                     self.launch(nu, u["reserved_mb"], u.get("admit"))
                     changes.append((uid, "restarted"))
                 else:

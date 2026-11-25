@@ -31,6 +31,9 @@ $SettingsFile = Join-Path $Here "settings.json"
 $ProfileFile  = Join-Path $Here "profile.json"
 $CatalogCache = Join-Path $Here "catalog_cache.json"
 $ProfileWsl   = "/mnt/c/Users/khw67/DataStreamLauncher/profile.json"
+# 「배치 보기」 전용 — 비전이 지켜보는 profile.json 은 「실행」(Start-All · Apply-Changes) 때만 바뀐다 (M11 R4)
+$PreviewFile  = Join-Path $Here "profile_preview.json"
+$PreviewWsl   = $ProfileWsl -replace "profile\.json$", "profile_preview.json"
 #: 비전 GPU 메모리 어림(MB)은 vision/model_registry.yaml 하나에서 온다 (카탈로그 gpu_mb_base · gpu_mb_option · gpu_mb_targeted)
 
 function Invoke-Wsl([string[]]$argv) {
@@ -588,8 +591,7 @@ function Build-Profile {
         else { $pm[$m] = @{ overlay = $ov } }
     }
     if ($tm.Count -gt 0) { $pm["targeted"] = $tm }
-    $script:ProfileVer = 1 + [int]$script:ProfileVer
-    $prof = @{ profile_version = $script:ProfileVer; models = $pm }
+    $prof = @{ profile_version = [int]$script:ProfileVer; models = $pm }   # 버전은 Write-Profile 이 올린다
     $feat = @{}
     foreach ($k in $featChecks.Keys) { if ($featChecks[$k].Checked) { $feat[$k] = $true } }
     if ($feat.Count -gt 0) { $prof.features = $feat }
@@ -597,9 +599,16 @@ function Build-Profile {
 }
 $script:ProfileVer = [int]((Get-Date).ToString("HHmmss"))
 
+# 실행 프로필 — 「실행」(Start-All) · 실행 중 반영(Apply-Changes) 만 부른다. 버전은 여기서만 오른다
 function Write-Profile {
+    $script:ProfileVer = 1 + [int]$script:ProfileVer
     $json = (Build-Profile) | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText($ProfileFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+# 「배치 보기」 프로필 — profile_preview.json 에만 쓴다(버전을 올리지 않는다). 돌고 있는 비전은 이것을 보지 않는다
+function Write-PreviewProfile {
+    $json = (Build-Profile) | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($PreviewFile, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Save-Settings {
@@ -665,15 +674,15 @@ function Targeted-MB {   # targeted 단서 모델 합 (프로세스 기본값 �
     if ($distOn.Checked) { $mb += [int]$g.depth }
     return $mb
 }
-function Orch-Args($cfg) {
-    return ("--sources {0} --models {1} --profile {2}" -f ($cfg.onAll -join " "), ((Chosen-Models) -join " "), $ProfileWsl)
+function Orch-Args($cfg, $profWsl = $ProfileWsl) {
+    return ("--sources {0} --models {1} --profile {2}" -f ($cfg.onAll -join " "), ((Chosen-Models) -join " "), $profWsl)
 }
 function Show-Plan {
     $cfg = Current-Config
     if ($cfg.onAll.Count -eq 0 -or (Chosen-Models).Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show("소스와 비전 모델을 고르세요.", "배치 보기"); return }
-    Write-Profile
+    Write-PreviewProfile
     Set-Status "배치 계산 중"
-    $argv = @("./venv/bin/python", "-m", "ds_resources.cli", "plan") + ((Orch-Args $cfg) -split " " | Where-Object { $_ })
+    $argv = @("./venv/bin/python", "-m", "ds_resources.cli", "plan") + ((Orch-Args $cfg $PreviewWsl) -split " " | Where-Object { $_ })
     $txt = Invoke-Wsl $argv
     Set-Status $(if ($script:Running) { "● 실행 중" } else { "" })
     if (-not $txt) { $txt = "배치를 계산하지 못했습니다 (WSL · venv 확인)." }
@@ -872,6 +881,14 @@ function Self-Test {
     $r.profile = Build-Profile
     $modelChecks["targeted"].Checked = $false
     $r.target_tab_enabled_after_off = $tTarget.Controls[0].Enabled
+    # 「배치 보기」 는 profile.json · 프로필 버전에 손대지 않는다 (M11 R4)
+    $snap = { if (Test-Path $ProfileFile) { [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ProfileFile)) } else { "missing" } }
+    $before, $verBefore = (& $snap), $script:ProfileVer
+    Write-PreviewProfile
+    $r.preview_keeps_profile = ((& $snap) -eq $before)
+    $r.preview_keeps_version = ($script:ProfileVer -eq $verBefore)
+    $r.preview_written = (Test-Path $PreviewFile)
+    $r.plan_args = Orch-Args (Current-Config) $PreviewWsl
     $r | ConvertTo-Json -Depth 10
 }
 # 끝에서 끝까지(창을 실제로 띄운다): 실행 → 실행 중 거리 끄기 → 전부 끄기. 결과를 한 줄씩 찍는다

@@ -156,3 +156,45 @@ def test_state_file_single_writer(tmp_path):
     c = StateFile(tmp_path / "s.json")
     assert c.writer and c.units()["u"]["status"] == "starting"         # 다시 열어도 남아 있다
     assert not list(tmp_path.glob(".state-*"))
+
+
+# ---------------------------------------------------------------- 다시 띄우기는 spec 으로 (M11 R3)
+def test_restart_keeps_plan_conditions_from_spec(tmp_path):
+    ex, _ = make(tmp_path, used=0)
+    ok, why, calc = ex.admit(5370 * 1.2, "estimate", 5370)
+    assert calc["mode"] == "exclusive"
+    spec = {"devices": ["pi13"], "models": ["yoloe"], "profile_path": "/p.json", "fps_cap": {"pi13": 7.0},
+            "gpu_util": 0.5, "request_id": "r1", "execution_id": "exe-1", "future_field": {"x": 1}}
+    uid = ex.launch(dict(spec), 6444, calc)
+    assert ex.state.units()[uid]["spec"] == spec                         # 배치표가 준 것 전부 (새 칸 포함)
+    for i in range(ge.MAX_RESTARTS):
+        ex.procs[uid].rc = 1
+        assert ex.poll() == [(uid, "restarted")]
+        u = ex.state.units()[uid]
+        cmd = ex.procs[uid].cmd
+        assert cmd[cmd.index("--max-fps") + 1] == "pi13=7" and "--profile" in cmd
+        assert u["fps_cap"] == {"pi13": 7.0} and u["gpu_util"] == 0.5 and u["exclusive"] is True
+        assert u["spec"] == spec and u["restarts"] == i + 1 and u["request_id"] == "r1"
+        assert u["future_field"] == {"x": 1}
+
+
+def test_restart_of_old_record_without_spec(tmp_path):
+    ex, _ = make(tmp_path)
+    old = {"unit_id": "u-old", "kind": "gpu", "pid": 999999, "status": "loaded", "reserved_mb": 1560,
+           "admit": {"mode": "normal"}, "exclusive": False, "started_at": 1.0, "restarts": 0, "log": "x.log",
+           "devices": ["pi13", "a2"], "models": ["yoloe"], "profile_path": "/p.json", "fps_cap": {"pi13": 6.29, "a2": 5.0},
+           "gpu_util": 0.849, "request_id": "r0", "execution_id": "exe-0", "loaded_at": 2.0, "running_emitted": True}
+    ex.state.put_unit("u-old", old)                                      # M11 전 상태 파일 — spec 칸이 없다
+    assert ex.poll() == [("u-old", "restarted")]                         # pid 999999 는 없다 → 죽은 것으로 본다
+    u = ex.state.units()["u-old"]
+    cmd = ex.procs["u-old"].cmd
+    assert cmd[cmd.index("--max-fps") + 1:cmd.index("--max-fps") + 3] == ["a2=5", "pi13=6.29"]
+    assert u["fps_cap"] == old["fps_cap"] and u["gpu_util"] == 0.849 and u["status"] == "starting"
+    assert u["spec"]["devices"] == ["pi13", "a2"] and "pid" not in u["spec"] and "running_emitted" not in u["spec"]
+
+
+def test_admit_refusals_carry_codes(tmp_path):
+    ex, _ = make(tmp_path, used=5800)
+    assert ex.admit(3000, "measured")[2]["code"] == "gpu_mem"
+    ex.gpus = lambda timeout=2: []
+    assert ex.admit(100)[2] == {"code": "gpu_unreadable"}

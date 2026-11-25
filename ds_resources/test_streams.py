@@ -135,3 +135,20 @@ def test_writer_adds_seq_and_never_raises():
     assert r.rows[1][1]["seq"] == "2" and r.rows[0][2] == 50
     bad = st.StreamWriter(FakeRedis(fail=True))
     assert bad.orch("failed", "run2") is False and bad.fail == 1 and "down" in bad.err
+
+
+# ---------------------------------------------------------------- 이유 코드 (M11 R4)
+def test_reason_codes_are_checked_in_one_place():
+    from ds_resources import streams as st
+    assert {"gpu_mem", "no_gpu_node", "no_bandwidth", "unknown_bandwidth", "no_cpu_capability", "no_node",
+            "input_wait"} <= set(st.REASON_CODES)
+    item = st.reason_item("gpu:yoloe", "gpu_mem", "GPU 메모리 부족", stage="admit")
+    assert item == {"item": "gpu:yoloe", "code": "gpu_mem", "reason": "GPU 메모리 부족", "stage": "admit"}
+    with pytest.raises(ValueError):
+        st.reason_item("gpu:yoloe", "gpu_memory", "오타")
+    rec = st.orch_record("failed", "r1", reason="아무 문구", code="gpu_mem")
+    assert rec["code"] == "gpu_mem"
+    assert "code" not in st.orch_record("failed", "r1")                 # 코드가 없으면 칸도 없다 (칸 추가만)
+    with pytest.raises(ValueError):
+        st.orch_record("failed", "r1", code="nope")
+    assert st.item_codes([item, {"item": "x", "reason": "옛 항목"}]) == {"gpu_mem"}

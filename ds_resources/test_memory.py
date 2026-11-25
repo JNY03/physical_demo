@@ -295,3 +295,132 @@ def test_robot_becomes_active_when_its_video_arrives(tmp_path, monkeypatch):
     assert rec.tick() == 10                                              # 바로 배치 중 주기로
     assert rec.mem.node("pi7")["usage"]["mode"] == "active"
     assert ("pi7", "service") in [(x[1]["node"], x[1]["change"]) for x in r.rows]
+
+
+# ---------------------------------------------------------------- 대역폭 다시 재기 (M11 R1)
+def test_net_due_lifecycle_backoff_recheck_and_unsupported(tmp_path):
+    c = Clock()
+    m = mm.ResourceMemory(tmp_path / "m.json", clock=c)
+    assert m.net_due("pi7")                                             # 기억 없음
+    m.record_baseline("pi7", {"boot_id": "a"}, {"cpu_count": 4})
+    assert m.net_due("pi7")                                             # 노드는 있지만 net 없음
+    assert m.record_net("pi7", {"bw_mbps": None, "net_status": "failed", "error": "파드 거절"}) == "failed"
+    assert not m.net_due("pi7")
+    c.t += mm.NET_RETRY_MIN_S + 1
+    assert m.net_due("pi7")                                             # 5분 물러남 뒤
+    m.record_net("pi7", {"bw_mbps": None, "net_status": "failed"})
+    assert m.node("pi7")["net"]["attempts"] == 2
+    c.t += mm.NET_RETRY_MIN_S + 1
+    assert not m.net_due("pi7")                                         # 두 번째 실패 → 10분
+    for _ in range(12):
+        m.record_net("pi7", {"bw_mbps": None})                          # net_status 없는 옛 원천 → failed 로 본다
+    n = m.node("pi7")["net"]
+    assert n["net_status"] == "failed" and n["next_try"] - c.t == mm.NET_RETRY_MAX_S   # 최대 6시간
+    assert m.record_net("pi7", {"bw_mbps": 80.0, "latency_ms": 6.0, "relay": False}) == "ok"
+    n = m.node("pi7")["net"]
+    assert n["attempts"] == 0 and "error" not in n and not m.net_due("pi7")
+    c.t += mm.NET_RECHECK_S + 1
+    assert m.net_due("pi7")                                             # 재측정 주기 지남
+    m.record_net("pi7", {"bw_mbps": None, "net_status": "failed", "error": "시간 초과"})
+    n = m.node("pi7")["net"]
+    assert n["bw_mbps"] == 80.0 and n["net_status"] == "failed"         # 다시 재다 실패해도 앞서 잰 값은 남긴다
+    m.record_net("pi6", {"bw_mbps": None, "net_status": "unsupported", "error": "테일넷 주소 없음"})
+    for _ in range(3):
+        c.t += mm.NET_RETRY_MAX_S + mm.NET_RECHECK_S
+        assert not m.net_due("pi6")                                     # 잴 수 없는 설치 — 다시 묻지 않는다
+    assert m.save()
+    m2 = mm.ResourceMemory(tmp_path / "m.json", clock=c, writer=False)
+    assert m2.node("pi6")["net"]["net_status"] == "unsupported" and m2.node("pi7")["net"]["bw_mbps"] == 80.0
+
+
+def test_old_memory_file_without_net_or_status(tmp_path):
+    c = Clock(10 * mm.DAY)
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps({"version": 1, "combos": {}, "nodes": {
+        "pi1": {"identity": {"boot_id": "a"}, "baseline": {"cpu_count": 4}},               # 11-24 기억: net 칸 없음
+        "pi7": {"net": {"bw_mbps": None, "latency_ms": 5.0, "measured_at": 9 * mm.DAY}},  # 옛 실패 (영구히 굳어 있던 것)
+        "pi13": {"net": {"bw_mbps": 36.0, "relay": False, "measured_at": 9.5 * mm.DAY}},  # 옛 성공 — 아직 하루 안 됨
+        "pi6": {"net": {"bw_mbps": 82.0, "measured_at": 8 * mm.DAY}}}}), encoding="utf-8")
+    m = mm.ResourceMemory(p, clock=c)
+    assert m.node("pi1")["baseline"] == {"cpu_count": 4}
+    assert m.net_due("pi1") and m.net_due("pi7") and m.net_due("pi6") and not m.net_due("pi13")
+    m.record_net("pi7", {"bw_mbps": 50.0})
+    assert m.node("pi7")["net"]["net_status"] == "ok" and not m.net_due("pi7")
+
+
+class NetSource(FakeSource):
+    """측정을 흉내내는 가짜 원천 — 파이 전원과 무관하게 실패 · 성공 · 늦게 끝남 · 해당 없음"""
+
+
+def _net_recorder(tmp_path, monkeypatch, c, name):
+    import sys, types
+    monkeypatch.setattr(probe, "gpus", lambda timeout=2: [])
+    mod = types.ModuleType(name)
+    mod.NetSource = NetSource
+    sys.modules[name] = mod
+    rec = LocalRecorder(FakeRedis({}), mm.ResourceMemory(tmp_path / "m.json", clock=c), node="wsl",
+                        log=lambda *_: None, bench=False, node_sources=["%s:NetSource" % name])
+    rec.usage = FixedUsage()
+    rec.check_baseline = lambda: None
+    src = rec.sources[0]
+    src.rows = [("pi7", S7())]
+    return rec, src
+
+
+def test_recorder_remeasures_failed_late_and_lost_results(tmp_path, monkeypatch):
+    from ds_resources import recorder as rmod
+    c = Clock(1_800_000_000.0)
+    rec, src = _net_recorder(tmp_path, monkeypatch, c, "fake_net_mod1")
+    rec.tick()
+    assert src.want == ["pi7"]                                          # 처음 봄
+    c.t += 30
+    rec.tick()
+    assert src.want == ["pi7"]                                          # 측정 중 (결과 아직) — 다시 맡기지 않는다
+    c.t += 60
+    src.nets = {"pi7": {"bw_mbps": None, "net_status": "failed", "error": "PriorityClass 없음"}}   # 늦게 끝남 · 실패
+    rec.tick()
+    assert rec.mem.node("pi7")["net"]["net_status"] == "failed"
+    c.t += 60
+    rec.tick()
+    assert src.want == ["pi7"]                                          # 물러남 중
+    c.t += mm.NET_RETRY_MIN_S
+    rec.tick()
+    assert src.want == ["pi7", "pi7"]                                   # 물러남 뒤 다시
+    src.nets = {"pi7": {"bw_mbps": 80.0, "latency_ms": 6.0, "relay": False, "net_status": "ok"}}
+    rec.tick()
+    assert rec.mem.node("pi7")["net"]["bw_mbps"] == 80.0
+    c.t += 3600
+    rec.tick()
+    assert src.want == ["pi7", "pi7"]                                   # 성공 — 주기 전에는 안 잰다
+    c.t += mm.NET_RECHECK_S
+    rec.tick()
+    assert src.want == ["pi7", "pi7", "pi7"]                            # 재측정 주기 지남
+    c.t += rmod.NET_PENDING_S + 1
+    rec.tick()
+    assert src.want == ["pi7"] * 4                                      # 결과가 안 왔다(잃음) — 기다림이 지나 다시
+
+
+def test_recorder_lost_result_is_retried_by_next_process(tmp_path, monkeypatch):
+    c = Clock(1_800_000_000.0)
+    rec, src = _net_recorder(tmp_path, monkeypatch, c, "fake_net_mod2")
+    rec.tick()
+    assert src.want == ["pi7"]
+    rec.mem.save()
+    rec.mem._lockf.close()                                              # 서버가 결과를 받기 전에 끝남
+    rec2, src2 = _net_recorder(tmp_path, monkeypatch, c, "fake_net_mod3")
+    assert rec2.mem.node("pi7") and "net" not in rec2.mem.node("pi7")
+    rec2.tick()
+    assert src2.want == ["pi7"]                                         # 처음 보는 것이 아니어도 net 이 없으니 다시
+
+
+def test_recorder_never_reasks_unsupported(tmp_path, monkeypatch):
+    c = Clock(1_800_000_000.0)
+    rec, src = _net_recorder(tmp_path, monkeypatch, c, "fake_net_mod4")
+    rec.tick()
+    src.nets = {"pi7": {"bw_mbps": None, "net_status": "unsupported", "error": "테일넷 주소 없음"}}
+    rec.tick()
+    for _ in range(5):
+        c.t += mm.NET_RETRY_MAX_S + mm.NET_RECHECK_S
+        rec.tick()
+    assert src.want == ["pi7"]
+    assert rec.mem.node("pi7")["net"]["net_status"] == "unsupported"

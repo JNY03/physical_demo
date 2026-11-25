@@ -28,9 +28,11 @@ from ds_resources import memory as mm  # noqa: E402
 from ds_resources.backends import resolve_cluster  # noqa: E402
 from ds_resources.recorder import load_source  # noqa: E402
 from ds_resources.state import StateFile  # noqa: E402
+from ds_resources.streams import item_codes  # noqa: E402
 
 STATE = REPO / "state" / "orchestrator_state.json"
 RETRY_GPU = 6                 # run: GPU 메모리 부족으로 하나도 못 띄웠으면 이만큼 다시 요청 (앞 프로세스가 반납 중일 수 있다)
+RETRY_CODES = ("gpu_mem",)    # 다시 요청할 이유 코드 — 배치표 거절이든 실행 직전 들이기(admit) 거절이든 (문구는 보지 않는다)
 RETRY_GAP_S = 5
 MEMORY = REPO / "state" / "resource_memory.json"
 
@@ -75,6 +77,9 @@ def brief(p):
     plan = p["plan"]
     lines = ["방식: %s (%s)%s" % (p["mode"], "지금 잰 자원" if p["basis"] == "live" else "기억한 자원",
                                   "" if p["ok"] else " — " + p["why"])]
+    caps = p.get("caps") or {}
+    if caps.get("cpu_tasks") is False:                  # k3s 는 읽히지만 파이에 CPU 작업을 못 올리는 상태
+        lines.append("파이 CPU 작업: 막힘 — %s" % (caps.get("why") or "이유 모름"))
     for u in plan["gpu_units"]:
         a = u.get("admit")
         lines.append("GPU %s · %s → %s" % ("+".join(u["models"]), " ".join(u["sources"]), u["node"]))
@@ -94,6 +99,32 @@ def brief(p):
     for d in plan["refused"]:
         lines.append("못 함: %s — %s" % (d["item"], d["reason"]))
     return "\n".join(lines)
+
+
+def refused_codes(req):
+    """요청 기록의 거절 이유 코드들 — requests.<id>.refused (배치표 + admit), 없으면(옛 기록) plan.refused"""
+    items = req.get("refused")
+    if items is None:
+        items = (req.get("plan") or {}).get("refused")
+    return item_codes(items)
+
+
+def should_retry(req):
+    return bool(refused_codes(req) & set(RETRY_CODES))
+
+
+def submit_with_retry(k, submit, nothing_running, stopped=lambda: False, sleep=time.sleep, retries=None, gap=None):
+    """submit() → 요청 id. 하나도 못 띄웠고 거절 코드가 RETRY_CODES 면 gap 초 뒤 다시 낸다(앞 프로세스가 GPU 를 반납 중)."""
+    rid = submit()
+    for attempt in range(RETRY_GPU if retries is None else retries):
+        req = k.state.data["requests"].get(rid) or {}
+        if stopped() or not nothing_running(rid) or not should_retry(req):
+            break
+        wait = RETRY_GAP_S if gap is None else gap
+        log("GPU 메모리 부족 — %d초 뒤 다시 요청 (%d/%d)" % (wait, attempt + 1, RETRY_GPU if retries is None else retries))
+        sleep(wait)
+        rid = submit()
+    return rid
 
 
 def main(argv=None):
@@ -132,7 +163,8 @@ def main(argv=None):
     if a.cmd == "plan":
         k = build(a, writer=False)
         p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks)
-        print(json.dumps(p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"]}, ensure_ascii=False)
+        print(json.dumps(p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"], "caps": p.get("caps") or {}},
+                         ensure_ascii=False)
               if a.json else brief(p))
         return 0
 
@@ -151,15 +183,9 @@ def main(argv=None):
             u.get("kind") == "cpu" and u.get("status") in ("starting", "running") for u in k.state.units().values()) \
             and not any(u.get("status") == "local" for u in k.state.units().values() if u.get("request_id") == rid)
 
-    rid = k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks)
-    for attempt in range(RETRY_GPU):                    # 바로 앞 프로세스가 GPU 메모리를 아직 반납하는 중일 수 있다
-        req = k.state.data["requests"].get(rid) or {}
-        refused = [x["reason"] for x in (req.get("plan") or {}).get("refused", [])]
-        if stop["flag"] or not nothing_running(rid) or not any("GPU 메모리" in x for x in refused):
-            break
-        log("GPU 메모리 부족 — %d초 뒤 다시 요청 (%d/%d)" % (RETRY_GAP_S, attempt + 1, RETRY_GPU))
-        time.sleep(RETRY_GAP_S)
-        rid = k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks)
+    # 바로 앞 프로세스가 GPU 메모리를 아직 반납하는 중일 수 있다 — 배치표든 admit 이든 gpu_mem 이면 다시
+    rid = submit_with_retry(k, lambda: k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks),
+                            nothing_running, stopped=lambda: stop["flag"])
     req = k.state.data["requests"].get(rid) or {}
     log("요청 %s — %s" % (rid, (req.get("mode") or "")))
     print(brief({"plan": req.get("plan") or {}, "mode": req.get("mode"), "basis": "live" if req.get("mode") == "k3s"
@@ -170,7 +196,9 @@ def main(argv=None):
             for e in k.poll():
                 log("%-9s %s" % (e["event"], e["reason"]))
             if nothing_running(rid):
-                why = [x["reason"] for x in ((k.state.data["requests"].get(rid) or {}).get("plan") or {}).get("refused", [])]
+                req = k.state.data["requests"].get(rid) or {}
+                why = [x["reason"] for x in (req.get("refused") if req.get("refused") is not None
+                                              else (req.get("plan") or {}).get("refused", []))]
                 log("돌고 있는 작업이 없어 끝냄%s" % ((" — " + " / ".join(why)) if why else ""))
                 code = 2
                 break

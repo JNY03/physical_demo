@@ -4,6 +4,13 @@ k3s 는 선택이다. cluster 백엔드(check() · nodes())가 없거나 check �
 (fallback, basis=saved) GPU 작업은 data_stream 기기의 GPU Executor 로만 돈다. GPU 새 작업은 늘 지금 nvidia-smi 를
 확인한 뒤에 들인다(Executor).
 
+check() 는 (ok, why) 또는 (ok, why, caps) 를 돌려준다(M11 R2a — 옛 플러그인 호환). caps 예
+{"cpu_tasks": False, "why": "PriorityClass ds-vision-low 없음"} — 노드는 읽히지만 CPU 작업은 못 올리는 셋째 상태.
+그때도 mode=k3s · 노드 정보는 그대로이고, 파이 CPU 배치만 이유 코드 no_cpu_capability 로 막힌다.
+
+거절 · 실패 · 낮춤 · 대기 기록에는 이유 코드(streams.REASON_CODES)를 붙인다. 실행 직전 들이기(admit) 거절도
+같은 코드로 요청 기록(requests.<id>.refused)에 남긴다 — cli 재시도는 문구가 아니라 코드(gpu_mem)를 본다.
+
 applied 와 running 은 다르다. running 은 (1) 프로세스가 살아 있고 (2) 비전 보고에 처리한 장이 있으며
 (3) 맡은 소스의 입력 영상(camera_stream)이 INPUT_FRESH_S 안의 것일 때만 남긴다.
 
@@ -18,7 +25,7 @@ from pathlib import Path
 from ds_resources import gpu_executor as ge
 from ds_resources import memory as mm
 from ds_resources import placement, probe
-from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record
+from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record, reason_item
 
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "vision" / "model_registry.yaml"
@@ -65,6 +72,19 @@ def source_info(r, src, now_ms=None):
         return None
 
 
+def check_cluster(cluster):
+    """cluster.check() → (ok, why, caps). 옛 (ok, why) 반환도 받는다. 예외는 (False, 이유, {})."""
+    if cluster is None:
+        return False, "k3s 백엔드 없음 (로컬 전용)", {}
+    try:
+        res = tuple(cluster.check())
+    except Exception as e:  # noqa: BLE001
+        return False, "k3s 확인 실패: %s" % e, {}
+    ok, why = bool(res[0]), (res[1] if len(res) > 1 else "") or ""
+    caps = res[2] if len(res) > 2 and isinstance(res[2], dict) else {}
+    return ok, why, dict(caps)
+
+
 def load_yaml(path):
     import yaml
     with open(path, encoding="utf-8") as f:
@@ -85,6 +105,8 @@ class Controller:
 
     # ------------------------------------------------------------ 스트림 (outbox)
     def emit(self, event, request_id, **kw):
+        if kw.get("code") is None and isinstance(kw.get("detail"), dict) and kw["detail"].get("code"):
+            kw["code"] = kw["detail"]["code"]               # 배치표 항목 {item, code, reason} 을 그대로 넘긴 경우
         rec = orch_record(event, request_id, **kw)
         if not self.writer.add(ORCH_STREAM, rec):
             self.state.data.setdefault("outbox", []).append(rec)
@@ -161,15 +183,15 @@ class Controller:
 
     def prepare(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, task_specs=None, request_id=None):
         """클러스터 확인 → 입력 영상 → 스냅숏 → placement/1. 아무것도 띄우지 않고 기록도 하지 않는다(미리보기와 같은 계산)."""
-        ok, why, nodes = True, "", []
-        if self.cluster is None:
-            ok, why = False, "k3s 백엔드 없음 (로컬 전용)"
-        else:
+        ok, why, caps = check_cluster(self.cluster)
+        nodes = []
+        if ok:
             try:
-                ok, why = self.cluster.check()
-                nodes = self.cluster.nodes() if ok else []
+                nodes = self.cluster.nodes()
             except Exception as e:  # noqa: BLE001
-                ok, why = False, "k3s 확인 실패: %s" % e
+                ok, why, caps = False, "k3s 확인 실패: %s" % e, {}
+        if ok and caps.get("cpu_tasks") is False:       # 셋째 상태 — 노드 정보는 두고 그 노드들의 CPU 배치만 막는다
+            nodes = [dict(n, cpu_tasks=False, cpu_why=caps.get("why") or "") for n in nodes]
         mode, basis = ("k3s", "live") if ok else ("local", "saved")
         infos, waiting = {}, []
         for s in sorted(sources):
@@ -195,9 +217,9 @@ class Controller:
                "cpu": specs}
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
-        plan["waiting"] = [{"item": "input:%s" % s, "reason": "입력 대기 — 영상이 들어오면 바로 처리 (예산을 미리 잡음)"}
+        plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상이 들어오면 바로 처리 (예산을 미리 잡음)")
                            for s in waiting]
-        return {"ok": ok, "why": why, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
+        return {"ok": ok, "why": why, "caps": caps, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
 
     def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None):
         """런처 「배치 보기」 — prepare + GPU 단위마다 지금 들일 수 있는지(Executor admit, 읽기만)"""
@@ -218,30 +240,41 @@ class Controller:
         self.emit("requested", rid, request=request)
         p = self.prepare(sources, models, profile, target_fps, cpu_tasks, task_specs, request_id=rid)
         ok, why, mode, basis, plan, snapshot = p["ok"], p["why"], p["mode"], p["basis"], p["plan"], p["snapshot"]
-        self.emit("cluster_checked", rid, reason=why, detail={"ok": ok})
+        caps = p.get("caps") or {}
+        self.emit("cluster_checked", rid, reason=why or caps.get("why") or "",
+                  detail=dict({"ok": ok}, **({"caps": caps} if caps else {})))
         if not ok:
             self.emit("fallback", rid, mode="local", basis="saved", reason=why)
         self.emit("planned", rid, mode=mode, basis=basis, plan=plan)
         xid = "exe-" + uuid.uuid4().hex[:10]
-        self.state.put_request(rid, dict(request, status="planned", plan=plan, mode=mode, execution_id=xid, at=self.clock()))
+        refused = list(plan["refused"])                 # 요청 기록의 거절 = 배치표 거절 + 실행 직전 거절 (같은 코드)
+        req_rec = dict(request, status="planned", plan=plan, mode=mode, execution_id=xid, at=self.clock(), refused=refused)
+        self.state.put_request(rid, req_rec)
         for item in plan["degraded"] + plan.get("waiting", []):
             self.emit("degraded", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item)
         for item in plan["refused"]:
             self.emit("failed", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item)
+        late = []
         for u in plan["gpu_units"]:
             if u["node"] != self.local:                 # GPU 노드가 늘면 그 노드의 Executor 로 (지금은 data_stream 기기 하나)
-                self.emit("failed", rid, execution_id=xid, mode=mode, reason="원격 GPU Executor 없음: %s" % u["node"])
+                item = reason_item(u["unit"], "remote_gpu", "원격 GPU Executor 없음: %s" % u["node"])
+                late.append(item)
+                self.emit("failed", rid, execution_id=xid, mode=mode, reason=item["reason"], code=item["code"])
                 continue
             c = snapshot["costs"]["+".join(u["models"])]
             okk, why2, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"])
             if not okk:
-                self.emit("failed", rid, execution_id=xid, mode=mode, reason=why2, detail=calc)
+                item = reason_item(u["unit"], calc.get("code") or "gpu_mem", why2, stage="admit")
+                late.append(item)
+                self.emit("failed", rid, execution_id=xid, mode=mode, reason=why2, code=item["code"], detail=calc)
                 continue
             uid = self.ex.launch({"devices": u["sources"], "models": u["models"], "profile_path": profile_path,
                                   "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
                                   "execution_id": xid}, u["need_mb"], calc)
             self.emit("applied", rid, execution_id=xid, mode=mode, reason=why2 or "GPU Executor 로 띄움",
                       detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"]})
+        if late:
+            self.state.put_request(rid, dict(req_rec, refused=refused + late))
         for u in plan["cpu_units"]:
             self.launch_cpu(rid, xid, mode, u)
         return rid
@@ -263,7 +296,8 @@ class Controller:
         except Exception as e:  # noqa: BLE001
             rec.update(status="failed", reason=str(e)[:200])
             self.state.put_unit(uid, rec)
-            self.emit("failed", rid, execution_id=xid, mode=mode, reason="CPU 작업을 못 띄움: %s" % e, detail={"unit_id": uid})
+            self.emit("failed", rid, execution_id=xid, mode=mode, reason="CPU 작업을 못 띄움: %s" % e,
+                      code="cpu_launch_failed", detail={"unit_id": uid})
             return uid
         self.state.put_unit(uid, rec)
         self.emit("applied", rid, execution_id=xid, mode=mode, reason="CPU 작업 %s → %s" % (u["task"], u["node"]),
@@ -288,8 +322,10 @@ class Controller:
         placement.place_cpu(spec, [n for n in nodes if n["name"] != u["node"]] + [self.local_node_snapshot()],
                             out, self.local)
         if not out["cpu_units"]:
+            ref = (out["refused"] or [{}])[0]
             return self.emit("failed", u["request_id"], execution_id=u["execution_id"], mode="k3s",
-                             reason="%s — 옮길 노드 없음" % reason, detail={"unit_id": u["unit_id"]})
+                             reason="%s — 옮길 노드 없음" % reason, code=ref.get("code") or "no_node",
+                             detail={"unit_id": u["unit_id"], "refused": out["refused"]})
         new = out["cpu_units"][0]
         nid = self.launch_cpu(u["request_id"], u["execution_id"], "k3s", new, replaces=u["unit_id"])
         return self.emit("replanned", u["request_id"], execution_id=u["execution_id"], mode="k3s",
@@ -302,11 +338,13 @@ class Controller:
         if not units or self.cpu_ex is None:
             return []
         events = []
+        ok, why, caps = check_cluster(self.cluster)
         try:
-            ok, why = self.cluster.check() if self.cluster is not None else (False, "k3s 백엔드 없음")
             nodes = self.cluster.nodes() if ok else []
         except Exception as e:  # noqa: BLE001
             ok, why, nodes = False, str(e), []
+        if ok and caps.get("cpu_tasks") is False:       # 옮길 때도 CPU 작업을 못 올리는 노드는 빼고 고른다
+            nodes = [dict(n, cpu_tasks=False, cpu_why=caps.get("why") or "") for n in nodes]
         if not ok:                                      # 파드는 노드에서 계속 돈다 — 상태만 모른다
             for uid, u in units.items():
                 if not u.get("k3s_down_emitted"):

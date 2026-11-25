@@ -114,6 +114,10 @@ cues:
 #:   placement  any | measured (measured 는 노드별 비교 측정이 기억에 있어야 옮긴다 — 없으면 data_stream 기기)
 #:   image · command  k3s 파드 (image 가 null 이면 파이에 못 둔다 — Docker 단계에서 만든다)
 #:   local_command  data_stream 기기에서 돌릴 때 (저장소 기준)
+#:   하트비트 계약 (image 로 파이에 올리는 작업의 의무, M11): 파드는 환경변수 REDIS_URL · UNIT_ID 를 받는다.
+#:     작업은 Redis 키 cpu_telemetry:<UNIT_ID> 에 JSON {"ts": <유닉스 초>} 를 CPU_HEARTBEAT_FRESH_S(30초)보다 자주
+#:     (예: 10초마다) 쓴다. 그것이 running 의 근거다 — 없으면 starting 에서 넘어가지 않고, running 뒤 60초
+#:     (CPU_REPLACE_AFTER_S) 끊기면 다른 노드로 다시 배치된다 (ds_resources/controller.py)
 cpu_tasks:
   cam360_slice:
     note: 360 파노라마를 90도 화면으로 자른다 (e2p/slice360_live.py). camera360 은 보류(2026-11-24) — 비교 측정 전

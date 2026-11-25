@@ -150,3 +150,46 @@ def test_measured_placement_waits_for_comparison():
     t["measured"] = {"pi6": 30.0, "wsl": 35.0}
     out = pl.plan(req(cpu=[t]), {"nodes": [pi("pi6", role="sensor"), gpu_node()], "costs": {}}, "h", "wsl")
     assert out["cpu_units"][0]["node"] in ("pi6", "wsl")
+
+
+# ---------------------------------------------------------------- 이유 코드 (M11 R1 · R2a · R4)
+def test_every_refusal_and_degrade_carries_a_known_code():
+    from ds_resources.streams import REASON_CODES
+    out = pl.plan(req(G(["yoloe"], ["pi13"]), G(["clip"], ["pi13"]), cpu=[TASK]),
+                  {"nodes": [gpu_node(used=5000)], "costs": COSTS}, "h", "wsl")
+    items = out["refused"] + out["degraded"]
+    assert items and all(x["code"] in REASON_CODES for x in items)
+    assert {x["code"] for x in out["refused"]} >= {"gpu_mem", "no_cost"}
+    assert pl.plan(req(G(["yoloe"], ["pi13"])), {"nodes": [], "costs": COSTS}, "h", "wsl")["refused"][0]["code"] \
+        == "no_gpu_node"
+
+
+def test_cpu_refusal_tells_unknown_bandwidth_apart():
+    out = pl.plan(req(cpu=[TASK]), {"nodes": [pi("pi1", bw=None), pi("pi7", bw=None)], "costs": {}}, "h", "wsl")
+    r = out["refused"][0]
+    assert r["code"] == "unknown_bandwidth" and "대역폭 아직 모름" in r["reason"]
+    assert r["skipped"] == {"pi1": "unknown_bandwidth", "pi7": "unknown_bandwidth"}
+    slow = pl.plan(req(cpu=[TASK]), {"nodes": [pi("pi1", bw=10.0)], "costs": {}}, "h", "wsl")["refused"][0]
+    assert slow["code"] == "no_bandwidth"
+    na = pi("pi1", bw=None)
+    na["net"]["net_status"] = "unsupported"
+    assert pl.plan(req(cpu=[TASK]), {"nodes": [na], "costs": {}}, "h", "wsl")["refused"][0]["code"] \
+        == "bandwidth_unsupported"
+    busy = pl.plan(req(cpu=[TASK]), {"nodes": [pi("pi7", p95=3500)], "costs": {}}, "h", "wsl")["refused"][0]
+    assert busy["code"] == "no_node"
+    # 한 노드는 바쁘고 한 노드는 대역폭을 아직 모른다 — 기다리면 놓일 수 있는 쪽(unknown_bandwidth)을 낸다
+    mix = pl.plan(req(cpu=[TASK]), {"nodes": [pi("pi7", p95=3500), pi("pi1", bw=None)], "costs": {}}, "h", "wsl")
+    assert mix["refused"][0]["code"] == "unknown_bandwidth"
+    failed_keeps_old = pi("pi1", bw=80.0)
+    failed_keeps_old["net"]["net_status"] = "failed"                      # 다시 재다 실패 — 앞서 잰 값으로 놓는다
+    assert pl.plan(req(cpu=[TASK]), {"nodes": [failed_keeps_old], "costs": {}}, "h", "wsl")["cpu_units"]
+
+
+def test_cpu_capability_off_blocks_only_cluster_nodes():
+    nodes = [pi("pi1", cpu_tasks=False, cpu_why="PriorityClass ds-vision-low 없음"), gpu_node()]
+    out = pl.plan(req(cpu=[TASK]), {"nodes": nodes, "costs": {}}, "h", "wsl")
+    r = out["refused"][0]
+    assert r["code"] == "no_cpu_capability" and "PriorityClass ds-vision-low 없음" in r["reason"]
+    local_ok = dict(TASK, roles=["robot", "gpu"], frame_kb=None)
+    out = pl.plan(req(cpu=[local_ok]), {"nodes": nodes, "costs": {}}, "h", "wsl")
+    assert out["cpu_units"][0]["node"] == "wsl"                          # data_stream 기기에는 그대로 놓인다

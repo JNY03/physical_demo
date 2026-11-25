@@ -5,6 +5,10 @@ k3s 가 없거나 멈춰도 이 기억만으로 배치를 정한다(basis = save
 
 노드 기본 자원  열쇠 = 노드 이름. 신원(boot_id · 커널 · OS)이 바뀌면 바로 다시 잰다. 그 밖에는
                recheck 주기로 다시 재는데, 다시 재서 같으면 주기를 두 배(최대 30일), 달라지면 1일로 되돌린다.
+노드 네트워크  nodes.<노드>.net = {latency_ms, relay, bw_mbps(숫자 | null), measured_at,
+               net_status(ok | failed | unsupported), attempts, next_try, error} — net_status 뒤 칸은 M11 에 더함.
+               net_due(): net 없음 · 실패(물러남 5분 → 최대 6시간) · 재측정 주기(NET_RECHECK_S) 지남이면 다시 잰다.
+               unsupported(테일넷 주소가 없는 설치 등 잴 수 없음)는 다시 묻지 않는다. 옛 기억(net_status 없음)도 읽는다.
 로봇 서비스 몫  노드 사용량 표본으로 p95 와 지수 이동 평균. 배치는 「가용 − p95 − 여유」만 쓴다.
 모델 조합      kind "gpu"  (선택지 묶음 · 설정 해시 · 장치 종류) → 프로세스 GPU 메모리 최대치
                kind "cost" (선택지 묶음 · 설정 해시 · 장치 종류 · 해상도 구간) → 처리 시간 p50/p90 · fps
@@ -29,6 +33,10 @@ EWMA = 0.2
 ESTIMATE_MARGIN = 1.2
 MAX_COMBOS = 300
 USAGE_WINDOW = 240                      # p95 를 낼 최근 표본 수 (노드마다, 메모리에만)
+NET_RECHECK_S = 1 * DAY                 # 잰 대역폭을 다시 잴 주기
+NET_RETRY_MIN_S = 300.0                 # 측정 실패 뒤 물러남: 5분에서 두 배씩
+NET_RETRY_MAX_S = 6 * 3600.0            #                      최대 6시간
+NET_STATUSES = ("ok", "failed", "unsupported")
 
 
 def res_bucket(w, h):
@@ -77,6 +85,10 @@ def same_baseline(old, new):
         elif o != v:
             return False
     return True
+
+
+def _positive(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
 
 
 def _p95(values):
@@ -164,10 +176,52 @@ class ResourceMemory:
             return not same
 
     def record_net(self, name, net):
-        """노드까지의 네트워크 (지연 · 중계 · 대역폭, 측정 시각)"""
+        """노드까지의 네트워크 (지연 · 중계 · 대역폭, 측정 시각) 를 기억하고 다음 측정 시각을 정한다.
+        net_status 가 없으면(옛 원천) bw_mbps 가 양수면 ok, 아니면 failed 로 본다.
+        failed 인데 앞서 잰 대역폭이 있으면 그 값(bw_mbps · bw_measured_at)은 남긴다 — 하루 전 값이 '모름' 보다 낫다."""
+        now = self.clock()
         with self.lock:
-            self.data["nodes"].setdefault(name, {})["net"] = dict(net)
+            n = self.data["nodes"].setdefault(name, {})
+            old = n.get("net") or {}
+            new = dict(net)
+            status = new.get("net_status")
+            if status not in NET_STATUSES:
+                status = "ok" if _positive(new.get("bw_mbps")) else "failed"
+            new["net_status"] = status
+            new.setdefault("measured_at", now)
+            if status == "ok":
+                new.update(attempts=0, next_try=now + NET_RECHECK_S, bw_measured_at=new["measured_at"])
+                new.pop("error", None)
+            elif status == "failed":
+                attempts = int(old.get("attempts") or 0) + 1 if old.get("net_status") == "failed" else 1
+                new.update(attempts=attempts,
+                           next_try=now + min(NET_RETRY_MAX_S, NET_RETRY_MIN_S * 2 ** (attempts - 1)))
+                if not _positive(new.get("bw_mbps")) and _positive(old.get("bw_mbps")):
+                    new["bw_mbps"] = old["bw_mbps"]
+                    new["bw_measured_at"] = old.get("bw_measured_at", old.get("measured_at"))
+            else:                                        # unsupported — 다시 묻지 않는다
+                new.update(attempts=0, next_try=None)
+            n["net"] = new
             self.dirty = True
+            return status
+
+    def net_due(self, name):
+        """그 노드의 네트워크를 (다시) 재야 하나: net 없음 · 실패(물러남 시각 지남) · 재측정 주기 지남 → True.
+        unsupported 는 False. 옛 기억(net_status 없음): bw_mbps 가 양수면 ok 로, 아니면 바로 다시 잴 실패로 본다."""
+        self.refresh()
+        with self.lock:
+            net = (self.data["nodes"].get(name) or {}).get("net")
+            if not net:
+                return True
+            status = net.get("net_status")
+            if status == "unsupported":
+                return False
+            nxt = net.get("next_try")
+            if nxt is None:                              # 옛 기억
+                if status != "ok" and not _positive(net.get("bw_mbps")):
+                    return True
+                nxt = float(net.get("measured_at") or 0) + NET_RECHECK_S
+            return self.clock() >= float(nxt)
 
     # ------------------------------------------------------------ 로봇 서비스 몫 (사용량 p95)
     def update_usage(self, name, cpu_pct, mem_mb, mode=None):

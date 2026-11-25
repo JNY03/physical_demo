@@ -16,6 +16,7 @@ from ds_resources import probe
 from ds_resources.streams import NodeChangeFilter, StreamWriter
 
 TELEMETRY_PREFIX = "vision_telemetry:"
+NET_PENDING_S = 600.0         # 네트워크 측정을 맡기고 결과를 기다리는 시간 — 넘으면 (아직 net_due 면) 다시 맡긴다
 SOURCE_FRESH_S = 5.0          # 노드 소스의 영상이 이 안에 왔으면 그 로봇 서비스는 active
 #: torch 예약량에 잡히지 않는 CUDA 컨텍스트 몫 — vision/model_registry.yaml gpu_context_mb 가 이긴다
 GPU_CONTEXT_MB = 150.0
@@ -98,6 +99,7 @@ class LocalRecorder:
             except Exception as e:  # noqa: BLE001 — 원천 없이도 로컬 기록은 돈다
                 log("자원 기록: 노드 원천 %s 를 못 불러옴 (%s) — 로컬만 기록" % (path, e))
         self.source_nodes = {}                        # 원천 → 지난번에 본 노드 이름들
+        self.net_asked = {}                           # (원천, 노드) → 네트워크 측정을 맡긴 시각 (결과가 오면 지움)
 
     # ------------------------------------------------------------ 한 번
     def check_baseline(self):
@@ -163,7 +165,8 @@ class LocalRecorder:
         return self.sched.next(active, vals)
 
     def tick_sources(self):
-        """노드 원천마다: 기본 자원(처음 · 신원 변화 · recheck) · 네트워크 측정 시작 · 사용량 · 스트림 · 사라진 노드.
+        """노드 원천마다: 기본 자원(처음 · 신원 변화 · recheck) · 네트워크 측정 시작(처음 · 신원 변화 · net_due) · 사용량 ·
+        스트림 · 사라진 노드.
         기억 파일은 이 스레드만 쓴다(단일 Writer)."""
         vals, any_active = [], False
         for src in self.sources:
@@ -176,11 +179,11 @@ class LocalRecorder:
             for name, s in rows:
                 seen.add(name)
                 ident, base = s.pop("identity", None), s.get("baseline")
+                first = False
                 if base is not None and self.mem.baseline_due(name, ident):
                     first = self.mem.node(name) is None or (self.mem.node(name) or {}).get("identity") != ident
                     self.mem.record_baseline(name, ident, base)
-                    if first and hasattr(src, "want_net"):
-                        src.want_net(name, s.get("ip"))
+                self.ask_net(src, name, s.get("ip"), force=first)
                 act = self.source_active(s.get("source_name"))
                 mode = None if act is None else ("active" if act else "idle")
                 s["service_mode"] = mode
@@ -196,9 +199,24 @@ class LocalRecorder:
             self.source_nodes[id(src)] = seen
             if hasattr(src, "net_updates"):
                 for name, net in src.net_updates().items():
-                    self.mem.record_net(name, net)
-                    self.log("자원 기억: %s 네트워크 %s" % (name, net))
+                    self.net_asked.pop((id(src), name), None)
+                    status = self.mem.record_net(name, net)
+                    self.log("자원 기억: %s 네트워크 %s (%s)" % (name, net, status))
         return vals, any_active
+
+    def ask_net(self, src, name, ip, force=False):
+        """원천에 네트워크 측정을 맡긴다 — 처음 · 신원 변화(force)거나 기억의 net_due 가 참일 때.
+        맡긴 뒤 결과가 오기 전에는 NET_PENDING_S 동안 다시 맡기지 않는다(측정은 수십 초 걸린다). 프로세스가 끝나
+        결과를 잃으면 기억에 net 이 없으니 다음 실행에서 다시 잰다."""
+        if not hasattr(src, "want_net"):
+            return False
+        key, now = (id(src), name), self.mem.clock()
+        asked = self.net_asked.get(key)
+        if not force and (asked is not None and now - asked < NET_PENDING_S or not self.mem.net_due(name)):
+            return False
+        self.net_asked[key] = now
+        src.want_net(name, ip)
+        return True
 
     # ------------------------------------------------------------ 스레드
     def _run(self):

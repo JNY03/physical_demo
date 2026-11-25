@@ -11,10 +11,15 @@ CPU 작업  role 이 허용된 · ready · stale 아닌 노드. 쓸 수 있는 �
           − 할당 가능량 × CPU_HEADROOM. 네트워크: 장당 전송 시간이 장당 처리 시간보다 길면 그 노드에 두지 않는다,
           테일넷 중계(relay)면 벌점. requests = 선언값, limits = requests × LIMIT_FACTOR, PriorityClass 낮음.
           placement: measured 인 작업(cam360_slice)은 노드별 비교 측정이 있어야 옮긴다 — 없으면 data_stream 기기에.
+          노드에 cpu_tasks: False 가 있으면(k3s 클러스터 객체 없음 — 컨트롤러가 check() caps 로 단다) 그 노드는 뺀다.
+거절 · 낮춤  {item, code, reason} — code 는 streams.REASON_CODES. CPU 거절은 노드마다 뺀 이유(skipped)도 남기고,
+          가장 앞선 이유를 code 로 낸다(CPU_SKIP_ORDER: 기다리거나 고치면 놓일 수 있는 것부터).
 """
 import hashlib
 import json
 import math
+
+from ds_resources.streams import reason_item
 
 ALGORITHM = "placement/1"
 SPARE_MB = 300.0
@@ -28,6 +33,11 @@ ROBOT_UNMEASURED_CPU = 0.5
 ROBOT_UNMEASURED_MEM = 0.3
 RELAY_PENALTY = 0.5
 PRIORITY_CLASS = "ds-vision-low"
+#: CPU 작업이 어느 노드에도 못 놓였을 때 거절 코드로 낼 순서 — 앞의 것일수록 '기다리거나 고치면 놓인다'
+CPU_SKIP_ORDER = ("no_cpu_capability", "unknown_bandwidth", "bandwidth_unsupported", "no_bandwidth", "no_node")
+CPU_SKIP_TEXT = {"no_cpu_capability": "CPU 작업을 올릴 수 없는 k3s", "unknown_bandwidth": "대역폭 아직 모름",
+                 "bandwidth_unsupported": "대역폭을 잴 수 없음", "no_bandwidth": "대역폭 부족",
+                 "no_node": "CPU · 메모리 부족"}
 
 
 def digest(obj):
@@ -52,8 +62,8 @@ def place_gpu(request, nodes, costs, out):
     gnodes = _gpu_nodes(nodes)
     if not gnodes:
         for s in srcs:
-            out["refused"].append({"item": "gpu:%s:%s" % ("+".join(models), s),
-                                   "reason": "쓸 수 있는 GPU 노드가 없음 — GPU 작업은 파이로 옮기지 않는다"})
+            out["refused"].append(reason_item("gpu:%s:%s" % ("+".join(models), s), "no_gpu_node",
+                                              "쓸 수 있는 GPU 노드가 없음 — GPU 작업은 파이로 옮기지 않는다"))
         return
     need = float(costs["need_mb"])
     ledger = out.setdefault("_ledger", {})               # 이 배치표 안에서 앞서 놓은 묶음의 몫 (노드 → [MB, 사용률])
@@ -64,9 +74,9 @@ def place_gpu(request, nodes, costs, out):
     fits = [n for n in gnodes if need <= _room(n, reserved[n["name"]])]
     if not fits:
         best = max(gnodes, key=lambda n: (_room(n, reserved[n["name"]]), n["name"]))
-        out["refused"].append({"item": "gpu:%s" % "+".join(models),
-                               "reason": "GPU 메모리 부족: 필요 %d MB > 여유 %d MB (%s)" % (
-                                   need, _room(best, reserved[best["name"]]), best["name"])})
+        out["refused"].append(reason_item("gpu:%s" % "+".join(models), "gpu_mem",
+                                          "GPU 메모리 부족: 필요 %d MB > 여유 %d MB (%s)" % (
+                                              need, _room(best, reserved[best["name"]]), best["name"])))
         return
     node = max(fits, key=lambda n: (_room(n, reserved[n["name"]]) - util[n["name"]] * 1000, n["name"]))
     budget = max(0.0, GPU_BUDGET - util[node["name"]])
@@ -81,8 +91,9 @@ def place_gpu(request, nodes, costs, out):
         degraded = sorted(fps)
     while fps and load(fps) > budget + 1e-9:
         drop = sorted(fps)[-1]
-        out["refused"].append({"item": "gpu:%s:%s" % ("+".join(models), drop),
-                               "reason": "GPU 처리량 부족: fps %.1f 까지 낮춰도 p90 합이 예산 %.2f 를 넘음" % (FPS_FLOOR, budget)})
+        out["refused"].append(reason_item("gpu:%s:%s" % ("+".join(models), drop), "gpu_throughput",
+                                          "GPU 처리량 부족: fps %.1f 까지 낮춰도 p90 합이 예산 %.2f 를 넘음" % (
+                                              FPS_FLOOR, budget)))
         fps.pop(drop)
         degraded = [d for d in degraded if d != drop]
     if not fps:
@@ -93,9 +104,9 @@ def place_gpu(request, nodes, costs, out):
                              "sources": sorted(fps), "fps_cap": fps, "need_mb": round(need),
                              "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load(fps), 3)})
     for s in degraded:
-        out["degraded"].append({"item": "gpu:%s:%s" % ("+".join(models), s),
-                                "reason": "fps %.1f → %.2f (p90 %.0f ms 기준 예산)" % (
-                                    request.get("target_fps", {}).get(s, 10.0), fps[s], p90[s])})
+        out["degraded"].append(reason_item("gpu:%s:%s" % ("+".join(models), s), "fps_lowered",
+                                           "fps %.1f → %.2f (p90 %.0f ms 기준 예산)" % (
+                                               request.get("target_fps", {}).get(s, 10.0), fps[s], p90[s])))
 
 
 def _cpu_room(n):
@@ -116,32 +127,48 @@ def place_cpu(task, nodes, out, local_node):
         out["cpu_units"].append({"task": name, "node": local_node, "reason": "비교 측정 전 — data_stream 기기에 둔다",
                                  **_resources(task)})
         return
-    cands = []
+    cands, skipped = [], {}
     taken = out.setdefault("_cpu_ledger", {})            # 이 배치표 안에서 앞서 놓은 CPU 작업 (노드 → [m, MB])
     for n in sorted(nodes, key=lambda n: n["name"]):
         if not n.get("ready") or n.get("stale") or n.get("role") not in task.get("roles", []):
+            continue
+        if n.get("cpu_tasks") is False:                  # k3s 가 읽히지만 CPU 작업은 못 올림 (check() caps)
+            skipped[n["name"]] = "no_cpu_capability"
             continue
         cpu, mem = _cpu_room(n)
         cpu -= taken.get(n["name"], [0, 0])[0]
         mem -= taken.get(n["name"], [0, 0])[1]
         if cpu < task["cpu_m"] or mem < task["mem_mb"]:
+            skipped[n["name"]] = "no_node"
             continue
         net = n.get("net") or {}
         per_frame_ms = 0.0
         if n["name"] != local_node and task.get("frame_kb"):
             bw = float(net.get("bw_mbps") or 0)
-            if bw <= 0:
+            if bw <= 0:                                  # 모름 — 잴 수 없는 설치인지, 아직 못 잰 것인지 가른다
+                skipped[n["name"]] = "bandwidth_unsupported" if net.get("net_status") == "unsupported" \
+                    else "unknown_bandwidth"
                 continue
             per_frame_ms = task["frame_kb"] * 8.0 / bw                       # KB → kbit ÷ Mbit/s = ms
             proc = (task.get("measured") or {}).get(n["name"], task.get("proc_ms") or 0)
             if per_frame_ms > proc:
+                skipped[n["name"]] = "no_bandwidth"
                 continue
         score = cpu / float(n["cpu_alloc_m"]) - (RELAY_PENALTY if net.get("relay") else 0.0)
         if task.get("measured"):
             score -= (task["measured"].get(n["name"], 1e9)) / 1000.0
         cands.append((score, n["name"], per_frame_ms))
     if not cands:
-        out["refused"].append({"item": "cpu:%s" % name, "reason": "CPU · 메모리 · 네트워크 조건을 맞는 노드가 없음"})
+        code = next((c for c in CPU_SKIP_ORDER if c in skipped.values()), "no_node")
+        cap_why = next((n.get("cpu_why") for n in nodes if n.get("cpu_tasks") is False and n.get("cpu_why")), None)
+        why = {"no_cpu_capability": "k3s 에 CPU 작업을 올릴 수 없음" + (" (%s)" % cap_why if cap_why else ""),
+               "unknown_bandwidth": "대역폭 아직 모름 — 측정되면 다시 배치할 수 있음",
+               "bandwidth_unsupported": "대역폭을 잴 수 없는 설치 (테일넷 주소 없음 등)",
+               "no_bandwidth": "대역폭 부족 (장당 전송이 장당 처리보다 김)"}.get(
+            code, "CPU · 메모리 · 네트워크 조건을 맞는 노드가 없음")
+        detail = ", ".join("%s %s" % (k, CPU_SKIP_TEXT[v]) for k, v in sorted(skipped.items()))
+        out["refused"].append(reason_item("cpu:%s" % name, code, why + ((" — " + detail) if detail else ""),
+                                          skipped=skipped))
         return
     score, node, net_ms = max(cands)
     t = taken.setdefault(node, [0.0, 0.0])
@@ -167,7 +194,7 @@ def plan(request, snapshot, registry_hash, local_node):
     for g in sorted(request.get("gpu") or [], key=lambda g: "+".join(sorted(g["models"]))):
         key = "+".join(sorted(g["models"]))
         if key not in snapshot.get("costs", {}):
-            out["refused"].append({"item": "gpu:%s" % key, "reason": "비용표에 이 조합이 없음"})
+            out["refused"].append(reason_item("gpu:%s" % key, "no_cost", "비용표에 이 조합이 없음"))
             continue
         place_gpu(g, nodes, snapshot["costs"][key], out)
     for t in sorted(request.get("cpu") or [], key=lambda t: t["task"]):

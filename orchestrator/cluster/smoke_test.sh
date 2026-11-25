@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# smoke_test.sh — 클러스터 점검: 노드 Ready · 역할 라벨/taint · metrics · 노드마다 시험 파드(DNS · 노드 넘는 통신 · MTU).
+# smoke_test.sh — 클러스터 점검: 클러스터 객체(orchestrator/k3s/ — PriorityClass ds-vision-low …) · 노드 Ready ·
+#                 역할 라벨/taint · metrics · 노드마다 시험 파드(DNS · 노드 넘는 통신 · MTU).
 #   bash orchestrator/cluster/smoke_test.sh        (실패하면 0 이 아닌 코드로 끝난다)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -12,6 +13,12 @@ bad() { printf '  FAIL %s\n' "$*"; fail=1; }
 mapfile -t NODES < <(python3 -c "import json;d=json.load(open('$HERE/nodes.json'));print(d['server']['name']);[print(a['name']) for a in d['agents']]")
 mapfile -t TAINTED < <(python3 -c "import json;d=json.load(open('$HERE/nodes.json'));[print(a['name']) for a in d['agents'] if a['role'] in d['taint_roles']]")
 
+echo "[0] 클러스터 객체 (orchestrator/k3s/)"
+if out="$(kubectl get -f "$HERE/../k3s/" -o name 2>&1)"; then
+    while read -r o; do [ -n "$o" ] && ok "$o"; done <<<"$out"
+else
+    bad "없음 — kubectl apply -f orchestrator/k3s/ (install_server.sh 가 한다): $(tr '\n' ' ' <<<"$out")"
+fi
 echo "[1] 노드 Ready · 라벨"
 for n in "${NODES[@]}"; do
     r="$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status} {.metadata.labels.ds\.role}' 2>/dev/null)"
