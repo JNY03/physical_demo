@@ -1,6 +1,6 @@
 """위험물 검증 — 라벨 없이 도는 부분의 경계.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv/bin/python -m pytest test_hazard_verify.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_hazard_verify.py -q
 """
 from __future__ import annotations
 

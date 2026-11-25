@@ -12,18 +12,20 @@
 #   tools/launcher/launcher.ps1  런처 (Windows). 바꾼 뒤 C:\Users\<사용자>\DataStreamLauncher\ 에 복사한다
 #
 # ── 설치 위치 ──────────────────────────────────────────────────────────────────
-#   venv       venv/ (저장소 안. 이 기기는 /home/khw67/data_stream/venv). 서버 · 비전 · 런처가 모두 이것을 쓴다
-#              패키지:  venv/bin/pip install <패키지>==<버전>   →   requirements.txt 에 같은 줄을 더한다
+#   경로 풀이   이 파일과 vision_config.yaml 의 models/… · external/… 상대 경로는 DS_HOME 기준이다
+#              (DS_HOME 이 없으면 저장소 루트. ds_resources/settings.py). 절대 경로 · ~ 는 그대로 쓴다
+#   Python     저장소의 venv/ 또는 컨테이너의 python. 비전을 띄우는 Python 은 DS_PYTHON (기본: 띄운 쪽과 같은 Python)
+#              패키지:  pip install <패키지>==<버전>   →   requirements/<층>.txt 에 같은 줄을 더한다
 #   가중치      models/                 (git 에 올리지 않음. 파일 목록은 아래 models.<키>.files)
 #   외부 코드   external/<저장소>        (UniDepth · AerialMetric 처럼 pip 로 안 되는 것)
 #   HF 캐시     ~/.cache/huggingface/hub (from_pretrained 로 받는 것. 비전은 HF_HUB_OFFLINE=1 로 돈다)
 #
 # ── 모델을 추가하는 순서 ──────────────────────────────────────────────────────────
-#   1. 패키지를 venv 에 설치하고 requirements.txt 에 적는다. 가중치는 models/ 나 external/ 에 둔다
+#   1. 패키지를 설치하고 requirements/vision-gpu.txt (CPU 로 되면 vision-cpu.txt 도) 에 적는다. 가중치는 models/ 나 external/ 에 둔다
 #   2. 아래 models 에 키를 하나 더한다 (files · gpu_mb · device · packages)
 #   3. 단서로 쓰면 cues 에, 새 선택지면 options 에 더한다. 단서의 needs · 선택지의 cue_models 에 모델 키를 적는다
 #   4. 매개변수는 vision_config.yaml models.<선택지> 에 둔다. 새 선택지는 vision/vision_infer.py 에 실행 코드가 있어야 한다
-#   5. 확인: venv/bin/python vision/cue_catalog.py --json   (런처가 읽는 것과 같다)
+#   5. 확인: python vision/cue_catalog.py --json   (런처가 읽는 것과 같다)
 #
 # gpu_mb 는 **측정값이 아니라 배치 계산용 어림값**이다. 실측은 실행 중에 기록되어 이 값을 대신한다.
 
@@ -129,7 +131,7 @@ cpu_tasks:
     proc_ms: 120
     placement: measured
     image: null
-    local_command: [venv/bin/python, e2p/slice360_live.py]
+    local_command: [python, e2p/slice360_live.py]   # python = DS_PYTHON (기본: 띄운 쪽과 같은 Python)
 
 #: targeted 밖 선택지(river 등)의 단서 유형 이름 (런처 설명용). targeted 단서는 위 label 을 쓴다
 cue_type_labels: {match: 기준 사진 유사도, material: 재질 규칙, structure: 구조 규칙, distance: 거리}

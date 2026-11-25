@@ -26,6 +26,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
+if str(REPO) not in sys.path:                           # ds_resources.settings (경로 · 설정, 표준 라이브러리만)
+    sys.path.append(str(REPO))
+from ds_resources import settings  # noqa: E402
 TARGET_DIR = HERE / "assets" / "targets"
 
 #: 지정 클래스 탐지의 기본 대상 (2026-11-23 사용자 지정). 향후 대상 파일만 더하면 목록에 뜬다
@@ -40,7 +43,7 @@ def load_registry(path=REGISTRY):
     try:
         import yaml
     except ImportError as exc:
-        raise SystemExit("PyYAML 이 필요합니다 (venv/bin/pip install pyyaml): %s" % exc)
+        raise SystemExit("PyYAML 이 필요합니다 (pip install -r requirements/core.txt): %s" % exc)
     with open(path, encoding="utf-8") as f:
         reg = yaml.safe_load(f) or {}
     for k in ("options", "cues", "models"):
@@ -111,8 +114,8 @@ COLOURS = {
 
 # ---------------------------------------------------------------- 모델 파일 (사용 가능 판정)
 def _p(path):
-    p = Path(str(path)).expanduser()
-    return p if p.is_absolute() else (REPO / p)
+    """모델 파일 경로 — 상대 경로는 DS_HOME(기본 저장소 루트) 기준."""
+    return settings.resolve(path)
 
 
 def model_files(tcfg):
@@ -664,12 +667,14 @@ def save_direct_target(name, size_mm=None, colours=None, target_dir=TARGET_DIR):
 
 
 def _load_yaml(path):
+    """--config 읽기. 기본 vision_config.yaml 이면 config/vision_config.local.yaml 덮어쓰기도 (vision_infer 와 같게)."""
     try:
-        import yaml
+        import yaml  # noqa: F401
     except ImportError:
         return {}
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    if Path(path).resolve() == (HERE / "vision_config.yaml").resolve():
+        return settings.load_vision_config(path)
+    return settings.load_yaml(path)
 
 
 def main(argv=None):

@@ -1,6 +1,6 @@
 """hazard_overlay 카드 배치 — 카드가 **그려진 박스·라벨을 가리지 않는다**.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../venv/bin/python -m pytest test_hazard_overlay.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_hazard_overlay.py -q
 """
 import numpy as np
 from PIL import Image

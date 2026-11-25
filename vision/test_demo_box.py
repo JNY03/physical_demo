@@ -1,11 +1,12 @@
 """demo_box — Box_Detection 원본 수신기(mqtt_box_receiver.BoxDetector)와 **같은 검출 · 관문 · 거리**가 나오는가.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../venv/bin/python -m pytest test_demo_box.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_demo_box.py -q
 
-원본 저장소(/home/khw67/Box_Detection)와 GPU 가 없으면 건너뛴다. 원본의 on_frame 은 try_box/ 에 파일을
+원본 저장소(DS_BOX_DETECTION, 기본 ~/Box_Detection)와 GPU 가 없으면 건너뛴다. 원본의 on_frame 은 try_box/ 에 파일을
 쓰므로 부르지 않고, 같은 순서(crop → predict(conf=CANDIDATE_CONF) → distance → gates)를 원본 메서드로 밟는다.
 """
 import glob
+import os
 import importlib.util
 import json
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 import cv2
 import pytest
 
-BOX = Path("/home/khw67/Box_Detection")
+BOX = Path(os.environ.get("DS_BOX_DETECTION") or "~/Box_Detection").expanduser()
 HERE = Path(__file__).resolve().parent
 
 pytestmark = pytest.mark.skipif(not (BOX / "demo/test/mqtt_box_receiver.py").exists(),

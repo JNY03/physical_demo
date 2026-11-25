@@ -1,4 +1,7 @@
-# 실제 기기 주소 (테일넷 IP) — hosts.example.json 을 복사해서 쓴다
+# 실제 기기 주소 (테일넷 IP) — config/hosts.example.json 을 config/hosts.json 으로 복사해서 쓴다
+# config/ 는 기기마다 다른 설정(hosts.json · vision_config.local.yaml · kubeconfig) — 예시(*.example.*)만 올린다
+config/*
+!config/*.example.*
 hosts.local.json
 .env
 *.env
@@ -19,9 +22,11 @@ __pycache__/
 venv/
 .venv/
 
-# 외부 코드(UniDepth·AerialMetric)와 받은 가중치 — 설치 때 받는다
+# 외부 코드(UniDepth·AerialMetric)와 받은 가중치 — 설치 때 받는다 (/models · /external 은 다른 곳을 가리키는 심볼릭 링크일 때)
 external/
+/external
 models/
+/models
 
 # 실험 출력 · 옛 압축본
 e2p/e2p_sweep_out/

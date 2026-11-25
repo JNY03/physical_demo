@@ -1,0 +1,24 @@
+# vision-cpu — core + CPU 로 도는 비전 조각 (D2, 2026-11-25). torch · CUDA 없음.
+#   CLIP ONNX 단서 검증(hazard_verify · target_assess) · ONNX 깊이 추적(depth_track) 처럼 onnxruntime 으로만 도는 것.
+#   ultralytics(YOLOE) 를 쓰는 선택지는 torch 가 필요하다 → vision-gpu.txt. CPU 판 YOLOE(ONNX)는 ds-vision-cpu 단계에서 더한다.
+#   설치:  pip install -r requirements/vision-cpu.txt
+# 버전은 vision-gpu.txt 와 같다(onnxruntime 은 같은 1.24.1 의 CPU 판). 아래 묶음은 pip 이 이 둘에서 풀어낸 것.
+-r core.txt
+onnxruntime==1.24.1
+flatbuffers==25.12.19
+protobuf==7.36.2
+sympy==1.14.0
+mpmath==1.3.0
+packaging==26.3
+tokenizers==0.23.2                # CLIP 텍스트 토큰 (tokenizer.json)
+huggingface_hub==1.33.0           # tokenizers 가 쓴다
+hf-xet==1.6.0
+filelock==3.32.3
+fsspec==2026.7.0
+httpx==0.28.1
+httpcore==1.0.9
+h11==0.16.0
+anyio==4.15.1
+click==8.5.0
+tqdm==4.70.1
+typing_extensions==4.16.0

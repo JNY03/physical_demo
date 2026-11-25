@@ -1,6 +1,6 @@
 """지정 클래스 탐지 — 카탈로그 · 프로필 검증 · 판정 역할 (2026-11-23).
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../venv/bin/python -m pytest test_targeted.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_targeted.py -q
 
 모델을 적재하지 않는다(CLIP 이 필요한 근거는 빼고 잰다) — 빠르게 도는 시험이다.
 """

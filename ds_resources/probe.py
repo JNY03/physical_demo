@@ -5,7 +5,6 @@
 import os
 import platform
 import shutil
-import socket
 import subprocess
 import time
 
@@ -13,8 +12,9 @@ NVSMI_TIMEOUT = 2.0
 
 
 def node_name():
-    """로컬 노드 이름 — DS_NODE_NAME 이 있으면 그것, 없으면 호스트 이름(소문자)."""
-    return os.environ.get("DS_NODE_NAME") or socket.gethostname().lower()
+    """로컬 노드 이름 — DS_NODE_NAME 이 있으면 그것, 없으면 호스트 이름(소문자). 규칙은 settings.node_name 한 곳."""
+    from ds_resources import settings
+    return settings.node_name()
 
 
 def _read(path):

@@ -1,6 +1,6 @@
 """스캔 탐지 창구(scan_desk.py) 상태 기계 시험 — 가짜 Redis 로, 비전 · 서버 없이.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 venv/bin/python -m pytest test_scan_desk.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_scan_desk.py -q
 """
 import json
 import threading

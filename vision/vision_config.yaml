@@ -13,7 +13,7 @@
 # 명령행 옵션(--devices / --models / --runs ...)이 여기 값보다 우선한다.
 # =============================================================================
 
-data_root: ../stream_data        # 상대 경로면 이 config 파일 위치 기준. 서버 --save 와 같아야 live 결과가 디스크에 저장된다
+data_root: stream_data           # 상대 경로면 DS_HOME(기본 저장소 루트) 기준 (./ · ../ 로 시작하면 이 config 파일 기준). 서버 --save 와 같아야 live 결과가 디스크에 저장된다
 
 # 명령행에서 안 고르면 쓰는 기본값
 defaults:
@@ -79,7 +79,7 @@ models:
   # ── YOLOE prompt-free (내장 어휘 4585종, 텍스트 프롬프트·mobileclip 불필요) ──
   # ── YOLOE (기본 prompt-free, 내장 어휘 4585종) ─────────────────────────────
   yoloe:
-    weight: /home/khw67/data_stream/models/yoloe-11l-seg-pf.pt   # prompt-free 가중치. 경량: yoloe-11s-seg-pf.pt
+    weight: models/yoloe-11l-seg-pf.pt   # prompt-free 가중치. 경량: yoloe-11s-seg-pf.pt
     conf: 0.25
     iou: 0.5
     imgsz: 640
@@ -112,13 +112,13 @@ models:
       exclude: []                 # 뺄 클래스. 예) [darkness, water feature, ceiling fan, air conditioner]
       # text 모드 — 원하는 클래스를 자유 문구로. 시작할 때 MobileCLIP 으로 한 번 임베딩한다 (추론 속도는 같음)
       classes: [person, boat, life jacket, car]
-      text_weight: /home/khw67/data_stream/models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
-      text_encoder_dir: /home/khw67/data_stream/models               # mobileclip_blt.ts 가 있는 폴더 (없으면 여기로 받는다)
+      text_weight: models/yoloe-11l-seg.pt   # -pf 가 아닌 가중치. 경량: yoloe-11s-seg.pt
+      text_encoder_dir: models               # mobileclip_blt.ts 가 있는 폴더 (없으면 여기로 받는다)
       # 학습 임베딩 — 텍스트 인코더가 모르는 고유명(go1 · insta 360)을 classes 에 적으면 이 벡터로 찾는다.
       # 만들기: python vision/train_custom_pe.py (입력 models/custom_pe/train_list.json · 크롭은 stream_data/{robot1,cam360}/sample)
       # 예) classes: [person, boat, life jacket, car, go1, insta 360]
       # 먼 Insta360(1920 프레임에서 30px 안팎)은 imgsz 640 에서 안 잡힌다 — 세션 교차검증에서 1920 이어야 a2 원거리가 잡혔다.
-      learned_pe: /home/khw67/data_stream/models/custom_pe/yoloe-11l_custom.npz
+      learned_pe: models/custom_pe/yoloe-11l_custom.npz
 
   # ── river — 하천 떠내려가는 물체, **학습 없이** 제로샷 ──────────────────────
   # 안동 자료는 현장 1곳·날짜 1일·촬영 1회다(인접 프레임 평균차가 go1 50프레임 간격에도
@@ -344,7 +344,7 @@ models:
       # 소스는 내부 경로에서 import 한다. `wandb` 는 학습 로깅용이라 설치하지 않고 막는다.
       kind: unidepth              # unidepth | hf_metric | onnx_relative
       model_id: lpiccinelli/unidepth-v2-vitb14
-      source: /home/khw67/data_stream/external/UniDepth
+      source: external/UniDepth
       device: cuda:0
       period: 5                   # 이 장마다 실제로 잰다. 사이는 트랙이 나른다
       max_age: 30                 # 이보다 오래 나른 값은 **버린다** — 모르면 모른다고 한다
@@ -370,7 +370,7 @@ models:
       enabled: true
       classes: [butane_canister, wooden_box_mine]
       candidates: [unconfirmed]   # 이름 없는 후보도 위 두 클래스 **모두에 대해** 잰다(assess 가 견준다)
-      prototypes: /home/khw67/data_stream/models/butane_ref/prototypes.npz
+      prototypes: models/butane_ref/prototypes.npz
       threads: 8
       min_px: 48                  # crop 짧은 변이 이보다 작으면 임베딩하지 않는다(외형 단서 '못 잼')
       # **작은 crop 은 주변과 함께**(2026-11-16). 짧은 변이 [context.min_px, min_px) 이면 물체 긴 변의
@@ -388,8 +388,8 @@ models:
       semantic:
         enabled: true
         encoder: clip_b32         # 사진 임베딩은 아래 같은 이름의 모델 것을 쓴다
-        text_model: /home/khw67/data_stream/models/clip-vit-base-patch32/onnx/text_model.onnx
-        tokenizer: /home/khw67/data_stream/models/clip-vit-base-patch32/tokenizer.json
+        text_model: models/clip-vit-base-patch32/onnx/text_model.onnx
+        tokenizer: models/clip-vit-base-patch32/tokenizer.json
         temperature: 100          # CLIP 의 logit 배율
         prompts:
           butane_canister:
@@ -454,19 +454,19 @@ models:
           # 만든 것이라 임베딩이 cos 0.93 으로 어긋나지만, pi13 정답 crop 에서 match 단서가 오히려
           # 더 잘 갈랐다(목함지뢰 match: 상자 79 · 통 31 · 기타 63 ← 양자화본 63 · 24 · 57).
           # 기준 crop 이 생기면 이 모델로 프로토타입을 다시 만든다(assets/butane_ref/README.md)
-          path: /home/khw67/data_stream/models/clip-vit-base-patch32/onnx/vision_model.onnx
+          path: models/clip-vit-base-patch32/onnx/vision_model.onnx
           size: 224
           mean: [0.48145466, 0.4578275, 0.40821073]
           std:  [0.26862954, 0.26130258, 0.27577711]
         # 두 번째 학습 모델은 **선언만 해 두고 기본에서 끈다** — 45 ms/장이다.
         # 지연 예산이 남는 배치에서 주석을 풀면 그대로 돈다(AI-C-05: 없으면 그것만 빠진다).
         # - name: mobileclip_s0
-        #   path: /home/khw67/data_stream/models/mobileclip_s0/onnx/vision_model_quantized.onnx
+        #   path: models/mobileclip_s0/onnx/vision_model_quantized.onnx
         #   size: 256
     arms:
       - kind: yoloe               # YOLOE-11l-seg · O365+GoldG+LVIS · MobileCLIP 텍스트 타워
-        weight: /home/khw67/data_stream/models/yoloe-11l-seg.pt
-        text_encoder_dir: /home/khw67/data_stream/models    # mobileclip_blt.ts 가 있는 폴더
+        weight: models/yoloe-11l-seg.pt
+        text_encoder_dir: models    # mobileclip_blt.ts 가 있는 폴더
         imgsz_follow_frame: true  # **프레임 크기 근처로**(2026-11-13): imgsz(1920)를 상한으로 프레임 긴 변
                                   # (32 배수)을 쓴다. GO1 464×400 → 480, 1280×720 → 1280. 키워 돌리면
                                   # 느리기만 했다(robot1 275 ms). 작은 먼 물체가 걱정되면 false
@@ -488,7 +488,7 @@ models:
       # 값: 한 장 +74.7 ms (1280). 텍스트 arm 55.6 ms 와 합쳐 약 130 ms/장 (7.7 fps).
       # 자리만 필요하고 비용이 아까우면 이 arm 을 지운다 — 다섯 문구 구성으로 되돌아간다.
       - kind: yoloe_free          # YOLOE-11s-seg-pf · 내장 어휘 4585종 · 문구 없음
-        weight: /home/khw67/data_stream/models/yoloe-11s-seg-pf.pt
+        weight: models/yoloe-11s-seg-pf.pt
         imgsz: 1280               # 측정한 자리다(1920 은 113.6 ms 로 +39 ms)
         conf: 0.05
         # max_area_ratio: 이 arm 만의 크기 상한(선택). **두지 않는다** — 가까운 물체는 화면
@@ -522,10 +522,10 @@ models:
     # min_arms: 3 · conf: 0.25 · class_conf 는 지운다(그 작동점에서 재지 않았다).
     #   arms:
     #     - kind: yoloe
-    #       weight: /home/khw67/data_stream/models/yoloe-11l-seg.pt
-    #       text_encoder_dir: /home/khw67/data_stream/models
+    #       weight: models/yoloe-11l-seg.pt
+    #       text_encoder_dir: models
     #     - kind: yoloworld       # YOLOv8s-worldv2 · O365+GoldG+CC3M · CLIP
-    #       weight: /home/khw67/data_stream/models/yolov8s-worldv2.pt
+    #       weight: models/yolov8s-worldv2.pt
     #     - kind: gdino           # Grounding DINO tiny · COCO+O365+GoldG+Cap4M · BERT
     #       model: IDEA-Research/grounding-dino-tiny
     #       text_threshold: 0.2
@@ -638,7 +638,7 @@ models:
     depth:                        # river depth 와 같은 방식(주기로 재고 트랙으로 나른다)
       kind: unidepth
       model_id: lpiccinelli/unidepth-v2-vitb14
-      source: /home/khw67/data_stream/external/UniDepth
+      source: external/UniDepth
       device: cuda:0
       period: 5
       max_age: 30
@@ -651,8 +651,8 @@ models:
     # files: {...}                # 모델 파일 자리를 바꿀 때만 (cue_catalog.DEFAULT_FILES)
 
   unidepth:
-    repo_path: /home/khw67/data_stream/external/UniDepth
-    model_name: /home/khw67/data_stream/models/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
+    repo_path: external/UniDepth
+    model_name: models/unidepth-v2-vitl14   # vits14 / vitb14 / vitl14
     resolution_level: 9           # 0~9, 높을수록 정밀·느림
     infer_long_side: null         # 숫자면 긴 변을 이 크기로 줄여 추론 후 원본 크기로 되돌림
     use_fp16: true
@@ -661,9 +661,9 @@ models:
 
   # ── MoGe2-Aerial (MoGe-2 ViT-L + LoRA r=96, AerialMetric ECCV 2026) ──────
   moge2_aerial:
-    repo_path: /home/khw67/data_stream/external/AerialMetric/MoGe
-    extra_sys_path: [/home/khw67/data_stream/external/AerialMetric/pydeps]   # utils3d, peft
-    checkpoint: /home/khw67/data_stream/external/AerialMetric/weights/Moge2-Aerial.pt
+    repo_path: external/AerialMetric/MoGe
+    extra_sys_path: [external/AerialMetric/pydeps]   # utils3d, peft
+    checkpoint: external/AerialMetric/weights/Moge2-Aerial.pt
     lora_rank: 96
     resolution_level: 9           # 0~9
     force_projection: true

@@ -1,6 +1,6 @@
 """거리 단계 — 주기·전파·나이의 경계.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv/bin/python -m pytest test_depth_track.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_depth_track.py -q
 """
 from __future__ import annotations
 

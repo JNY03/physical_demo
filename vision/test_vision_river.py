@@ -1,7 +1,7 @@
 """river 옵션 — 동의 판정 · 없는 arm · 검출 모델 경계.
 
 가짜 arm 을 끼워 넣어 가중치 없이 돈다. 실행:
-  cd vision && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv/bin/python -m pytest test_vision_river.py -q
+  cd vision && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_vision_river.py -q
 """
 
 from __future__ import annotations

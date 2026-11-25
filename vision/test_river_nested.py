@@ -1,6 +1,6 @@
 """river 의 부품 접기(_drop_nested) — 큰 상자 안의 작은 상자는 지우고, 다른 위험물은 남긴다.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../venv/bin/python -m pytest test_river_nested.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_river_nested.py -q
 """
 from types import SimpleNamespace
 

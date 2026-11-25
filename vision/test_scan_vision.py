@@ -1,6 +1,6 @@
 """스캔 탐지 창구 — 비전 쪽(vision_infer) 시험: 판 대상 덮어쓰기 · 파일 변경 미루기 · 각도 표시 비우기 · 방위.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../venv/bin/python -m pytest test_scan_vision.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_scan_vision.py -q
 
 모델 · Redis 없이 돈다(가짜 Redis · 가짜 targeted 실행기).
 """

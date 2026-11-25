@@ -1,6 +1,6 @@
 """스캔 탐지 창구의 산출(scan_assess) 시험 — 모델 없이 결과 JSON 만으로.
 
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../venv/bin/python -m pytest test_scan_assess.py -q
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test_scan_assess.py -q
 """
 import scan_assess as sa
 import target_assess as ta

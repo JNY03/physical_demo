@@ -186,7 +186,7 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
   360 카메라 노트북     stream_to_server.py --upload http://<이 파일이 도는 기기>:10001/upload_pano
                        (같은 노트북이면 http://127.0.0.1:10001/upload_pano)
   실시간 비전 (GPU 서버, 다른 터미널)
-                       /home/dg/capstone-db/venv_image/bin/python vision/vision_infer.py   (기본: 전 기기 yoloe)
+                       python vision/vision_infer.py   (기본: 전 기기 yoloe)
 
 준비
   pip install redis paho-mqtt        (파이썬 3.8 이상)
@@ -196,10 +196,11 @@ Redis Stream (최근 --maxlen 개만 유지, 기본 300)
     다른 기기에서: redis.Redis.from_url("redis://100.114.96.78:6380/0")   (100.114.96.78 = 이 PC tailscale 주소)
   Redis 나 paho-mqtt 가 없어도 멈추지 않는다. 저장은 계속하고 경고만 낸다.
 
-주소 설정: 기기 주소(테일넷 IP)는 코드에 두지 않는다. hosts.example.json 을 hosts.local.json 으로
+주소 설정: 기기 주소(테일넷 IP)는 코드에 두지 않는다. config/hosts.example.json 을 config/hosts.json 으로
   복사해 채우거나 환경변수 PD_HOST_ROBOT1 / PD_HOST_EP_001 / PD_HOST_DRONE /
   PD_HOST_REALSENSE / PD_HOST_A2 를 쓴다 (소스 이름의 - 는 환경변수 · 명령행 칸에서 _ 로 바뀐다).
-  hosts.local.json 은 .gitignore 대상 — 공개 저장소에 올리지 않는다.
+  config/hosts.json 이 없으면 옛 이름 hosts.local.json(저장소 루트)을 읽는다. 둘 다 .gitignore 대상.
+  경로 · 기기 이름: DS_HOME(기본 저장소 루트) · DS_CONFIG_DIR · DS_NODE_NAME (ds_resources/settings.py).
 """
 import argparse
 import base64
@@ -218,6 +219,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+from ds_resources import settings              # 경로 · 설정 · 기기 이름 (표준 라이브러리만)
 
 try:
     import redis
@@ -272,11 +275,10 @@ DRONE_SOURCES = ("drone", "drone2")
 PUSH_ONLY = ("cam360", "cam360_slice")
 #: 10초 보고에 상태 칸을 보이는 소스 (MQTT 로 받는 것 + POST /state 로 받는 cam360)
 REPORT_STATE = STATE_SOURCES | {"cam360"}
-HOSTS_FILE = Path(__file__).resolve().parent / "hosts.local.json"   # 실제 주소는 여기에 (깃에 올리지 않음)
 
 
 def load_default_hosts():
-    """기본 주소: 환경변수 PD_HOST_<소스> > hosts.local.json > 없음. 명령행 --robot1 / --ep-001 / --drone 이 가장 우선.
+    """기본 주소: 환경변수 PD_HOST_<소스> > config/hosts.json (옛 hosts.local.json) > 없음. 명령행 --robot1 / --ep-001 / --drone 이 가장 우선.
     소스 이름의 - 는 환경변수에서 _ 로 쓴다 (PD_HOST_EP_001)."""
     hosts = {"robot1": None,         # pi7 (go1-camview 8090 · mosquitto 1883)
              "ep-001": None,         # pi1 (RoboMaster EP — 카메라 웹소켓 8091 · mosquitto 1883)
@@ -287,12 +289,8 @@ def load_default_hosts():
              "pi11": None,           # pi11 (picam_mjpeg.py 8090 · 브로커 없음)
              "pi12": None,           # pi12 (picam_mjpeg.py 8090 · 브로커 없음)
              "pi13": None}           # pi13 (picam_mjpeg.py 8090 · 브로커 없음)
-    if HOSTS_FILE.is_file():
-        try:
-            data = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))
-        except ValueError as e:
-            raise SystemExit("%s 을 못 읽었습니다: %s" % (HOSTS_FILE.name, e))
-        hosts.update((k, data[k]) for k in hosts if data.get(k))
+    data = settings.load_hosts()                  # 실제 주소 파일 (깃에 올리지 않음)
+    hosts.update((k, data[k]) for k in hosts if data.get(k))
     for k in hosts:
         v = os.environ.get("PD_HOST_" + k.upper().replace("-", "_"))
         if v:
@@ -318,7 +316,7 @@ FORWARD_QUEUE = 300          # 넘기기 대기열. 넘치면 오래된 것부�
 FORWARD_BATCH = 4 * 1024 * 1024   # 밀린 것을 한 번에 묶어 보내는 최대 크기
 RESERVED = ("image", "header")
 
-HOSTNAME = socket.gethostname()
+HOSTNAME = settings.host_label()             # DS_NODE_NAME > 호스트 이름
 STOP = threading.Event()
 KST = timezone(timedelta(hours=9))
 
@@ -2184,35 +2182,35 @@ def main():
                     help="켤 소스만 고른다: cam360 drone robot1 ep-001 realsense cam360_slice a2 "
                          "pi11 pi12 pi13 drone2 (안 주면 전부)")
     ap.add_argument("--robot1", default=DEFAULT_HOST["robot1"], metavar="주소",
-                    help="로봇1 파이(pi7) 주소. 기본 hosts.local.json / PD_HOST_* 값")
+                    help="로봇1 파이(pi7) 주소. 기본 config/hosts.json / PD_HOST_* 값")
     ap.add_argument("--ep-001", "--robot2", dest="ep_001", default=DEFAULT_HOST["ep-001"], metavar="주소",
-                    help="RoboMaster EP 파이(pi1) 주소. 기본 hosts.local.json / PD_HOST_EP_001 값 "
+                    help="RoboMaster EP 파이(pi1) 주소. 기본 config/hosts.json / PD_HOST_EP_001 값 "
                          "(--robot2 는 옛 이름 — pi1 이 Go1 에서 EP 로 바뀌었다)")
     ap.add_argument("--realsense", default=DEFAULT_HOST["realsense"], metavar="주소",
-                    help="pi6 리얼센스 주소 (없으면 hosts.local.json / PD_HOST_REALSENSE)")
+                    help="pi6 리얼센스 주소 (없으면 config/hosts.json / PD_HOST_REALSENSE)")
     ap.add_argument("--realsense-cam", type=int, default=1, metavar="번호",
                     help="리얼센스 MJPEG 경로 번호 (기본 1 — 리얼센스 쪽은 번호를 무시한다)")
     ap.add_argument("--a2", default=DEFAULT_HOST["a2"], metavar="주소",
-                    help="새 로봇 a2(Unitree A2, a2-bridge) 주소. 기본 hosts.local.json / PD_HOST_A2 값")
+                    help="새 로봇 a2(Unitree A2, a2-bridge) 주소. 기본 config/hosts.json / PD_HOST_A2 값")
     ap.add_argument("--pi11", default=DEFAULT_HOST["pi11"], metavar="주소",
-                    help="pi11 모듈 카메라 주소 (없으면 hosts.local.json / PD_HOST_PI11)")
+                    help="pi11 모듈 카메라 주소 (없으면 config/hosts.json / PD_HOST_PI11)")
     ap.add_argument("--pi11-cam", type=int, default=1, metavar="번호",
                     help="pi11 MJPEG 경로 번호 (기본 1 — pi11 쪽은 번호를 무시한다)")
     ap.add_argument("--pi12", default=DEFAULT_HOST["pi12"], metavar="주소",
-                    help="pi12 모듈 카메라 주소 (없으면 hosts.local.json / PD_HOST_PI12)")
+                    help="pi12 모듈 카메라 주소 (없으면 config/hosts.json / PD_HOST_PI12)")
     ap.add_argument("--pi12-cam", type=int, default=1, metavar="번호",
                     help="pi12 MJPEG 경로 번호 (기본 1 — pi12 쪽은 번호를 무시한다)")
     ap.add_argument("--pi13", default=DEFAULT_HOST["pi13"], metavar="주소",
-                    help="pi13 모듈 카메라 주소 (없으면 hosts.local.json / PD_HOST_PI13)")
+                    help="pi13 모듈 카메라 주소 (없으면 config/hosts.json / PD_HOST_PI13)")
     ap.add_argument("--pi13-cam", type=int, default=1, metavar="번호",
                     help="pi13 MJPEG 경로 번호 (기본 1 — pi13 쪽은 번호를 무시한다)")
     ap.add_argument("--drone", default=DEFAULT_HOST["drone"], metavar="주소",
-                    help="드론 파이(pi3) 주소. 기본 hosts.local.json / PD_HOST_* 값")
+                    help="드론 파이(pi3) 주소. 기본 config/hosts.json / PD_HOST_* 값")
     ap.add_argument("--drone2", default=DEFAULT_HOST["drone2"], metavar="주소",
-                    help="둘째 드론 파이(ds5, x500-002) 주소. 기본 hosts.local.json / PD_HOST_DRONE2 값")
+                    help="둘째 드론 파이(ds5, x500-002) 주소. 기본 config/hosts.json / PD_HOST_DRONE2 값")
     ap.add_argument("--robot-cam", type=int, default=1, choices=range(1, 6), metavar="번호",
                     help="로봇 카메라: 1 정면 · 2 턱 · 3 왼쪽 · 4 오른쪽 · 5 배 (기본 1)")
-    ap.add_argument("--save", default=str(Path(__file__).resolve().parent / "stream_data"), metavar="폴더",
+    ap.add_argument("--save", default=str(settings.ds_home() / "stream_data"), metavar="폴더",
                     help="저장 폴더 (기본: 이 파일 옆 stream_data)")
     ap.add_argument("--redis", default="redis://127.0.0.1:6380/0", metavar="주소",
                     help="흘려 넣을 Redis (기본 %(default)s)")
@@ -2258,7 +2256,7 @@ def main():
         if v:
             hosts[k] = clean_host(v, "--" + k)
         elif k in names and not args.no_pull:
-            raise SystemExit("%s 주소가 없습니다: --%s 로 주거나 hosts.local.json / PD_HOST_%s 에 적으세요"
+            raise SystemExit("%s 주소가 없습니다: --%s 로 주거나 config/hosts.json / PD_HOST_%s 에 적으세요"
                              % (k, k, k.upper().replace("-", "_")))
     fwd_host = clean_host(args.forward, "--forward") if args.forward else None
 

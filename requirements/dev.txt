@@ -1,0 +1,8 @@
+# dev — 테스트 (D2, 2026-11-25). 층 파일과 함께 설치한다:
+#   core 만:  pip install -r requirements/core.txt -r requirements/dev.txt   →  python -m pytest -m "not vision"
+#   전부:     pip install -r requirements.txt -r requirements/dev.txt         →  python -m pytest
+pytest==9.2.0
+iniconfig==2.3.1
+pluggy==1.7.0
+packaging==26.3
+Pygments==2.21.0

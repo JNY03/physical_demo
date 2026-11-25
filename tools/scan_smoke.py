@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """스캔 탐지 창구를 한 판 돌려 본다(2026-11-24) — 가시화 없이, 장치를 돌리지 않고.
 
-  venv/bin/python tools/scan_smoke.py --url http://127.0.0.1:10003 --device go1-001 --target door
-  venv/bin/python tools/scan_smoke.py --target object --query "fire extinguisher" --interval 1
+  python tools/scan_smoke.py --url http://127.0.0.1:10003 --device go1-001 --target door
+  python tools/scan_smoke.py --target object --query "fire extinguisher" --interval 1
 
 prepare → ready 기다림 → mark 를 steps 번(각도 0, 45, …, 간격 --interval 초) → finish → result 를 찍고
 가시화가 바라는 시간 한도(prepare→ready 60초 · mark 2초 · finish→done 30초)와 견준다. --frames 폴더를 주면

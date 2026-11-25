@@ -19,8 +19,6 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$Distro       = "Ubuntu-26.04"
-$RepoDir      = "/home/khw67/data_stream"
 $VisionDelay  = 5
 $SliceDelay   = 3
 $SliceV       = -30
@@ -30,7 +28,22 @@ $Here         = $PSScriptRoot
 $SettingsFile = Join-Path $Here "settings.json"
 $ProfileFile  = Join-Path $Here "profile.json"
 $CatalogCache = Join-Path $Here "catalog_cache.json"
-$ProfileWsl   = "/mnt/c/Users/khw67/DataStreamLauncher/profile.json"
+#: 기기마다 다른 WSL 자리 (Docker 계획 D1, 2026-11-25) — 환경변수 DS_WSL_* > launcher.local.json > 기본값.
+#:   launcher.local.json (이 폴더, 런처가 고쳐 쓰지 않는다. settings.json 은 마지막 선택을 통째로 다시 쓰므로 따로 둔다)
+#:   { "distro": "Ubuntu-26.04", "repoDir": "/home/<사용자>/data_stream", "profileWsl": "/mnt/c/Users/<사용자>/DataStreamLauncher/profile.json" }
+#:   기본값: 배포판 Ubuntu-26.04 · 저장소 = WSL 의 $HOME/data_stream · profile = 이 폴더의 profile.json 을 /mnt/<드라이브>/… 로
+$LocalFile    = Join-Path $Here "launcher.local.json"
+$Local        = $null
+if (Test-Path $LocalFile) { try { $Local = Get-Content $LocalFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $Local = $null } }
+function Pick-Setting([string]$envName, [string]$key, [scriptblock]$default) {
+    $v = [Environment]::GetEnvironmentVariable($envName)
+    if ($v) { return $v }
+    if ($null -ne $Local -and $Local.$key) { return [string]$Local.$key }
+    return (& $default)
+}
+$Distro       = Pick-Setting "DS_WSL_DISTRO" "distro" { "Ubuntu-26.04" }
+$RepoDir      = Pick-Setting "DS_WSL_REPO" "repoDir" { ((& wsl.exe -d $Distro --exec sh -c 'printf %s "$HOME"') -join "") + "/data_stream" }
+$ProfileWsl   = Pick-Setting "DS_WSL_PROFILE" "profileWsl" { "/mnt/" + $ProfileFile.Substring(0, 1).ToLower() + ($ProfileFile.Substring(2) -replace '\\', '/') }
 # 「배치 보기」 전용 — 비전이 지켜보는 profile.json 은 「실행」(Start-All · Apply-Changes) 때만 바뀐다 (M11 R4)
 $PreviewFile  = Join-Path $Here "profile_preview.json"
 $PreviewWsl   = $ProfileWsl -replace "profile\.json$", "profile_preview.json"

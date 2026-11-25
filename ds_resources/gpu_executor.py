@@ -97,7 +97,7 @@ class GpuExecutor:
                  python=None, log=print):
         self.state = state or StateFile(REPO / "state" / "orchestrator_state.json")
         self.r, self.gpus, self.popen, self.clock, self.log = redis_client, gpus, popen, clock, log
-        self.python = python or str(REPO / "venv" / "bin" / "python")
+        self.python = python or os.environ.get("DS_PYTHON") or sys.executable   # D1: venv 를 가정하지 않는다
         self.procs = {}                                   # unit_id → Popen (이 프로세스가 띄운 것)
 
     # ------------------------------------------------------------ 들이기

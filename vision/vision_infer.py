@@ -82,12 +82,12 @@ results.jsonl 한 줄 (v2 비전 결과, 규약 §3-6)
   redis-server --port 6380 --bind "127.0.0.1 100.114.96.78" --protected-mode no --save "" --appendonly no --daemonize yes
   #    다른 기기에서 읽기: redis.Redis.from_url("redis://100.114.96.78:6380/0")
 
-  # 1) 터미널 1 — 스트림 서버 (로봇·드론 주소는 hosts.local.json)
-  source venv/bin/activate
+  # 1) 터미널 1 — 스트림 서버 (로봇·드론 주소는 config/hosts.json, 옛 이름 hosts.local.json)
+  . <venv>/bin/activate          # 저장소의 venv (또는 컨테이너의 python)
   python server_stream_multi_source.py
 
   # 2) 터미널 2 — 실시간 비전
-  source venv/bin/activate
+  . <venv>/bin/activate
   python vision/vision_infer.py
 
 모델·기기를 골라 실행 (venv 활성화 상태)
@@ -114,7 +114,6 @@ import math
 import os
 import re
 import signal
-import socket
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -126,6 +125,9 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+if str(HERE.parent) not in sys.path:                      # ds_resources.settings (경로 · 설정 · 기기 이름)
+    sys.path.append(str(HERE.parent))
+from ds_resources import settings  # noqa: E402
 from geo import DiskStates, GeoLocator, frame_ts, redis_lookup, to_epoch  # noqa: E402
 DEVICES = ("cam360", "drone", "robot1", "ep-001", "realsense", "cam360_slice",   # cam360_slice 2026-11-11 (DS 10006) · ep-001 2026-11-24 (DS 10004, robot2 자리)
            "a2",                                                                 # a2 2026-11-12 (DS 10007, Unitree A2)
@@ -151,7 +153,7 @@ COLORMAPS = {"turbo": cv2.COLORMAP_TURBO, "jet": cv2.COLORMAP_JET, "inferno": cv
              "magma": cv2.COLORMAP_MAGMA, "viridis": cv2.COLORMAP_VIRIDIS, "plasma": cv2.COLORMAP_PLASMA}
 
 STOP = False
-HOSTNAME = socket.gethostname()
+HOSTNAME = settings.host_label()                 # DS_NODE_NAME > 호스트 이름
 KST = timezone(timedelta(hours=9))
 
 
@@ -3647,7 +3649,7 @@ def _reid_engine(cfg):
         clip = ta._shared_clip(files["clip"])
         try:
             from feature_match import FeatureMatcher
-            matcher = FeatureMatcher(cc.REPO / "models" / "lightglue_superpoint", cfg.get("_device", "cuda:0"))
+            matcher = FeatureMatcher(settings.resolve("models/lightglue_superpoint"), cfg.get("_device", "cuda:0"))
         except Exception as exc:                       # 매칭이 없으면 다시 찾기만 못 한다(추적은 된다)
             log("  재식별: 특징점 매칭을 못 세움 — %s: %s" % (type(exc).__name__, exc))
             matcher = None
@@ -4223,7 +4225,7 @@ class LiveRunner:
         self.stat = dict((dv, [0, 0.0, 0.0]) for dv in devices)   # 처리 장 수, lag 합, 추론 합 (보고 사이)
         self.tel = dict((dv, []) for dv in devices)                # 자원 보고: (추론 ms, w, h) (보고 사이)
         self.tel_seq = 0
-        self.tel_key = "vision_telemetry:%s:%d" % (socket.gethostname(), os.getpid())
+        self.tel_key = "vision_telemetry:%s:%d" % (HOSTNAME, os.getpid())
 
     def warn_once(self, key, msg):
         if key not in self.warned:
@@ -4679,11 +4681,19 @@ def normalize(values, allowed, aliases, what):
 
 
 def load_config(path):
+    """설정 읽기 (D1, 2026-11-25). 기본 파일이면 config/vision_config.local.yaml 을 덮어쓴다.
+    models/… · external/… 상대 경로는 DS_HOME(기본 저장소 루트) 기준 절대 경로로 푼다.
+    data_root 의 상대 경로는 DS_HOME 기준(서버 --save 기본값과 같다). ./ · ../ 로 시작하면 예전처럼 이 config 파일 기준."""
     path = Path(path).expanduser().resolve()
-    with open(path, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    root = Path(cfg.get("data_root", "../stream_data")).expanduser()
-    cfg["data_root"] = root if root.is_absolute() else (path.parent / root).resolve()
+    if path == (HERE / "vision_config.yaml").resolve():
+        cfg = settings.load_vision_config(path)
+    else:
+        cfg = settings.load_yaml(path)
+    cfg = settings.resolve_tree(cfg)
+    raw = str(cfg.get("data_root") or "stream_data")
+    root = Path(raw).expanduser()
+    base = path.parent if raw.startswith(("./", "../")) else settings.ds_home()
+    cfg["data_root"] = root if root.is_absolute() else (base / root).resolve()
     cfg.setdefault("output", {}).setdefault("dirname", "vision")
     return cfg
 

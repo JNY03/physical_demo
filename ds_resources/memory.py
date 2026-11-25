@@ -57,7 +57,8 @@ def cfg_hash(registry_path, cfg, models):
         h.update(Path(registry_path).read_bytes())
     except OSError:
         pass
-    h.update(json.dumps({m: (cfg.get("models") or {}).get(m) for m in sorted(models)},
+    from ds_resources import settings              # 경로는 DS_HOME 기준 상대로 — 저장소를 옮겨도 같은 해시 (D1)
+    h.update(json.dumps(settings.relative_tree({m: (cfg.get("models") or {}).get(m) for m in sorted(models)}),
                         sort_keys=True, default=str).encode())
     return h.hexdigest()[:10]
 

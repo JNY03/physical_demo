@@ -24,7 +24,7 @@ from pathlib import Path
 
 from ds_resources import gpu_executor as ge
 from ds_resources import memory as mm
-from ds_resources import placement, probe
+from ds_resources import placement, probe, settings
 from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record, reason_item
 
 REPO = Path(__file__).resolve().parent.parent
@@ -98,7 +98,7 @@ class Controller:
         self.cpu_ex = cpu_executor                    # k3s CPU 실행기 (orchestrator 가 주입) — 없으면 파이에 못 둔다
         self.local = local_node or probe.node_name()
         self.cluster, self.clock, self.log, self.gpus = cluster, clock, log, gpus
-        self.cfg = cfg if cfg is not None else load_yaml(REPO / "vision" / "vision_config.yaml")
+        self.cfg = cfg if cfg is not None else settings.load_vision_config()   # + config/vision_config.local.yaml (D1)
         self.reg = load_yaml(REGISTRY)
         self.reg_hash = mm.cfg_hash(REGISTRY, {}, [])
         self.writer = StreamWriter(redis_client, maxlen=2000)
