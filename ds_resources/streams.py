@@ -16,9 +16,14 @@ orchestration_stream  (schema "orch/1")  비전 처리 오케스트레이션 선
              배치표의 refused · degraded · waiting 항목도 {item, code, reason} 이다
     ts       ISO 밀리초 +09:00     seq  이 프로세스에서 쓴 순번
     desired_version · converged   (선택, 감독자 — Docker 계획 §5) 원하는 상태 버전 · 맞음 "1" | 안 맞음 "0". 없으면 칸이 없다
+    function (선택) 기능 이름 — 읽는 쪽이 기능 단위로 묶어 본다. 없으면 칸이 없다
+    stage    (선택) device | server — 그 기록이 기능의 어느 단계인가. 없으면 칸이 없다
+    quality  (선택) full | server_only | device_only | fallback — 두 단계 쌍이 깨졌을 때 지금 어떤 품질로 도는가.
+             없으면 칸이 없다
 
 node_resource_stream  (schema "node/1")  노드가 추가 · 제거될 때와 상태가 바뀔 때만 한 건
-    node · role · source(k3s | local) · change(added · removed · ready · not_ready · baseline · service · usage)
+    node · role · source(k3s | local) · change(added · removed · ready · not_ready · baseline · service · usage · caps)
+    caps  노드 특성(아키텍처 · 센서 · 가속기 · 온도 한계)이 바뀌었다 — 그 기억을 다루는 쪽이 한 건 남긴다
     service_mode   active(그 노드의 로봇 서비스가 실제로 돎 — 소스 영상이 온다) | idle | "" — 바뀌면 바로 남긴다(service)
     ready · cpu_pct · mem_pct · mem_mb · temp_c · gpu(JSON 목록) · baseline(JSON, added · baseline 일 때만) · ts
     잦거나 작은 변화는 남기지 않는다 — NodeChangeFilter.
@@ -36,6 +41,7 @@ ORCH_EVENTS = ("requested", "cluster_checked", "planned", "applied", "running", 
                "degraded", "fallback", "replanned", "failed")
 #: 이유 코드 — 한 곳에만 둔다. 새 이유는 여기에 한 줄 더하고, 모르는 코드는 reason_item · orch_record 가 거부한다
 #: (문구 비교로 되돌아가지 않게). 사람이 읽는 문구(reason)는 따로 그대로 둔다.
+#: 읽는 쪽(가시화)은 문구가 아니라 이 코드로 거절 · 실패 · 낮춤 · 대기의 까닭을 가른다 — 코드를 지우거나 뜻을 바꾸지 마라.
 REASON_CODES = {
     "gpu_mem": "GPU 메모리 부족 (배치표 · 실행 직전 들이기 모두)",
     "gpu_throughput": "GPU 처리량 예산을 fps 하한까지 낮춰도 넘음",
@@ -53,10 +59,20 @@ REASON_CODES = {
     "cpu_launch_failed": "CPU 작업을 띄우지 못함",
     "input_wait": "입력 영상 대기",
     "input_wait_unbudgeted": "입력 영상 대기 — 지금 예산으로는 미리 잡지 못함, 들어오면 다시 배치",
+    "no_sensor": "그 작업이 필요한 센서가 노드에 없음",
+    "arch_mismatch": "이미지 아키텍처가 노드와 다름 (arm64 · amd64)",
+    "no_accel": "필요한 가속기(GPU · NPU)가 노드에 없음",
+    "thermal_guard": "노드가 뜨겁거나 throttle 중이라 뺌",
+    "deadline_miss": "전송 + 처리 시간이 작업 마감을 넘음",
+    "pair_incomplete": "한 기능의 두 단계(기기 · 서버) 중 한쪽을 놓을 수 없어 기능을 거절",
 }
 MODES = ("k3s", "local")
 BASES = ("live", "saved")
-NODE_CHANGES = ("added", "removed", "ready", "not_ready", "baseline", "service", "usage")
+#: 한 기능의 단계 — 기기에서 도는 쪽과 서버에서 도는 쪽
+STAGES = ("device", "server")
+#: 두 단계 쌍이 깨졌을 때 지금 도는 품질 — full(둘 다) · server_only · device_only · fallback(대신 돌리는 것)
+QUALITIES = ("full", "server_only", "device_only", "fallback")
+NODE_CHANGES = ("added", "removed", "ready", "not_ready", "baseline", "service", "usage", "caps")
 KST = timezone(timedelta(hours=9))
 
 
@@ -90,8 +106,10 @@ def item_codes(items):
 
 
 def orch_record(event, request_id, mode=None, basis=None, reason="", request=None, plan=None, detail=None, t=None,
-                execution_id=None, event_id=None, code=None, desired_version=None, converged=None):
-    """orchestration_stream 한 건 (Redis 칸 = 글자). 틀린 값은 ValueError. code 는 REASON_CODES 중 하나(있을 때만 칸이 생김)."""
+                execution_id=None, event_id=None, code=None, desired_version=None, converged=None,
+                function=None, stage=None, quality=None):
+    """orchestration_stream 한 건 (Redis 칸 = 글자). 틀린 값은 ValueError. code 는 REASON_CODES 중 하나(있을 때만 칸이 생김).
+    function · stage · quality 도 값이 있을 때만 칸이 생긴다 — 칸 추가만이므로 schema 이름(orch/1)은 그대로다."""
     if code is not None:
         check_code(code)
     if event not in ORCH_EVENTS:
@@ -100,6 +118,10 @@ def orch_record(event, request_id, mode=None, basis=None, reason="", request=Non
         raise ValueError("모르는 mode %r" % mode)
     if basis not in (None,) + BASES:
         raise ValueError("모르는 basis %r" % basis)
+    if stage not in (None,) + STAGES:
+        raise ValueError("모르는 stage %r (가능: %s)" % (stage, ", ".join(STAGES)))
+    if quality not in (None,) + QUALITIES:
+        raise ValueError("모르는 quality %r (가능: %s)" % (quality, ", ".join(QUALITIES)))
     if not request_id:
         raise ValueError("request_id 가 없다")
     rec = {"schema": ORCH_SCHEMA, "event_id": event_id or uuid.uuid4().hex, "event": event,
@@ -117,6 +139,12 @@ def orch_record(event, request_id, mode=None, basis=None, reason="", request=Non
         rec["desired_version"] = str(int(desired_version))
     if converged is not None:
         rec["converged"] = "1" if converged else "0"
+    if function is not None:
+        rec["function"] = str(function)
+    if stage is not None:
+        rec["stage"] = stage
+    if quality is not None:
+        rec["quality"] = quality
     return rec
 
 

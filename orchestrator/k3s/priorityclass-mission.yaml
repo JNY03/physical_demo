@@ -1,0 +1,16 @@
+# ds-mission — 임무 작업(탐지 · 추적 · SLAM 같은, 요청해서 돌리는 비전 작업)의 우선순위.
+#
+# 값을 0 으로 둔 까닭: 임무는 클러스터의 보통 일이다. 기본값(PriorityClass 없는 파드 = 0)과 같은 자리에 두어
+# 다른 프로젝트의 파드를 괜히 밀어내지 않게 한다. 위로는 ds-safety-high(+1000)에게 자리를 내주고,
+# 아래로는 ds-vision-low(-100) 보다 먼저 자리를 받는다 — 안전 > 임무 > 곁들이 비전 의 세 층이 된다.
+# preemptionPolicy 를 PreemptLowerPriority 로 둔 까닭: 노드가 ds-vision-low 로 차 있으면 임무가 그것을
+# 밀어내고 들어가야 한다. 안전 작업과 임무 작업은 같은 선점 대상일 수 없으므로 ds-vision-low(Never)와
+# 나누어 두었다.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ds-mission
+value: 0
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "data_stream 임무 비전 작업(탐지 · 추적 · SLAM) — 보통 우선순위, 더 낮은 것만 밀어낸다"

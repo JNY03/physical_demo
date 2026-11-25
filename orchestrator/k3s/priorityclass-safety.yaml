@@ -1,0 +1,21 @@
+# ds-safety-high — 로봇 안에서만 도는 안전층(충돌 회피 · 비상 정지 같은 것)을 k3s 에 올릴 때 쓴다.
+#
+# 값을 +1000 으로 둔 까닭: 안전층은 노드가 꽉 차도 자리를 받아야 한다. 임무 작업(ds-mission, 0)과
+# 비전 CPU 작업(ds-vision-low, -100)보다 확실히 위여서, 그 둘을 밀어내고 들어간다.
+# preemptionPolicy 를 PreemptLowerPriority 로 둔 까닭: 자리가 없으면 기다리는 게 아니라 낮은 것을 비워야 한다 —
+# 안전층이 대기줄에 서 있는 동안 로봇이 움직이면 안 된다. (ds-vision-low 는 반대로 Never 다 — 남을 밀어내지 않는다.)
+#
+# !! 실측으로 확인된 사실 — 이 PriorityClass 로도 「네트워크 비의존 안전층」은 되지 않는다.
+#    k3s agent 노드에는 정적 파드 경로(/var/lib/rancher/k3s/agent/pod-manifests)가 없다. 즉 kubelet 이
+#    혼자 읽어서 띄우는 파드가 없고, 모든 (재)배치는 k3s 서버(API)가 내려 준다. 서버가 안 닿으면
+#    이미 돌던 컨테이너는 그대로 돌지만 죽은 뒤 다시 뜨지 않고, 새로 놓이지도 않는다.
+#    따라서 진짜 네트워크 비의존 안전층은 k3s 파드가 아니라 로봇 안의 systemd 서비스여야 한다.
+#    이 클래스는 「서버가 닿는 동안 안전층을 k3s 로도 올려 볼 때」의 우선순위일 뿐이다.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ds-safety-high
+value: 1000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "data_stream 안전층 — 가장 높은 우선순위, 낮은 것을 밀어낸다 (네트워크 비의존은 systemd 로)"

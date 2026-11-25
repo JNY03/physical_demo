@@ -152,3 +152,45 @@ def test_reason_codes_are_checked_in_one_place():
     with pytest.raises(ValueError):
         st.orch_record("failed", "r1", code="nope")
     assert st.item_codes([item, {"item": "x", "reason": "옛 항목"}]) == {"gpu_mem"}
+
+
+# ---------------------------------------------------------------- 작업 · 노드 특성 이유 코드와 기능 칸
+def test_task_and_node_reason_codes_exist():
+    assert {"no_sensor", "arch_mismatch", "no_accel", "thermal_guard", "deadline_miss",
+            "pair_incomplete"} <= set(st.REASON_CODES)
+    for code in ("no_sensor", "arch_mismatch", "no_accel", "thermal_guard", "deadline_miss", "pair_incomplete"):
+        assert st.REASON_CODES[code]                                  # 한국어 설명이 있다
+        assert st.check_code(code) == code
+        assert st.orch_record("failed", "r1", code=code)["code"] == code
+    with pytest.raises(ValueError):                                   # 모르는 코드는 여전히 거부
+        st.check_code("no_sensors")
+    with pytest.raises(ValueError):
+        st.reason_item("det:ep-001", "thermal", "오타")
+
+
+def test_function_stage_quality_only_when_given():
+    r = st.orch_record("planned", "r1")
+    assert "function" not in r and "stage" not in r and "quality" not in r   # 값이 없으면 칸도 없다
+    r = st.orch_record("applied", "r1", function="follow_me", stage="device", quality="full")
+    assert r["schema"] == "orch/1"                                    # 칸 추가는 계약 버전을 올리지 않는다
+    assert r["function"] == "follow_me" and r["stage"] == "device" and r["quality"] == "full"
+    assert all(isinstance(v, str) for v in r.values())
+    r = st.orch_record("degraded", "r1", code="pair_incomplete", function="follow_me", quality="device_only")
+    assert r["quality"] == "device_only" and "stage" not in r
+    for stage in st.STAGES:
+        assert st.orch_record("planned", "r1", stage=stage)["stage"] == stage
+    for q in st.QUALITIES:
+        assert st.orch_record("planned", "r1", quality=q)["quality"] == q
+
+
+@pytest.mark.parametrize("kw", [dict(stage="edge"), dict(stage=""), dict(quality="half"), dict(quality="")])
+def test_orch_record_rejects_bad_stage_and_quality(kw):
+    with pytest.raises(ValueError):
+        st.orch_record("planned", "r1", **kw)
+
+
+def test_caps_is_a_node_change():
+    assert "caps" in st.NODE_CHANGES
+    rec = st.node_record("pi11", "caps", S())
+    assert rec["change"] == "caps" and rec["schema"] == "node/1"
+    assert "baseline" not in st.node_record("pi11", "caps", S(baseline={"arch": "arm64"}))
