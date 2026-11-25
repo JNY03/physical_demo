@@ -515,6 +515,12 @@ class Controller:
                                                                              ", ".join(low)),
                                         detail={"fps": {s: streams[s].get("fps") for s in low}, "cap": u.get("fps_cap")}))
             elif not low and since is not None:
+                if u.get("degraded_emitted"):                # 저하를 알렸으면 회복도 알린다 — 읽는 쪽의 「마지막 상태」가 degraded 로 남지 않게
+                    events.append(self.emit("running", rid, execution_id=xid, mode="local",
+                                            reason="fps 회복: %s @ %s" % (
+                                                _fps_text({s: (streams.get(s) or {}).get("fps") for s in sorted(live)}),
+                                                self.gpu_where(u.get("node") or self.local)),
+                                            detail={"unit_id": uid, "recovered": True}))
                 self.state.update_unit(uid, low_since=None, degraded_emitted=False)
         return events
 

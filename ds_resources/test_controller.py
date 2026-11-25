@@ -169,6 +169,10 @@ def test_degraded_after_sustained_low_fps(tmp_path):
     r.add_frames("pi13", n=100)
     ev = k.poll()
     assert [e["event"] for e in ev] == ["degraded"] and "미달" in ev[0]["reason"]
+    r.kv[key] = json.dumps({"streams": {"pi13": {"frames": 30, "fps": 5.0}}})   # 다시 목표 근처
+    r.add_frames("pi13", n=100)
+    ev = k.poll()
+    assert [e["event"] for e in ev] == ["running"] and "fps 회복" in ev[0]["reason"]   # 마지막 상태가 degraded 로 남지 않음
 
 
 def test_redis_down_events_go_to_outbox_then_flush(tmp_path):
