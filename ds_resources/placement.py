@@ -110,7 +110,7 @@ def place_gpu(request, nodes, costs, out):
         if drop in waiting:
             out.setdefault("waiting", []).append(reason_item(
                 "input:%s" % drop, "input_wait_unbudgeted",
-                "입력 대기 — 지금 예산으로는 미리 잡지 못함 (p90 %.0f ms), 영상이 들어오면 다시 배치" % p90[drop]))
+                "입력 대기 — 영상 없음. 들어오면 다시 배치", p90_ms=p90[drop]))
         else:
             out["refused"].append(reason_item("gpu:%s:%s" % ("+".join(models), drop), "gpu_throughput",
                                               "GPU 처리량 부족: fps %.1f 까지 낮춰도 p90 합이 예산 %.2f 를 넘음" % (

@@ -72,6 +72,11 @@ def source_info(r, src, now_ms=None):
         return None
 
 
+def _fps_text(fps):
+    """{"robot1": 2.02} → "robot1 2.0 fps" (None 이면 '?')"""
+    return ", ".join("%s %s fps" % (s, "?" if f is None else "%.1f" % f) for s, f in sorted((fps or {}).items())) or "-"
+
+
 def check_cluster(cluster):
     """cluster.check() → (ok, why, caps). 옛 (ok, why) 반환도 받는다. 예외는 (False, 이유, {})."""
     if cluster is None:
@@ -220,7 +225,7 @@ class Controller:
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
         placed = {s for u in plan["gpu_units"] for s in u["sources"]}
-        plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상이 들어오면 바로 처리 (예산을 미리 잡음)")
+        plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상 없음. 들어오면 바로 처리")
                            for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])
         return {"ok": ok, "why": why, "caps": caps, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
 
@@ -276,8 +281,12 @@ class Controller:
             uid = self.ex.launch({"devices": u["sources"], "models": u["models"], "profile_path": profile_path,
                                   "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
                                   "execution_id": xid}, u["need_mb"], calc)
-            self.emit("applied", rid, execution_id=xid, mode=mode, reason=why2 or "GPU Executor 로 띄움",
-                      detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"]})
+            where = self.gpu_where(u["node"])
+            self.emit("applied", rid, execution_id=xid, mode=mode,
+                      reason="실행: %s · %s → %s (pid %s)%s" % (
+                          "+".join(u["models"]), _fps_text(u["fps_cap"]), where,
+                          (self.state.units().get(uid) or {}).get("pid", "?"), (" — " + why2) if why2 else ""),
+                      detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"], "node": u["node"], "where": where})
         if late:
             self.state.put_request(rid, dict(req_rec, refused=refused + late))
         for u in plan["cpu_units"]:
@@ -293,7 +302,7 @@ class Controller:
         if u["node"] == self.local or self.cpu_ex is None:
             rec.update(status="local", where="data_stream 기기 (런처가 띄우는 기존 방식)")
             self.state.put_unit(uid, rec)
-            self.emit("applied", rid, execution_id=xid, mode=mode, reason="CPU 작업 %s → data_stream 기기" % u["task"],
+            self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s → %s (data_stream 기기)" % (u["task"], self.local),
                       detail={"unit_id": uid, "node": u["node"], "note": u.get("reason")})
             return uid
         try:
@@ -305,7 +314,7 @@ class Controller:
                       code="cpu_launch_failed", detail={"unit_id": uid})
             return uid
         self.state.put_unit(uid, rec)
-        self.emit("applied", rid, execution_id=xid, mode=mode, reason="CPU 작업 %s → %s" % (u["task"], u["node"]),
+        self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s → %s (k3s 파드)" % (u["task"], u["node"]),
                   detail={"unit_id": uid, "node": u["node"], "requests": u["requests"], "limits": u["limits"],
                           "priority_class": u["priority_class"]})
         return uid
@@ -382,6 +391,7 @@ class Controller:
                 if st.get("ready") and age is not None and age <= CPU_HEARTBEAT_FRESH_S:
                     self.state.update_unit(uid, status="running", running_at=now)
                     events.append(self.emit("running", u["request_id"], execution_id=u["execution_id"], mode="k3s",
+                                            reason="처리 중: CPU 작업 %s @ %s (k3s 파드)" % (u.get("task"), u["node"]),
                                             detail={"unit_id": uid, "node": u["node"]}))
                 elif now - u["started_at"] > ge.LOAD_TIMEOUT_S:
                     events.append(self.replace_cpu(u, "%d초 안에 하트비트 없음" % ge.LOAD_TIMEOUT_S, nodes))
@@ -390,6 +400,18 @@ class Controller:
         return events
 
     # ------------------------------------------------------------ 감시
+    def gpu_where(self, node):
+        """사람이 읽는 실행 위치 — 「book-4vg1edpvi5 GPU (NVIDIA GeForce RTX 4050 Laptop GPU)」"""
+        if node != self.local:
+            return "%s GPU" % node
+        if not hasattr(self, "_gpu_name"):
+            try:
+                g = self.gpus()
+                self._gpu_name = g[0]["name"] if g else ""
+            except Exception:  # noqa: BLE001
+                self._gpu_name = ""
+        return "%s GPU%s" % (node, (" (%s)" % self._gpu_name) if self._gpu_name else "")
+
     def unbudgeted_up(self, rid):
         """예산이 모자라 배치표에서 뺀 입력 대기 소스 중 지금 영상이 들어오는 것"""
         req = self.state.data["requests"].get(rid) or {}
@@ -447,8 +469,14 @@ class Controller:
             if not u.get("running_emitted"):
                 if frames > 0 and up:
                     self.state.update_unit(uid, running_emitted=True, running_at=now, sources_up=sorted(up))
+                    fps_now = {s: (streams.get(s) or {}).get("fps") for s in sorted(up)}
+                    wait = sorted(set(u["devices"]) - up)
                     events.append(self.emit("running", rid, execution_id=xid, mode="local",
-                                            detail={"unit_id": uid, "sources_up": sorted(up),
+                                            reason="처리 중: %s · %s @ %s%s" % (
+                                                "+".join(u.get("models") or []), _fps_text(fps_now),
+                                                self.gpu_where(u.get("node") or self.local),
+                                                (" · 영상 기다림: " + ", ".join(wait)) if wait else ""),
+                                            detail={"unit_id": uid, "sources_up": sorted(up), "node": u.get("node") or self.local,
                                                     "waiting": sorted(set(u["devices"]) - up),
                                                     "fps": {s: x.get("fps") for s, x in streams.items()}}))
                 continue
@@ -456,7 +484,8 @@ class Controller:
             came = up - prev_up
             for s in sorted(came):                       # 로봇이 켜졌다 — 이미 띄운 프로세스가 바로 처리한다
                 events.append(self.emit("running", rid, execution_id=xid, mode="local",
-                                        reason="입력 들어옴: %s — 처리 시작" % s, detail={"unit_id": uid, "source_up": s}))
+                                        reason="입력 들어옴: %s — %s 에서 처리 시작" % (s, self.gpu_where(u.get("node") or self.local)),
+                                        detail={"unit_id": uid, "source_up": s}))
             for s in sorted(down):
                 events.append(self.emit("degraded", rid, execution_id=xid, mode="local",
                                         reason="입력 끊김: %s — 들어오면 바로 다시 처리" % s,
