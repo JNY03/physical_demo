@@ -138,24 +138,39 @@ card_rows_en: {distance: distance, axes: axes, track: track}
 #:   files_key 사용 가능 판정에 쓰는 이름이 키와 다를 때 (vision_config models.targeted.files 와 같은 이름)
 #:   gpu_mb    더해지는 GPU 어림값 (MB)       device  gpu | cpu
 #:   packages  venv 에 있어야 하는 패키지 (requirements.txt 와 맞춘다)
+#:   source    받을 곳 — tools/fetch_models.py 가 읽는다 (가중치 받기, Docker 계획 D3). 항목 하나가 아래 중 하나:
+#:               {path, url, sha256}                  URL 의 파일 하나
+#:               {path, hf, rev, file, sha256}        HF 저장소(hf: 소유자/이름 · datasets/소유자/이름)의 파일 하나
+#:               {path, hf, rev, include, sha256}     HF 파일 여럿을 폴더로 — sha256 은 include 파일들의 manifest
+#:               {hf, rev, include, cache: true, …}   HF 캐시에 (from_pretrained(저장소 id) 로 읽는 것)
+#:               {path, repo, commit}                 외부 git 저장소를 그 커밋으로 (external/…)
+#:               {path, manual, sha256?}              받을 곳이 없다(직접 만든 것) — 안내만, 해시가 있으면 검증
+#:             path 는 DS_HOME 기준. rev · commit 은 고정한다(브랜치 이름 금지). 해시: tools/fetch_models.py --hash <경로>
 models:
   yoloe_pf_l:
     note: YOLOE-11l-seg prompt-free (내장 어휘 4585종) — yoloe 선택지
     files: [models/yoloe-11l-seg-pf.pt]
     device: gpu
     packages: [ultralytics]
+    source:
+    - {path: models/yoloe-11l-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt, sha256: bf39e17c356f4b73977aa978bbdf6d19d0830e6bff46727d2d1f260414e41e0f}
   yoloe_text:
     note: YOLOE-11l-seg 텍스트 프롬프트 + MobileCLIP 텍스트 인코더
     files: [models/yoloe-11l-seg.pt, models/mobileclip_blt.ts]
     gpu_mb: 900
     device: gpu
     packages: [ultralytics]
+    source:
+    - {path: models/yoloe-11l-seg.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg.pt, sha256: a993fb0fc7c8830939ae14e6434a925dd1179428158c2761482eb8a8d8a3699f}
+    - {path: models/mobileclip_blt.ts, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/mobileclip_blt.ts, sha256: a67804d1b0f07b8b9a20c1761ec0847f34660f5fa338ec70e8f3fce68ed95e54}
   yoloe_free:
     note: YOLOE-11s-seg prompt-free — 후보 넓히기 arm
     files: [models/yoloe-11s-seg-pf.pt]
     gpu_mb: 500
     device: gpu
     packages: [ultralytics]
+    source:
+    - {path: models/yoloe-11s-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11s-seg-pf.pt, sha256: 292bdf157a9ec7315f34b567cb93467c5043cd1889a1cc18abbfdeb88d7a948d}
   clip:
     note: CLIP ViT-B/32 ONNX 양자화본 (글 설명 · 특징 · 색 · 모양 · 닮은꼴)
     files: [models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx,
@@ -164,17 +179,30 @@ models:
     gpu_mb: 350
     device: gpu
     packages: [onnxruntime-gpu]
+    source:
+    - {path: models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model_quantized.onnx, sha256: 583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299}
+    - {path: models/clip-vit-base-patch32/onnx/text_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/text_model_quantized.onnx, sha256: 73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a}
+    - {path: models/clip-vit-base-patch32/onnx/tokenizer_dictionary.json, sha256: b556ac8c99757ffb677208af34bc8c6721572114111a6e0aaf5fa69ff0b8d842,
+       manual: "main 저장소에서 옮긴 CLIP 토크나이저 — Xenova tokenizer.json 과 어휘는 같고 직렬화 판만 옛것(어느 판에도 이 해시는 없다). 기존 기기에서 복사한다"}
   clip_fp32:
     note: CLIP ViT-B/32 ONNX fp32 — river 위험물 확인 (GPU 19.5 ms)
     files: [models/clip-vit-base-patch32/onnx/vision_model.onnx]
     device: gpu
     packages: [onnxruntime-gpu]
+    source:
+    - {path: models/clip-vit-base-patch32/onnx/vision_model.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model.onnx, sha256: fd6e1402a588279d1723c7534d4bcba5bc0b14b47dfab0e46f8c47b8270d7d40}
+    - {path: models/clip-vit-base-patch32/onnx/text_model.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/text_model.onnx, sha256: 3f6571f5bad13a97c469c1622e1cfc4d9aef78b79fdbfcff804ca357bfada8cc}
+    - {path: models/clip-vit-base-patch32/tokenizer.json, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: tokenizer.json, sha256: f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd}
   yolo_world:
     note: YOLOv8s-worldv2 + CLIP — OVD 동의
     files: [models/yolov8s-worldv2.pt, models/clip/ViT-B-32.pt]
     gpu_mb: 500
     device: gpu
     packages: [ultralytics, clip]
+    source:
+    - {path: models/yolov8s-worldv2.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt, sha256: 9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792}
+    - {path: models/clip/ViT-B-32.pt, url: https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt,
+       sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af}
   grounding_dino:
     note: Grounding DINO tiny — OVD 동의 (그 근거를 선언한 대상을 고를 때만)
     files_key: gdino
@@ -183,28 +211,47 @@ models:
     gpu_mb: 1300
     device: gpu
     packages: [transformers]
+    source:
+    - {path: models/grounding-dino-tiny, hf: IDEA-Research/grounding-dino-tiny, rev: a2bb814dd30d776dcf7e30523b00659f4f141c71,
+       include: [added_tokens.json, config.json, model.safetensors, preprocessor_config.json, special_tokens_map.json,
+                 tokenizer.json, tokenizer_config.json, vocab.txt],
+       sha256: b285bd2c584d9596d7cb44336b6192e65137fc5a00508e07e664f26648c81534}
   depth:
     note: UniDepth V2 ViT-B/14 — 거리 (targeted · river 가 주기적으로)
     files: [~/.cache/huggingface/hub/models--lpiccinelli--unidepth-v2-vitb14, external/UniDepth]
     gpu_mb: 1300
     device: gpu
     packages: [torch]
+    source:
+    - {hf: lpiccinelli/unidepth-v2-vitb14, rev: 6830c15e415da7f94babbe0e83b46e1a04bc28ea, cache: true, include: [config.json, model.safetensors],
+       sha256: 5baac5dc307f899c30de2ff00086e144ab8fa5c9779d8a06fe455e44156e6a2b}
+    - {path: external/UniDepth, repo: https://github.com/lpiccinelli-eth/UniDepth.git, commit: 8d8cfe4c7ee15297099983607febf0d4f32eb3d6}
   unidepth_l:
     note: UniDepth V2 ViT-L/14 — unidepth 선택지 (vision_config models.unidepth.model_name)
     files: [models/unidepth-v2-vitl14, external/UniDepth]
     device: gpu
     packages: [torch]
+    source:
+    - {path: models/unidepth-v2-vitl14, hf: lpiccinelli/unidepth-v2-vitl14, rev: 52b349b514bd8b47642f67ac78cb7b5dc5c51dd9,
+       include: [config.json, model.safetensors], sha256: 2e45efad4607bd068c2c835dcc65ba64d516625d111ba446cc1aead6c4cdccc7}
+    - {path: external/UniDepth, repo: https://github.com/lpiccinelli-eth/UniDepth.git, commit: 8d8cfe4c7ee15297099983607febf0d4f32eb3d6}
   moge2_aerial:
     note: MoGe-2 ViT-L + LoRA r=96 (AerialMetric) — moge2_aerial 선택지
     files: [external/AerialMetric/weights/Moge2-Aerial.pt, external/AerialMetric/MoGe]
     device: gpu
     packages: [torch, peft, utils3d]
+    source:
+    - {path: external/AerialMetric, repo: https://github.com/kuieless/AerialMetric.git, commit: 895ce09edbd68eccb7e84877779b7f6fc1a4d0f5}
+    - {path: external/AerialMetric/weights/Moge2-Aerial.pt, hf: datasets/Kuiee/AerialMetric-ECCV2026, rev: c8fb8ea68fba6a3bace5814df26c248995aef8a1,
+       file: weights/Moge2-Aerial.pt, sha256: 9c42837ebcf295af959bbdc4f2ddceb204286a7df9bb94f475a6d764099c6191}
   trained:
     note: 대상별 학습 가중치 (대상 파일 trained.weight · fit 이 정한다)
     files: []
     gpu_mb: 120
     device: gpu
     packages: [ultralytics]
+    source:
+    - {manual: "대상별 학습 가중치 — 경로는 대상 파일(vision/assets/targets/<대상>.json trained.weight · fit)이 가진다"}
   reid:
     note: LightGlue + SuperPoint, CLIP — 객체 재식별
     files: [models/lightglue_superpoint/model.safetensors,
@@ -212,3 +259,7 @@ models:
     gpu_mb: 700
     device: gpu
     packages: [transformers, onnxruntime-gpu]
+    source:
+    - {path: models/lightglue_superpoint, hf: ETH-CVG/lightglue_superpoint, rev: 5f5f626efee99f37dbc9eafea879d24d297aeab8,
+       include: [config.json, model.safetensors, preprocessor_config.json], sha256: 69a8f2157741f6adc5ba83e1864e3d61add45fbb22b50b321d8f2630f5c9407d}
+    - {path: models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model_quantized.onnx, sha256: 583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299}
