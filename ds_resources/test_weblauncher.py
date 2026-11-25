@@ -326,3 +326,48 @@ def test_register_target(srv):
     assert code == 200 and body["ok"] and (srv["tmp"] / "targets" / "traffic cone.json").exists()
     code, body = call(srv["base"], "POST", "/api/register_target", {"name": "traffic cone"})
     assert code == 400 and "이미 등록된 대상" in body["errors"][0]
+
+
+# ------------------------------------------------------------ Host 검사 (인증이 없으므로)
+def test_host_header_parsing():
+    assert sv.host_of("127.0.0.1:10080") == "127.0.0.1"
+    assert sv.host_of("LocalHost") == "localhost"
+    assert sv.host_of("[::1]:10080") == "::1"
+    assert sv.host_of(None) == "" and sv.host_of("") == ""
+
+
+def test_host_check_rejects_other_names_and_allows_env(srv, monkeypatch):
+    b, port = srv["base"], srv["base"].rsplit(":", 1)[1]
+
+    def with_host(host, method="GET", path="/api/desired", body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(b + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", "Host": host})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    # 허용 — localhost · 127.0.0.1 · ::1 · 이 기기 이름 (포트는 무시)
+    from ds_resources import settings
+    for host in ("localhost", "localhost:%s" % port, "127.0.0.1:%s" % port, "[::1]:%s" % port, settings.node_name()):
+        code, _ = with_host(host)
+        assert code == 200, host
+
+    # 거부 — 아무 웹페이지 · DNS rebinding (파일을 만드는 register_target 도 막힌다)
+    for host in ("evil.example", "evil.example:%s" % port, "127.0.0.1.evil.example", ""):
+        code, body = with_host(host)
+        assert code == 403 and body["errors"]
+    code, body = with_host("evil.example", "POST", "/api/register_target", {"name": "x"})
+    assert code == 403 and not (srv["tmp"] / "targets" / "x.json").exists()
+    code, body = with_host("evil.example", "POST", "/api/plan", {"ui": ui()})
+    assert code == 403 and srv["calls"] == []
+    code, body = with_host("evil.example", "GET", "/")                       # 정적 파일도 같은 규칙
+    assert code == 403
+
+    # 환경변수에 넣으면 그 이름(테일넷 이름 등)으로도 열린다
+    monkeypatch.setenv("DS_WEB_ALLOWED_HOSTS", "wsl.tail1234.ts.net, evil.example")
+    assert with_host("wsl.tail1234.ts.net:%s" % port)[0] == 200
+    assert with_host("evil.example")[0] == 200
+    assert with_host("other.example")[0] == 403

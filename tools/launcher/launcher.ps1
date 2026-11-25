@@ -30,7 +30,8 @@ $ProfileFile  = Join-Path $Here "profile.json"
 $CatalogCache = Join-Path $Here "catalog_cache.json"
 #: 기기마다 다른 WSL 자리 (Docker 계획 D1, 2026-11-25) — 환경변수 DS_WSL_* > launcher.local.json > 기본값.
 #:   launcher.local.json (이 폴더, 런처가 고쳐 쓰지 않는다. settings.json 은 마지막 선택을 통째로 다시 쓰므로 따로 둔다)
-#:   { "distro": "Ubuntu-26.04", "repoDir": "/home/<사용자>/data_stream", "profileWsl": "/mnt/c/Users/<사용자>/DataStreamLauncher/profile.json" }
+#:   { "distro": "Ubuntu-26.04", "repoDir": "/home/<사용자>/data_stream", "profileWsl": "/mnt/c/Users/<사용자>/DataStreamLauncher/profile.json",
+#:     "pythonWsl": "./venv/bin/python" }
 #:   기본값: 배포판 Ubuntu-26.04 · 저장소 = WSL 의 $HOME/data_stream · profile = 이 폴더의 profile.json 을 /mnt/<드라이브>/… 로
 $LocalFile    = Join-Path $Here "launcher.local.json"
 $Local        = $null
@@ -43,6 +44,8 @@ function Pick-Setting([string]$envName, [string]$key, [scriptblock]$default) {
 }
 $Distro       = Pick-Setting "DS_WSL_DISTRO" "distro" { "Ubuntu-26.04" }
 $RepoDir      = Pick-Setting "DS_WSL_REPO" "repoDir" { ((& wsl.exe -d $Distro --exec sh -c 'printf %s "$HOME"') -join "") + "/data_stream" }
+#: 저장소 안에서 자식을 띄울 Python (컨테이너 · 다른 기기는 venv 가 없을 수 있다 — ds_resources.settings 의 DS_PYTHON 과 같은 뜻)
+$PyWsl        = Pick-Setting "DS_WSL_PYTHON" "pythonWsl" { "./venv/bin/python" }
 $ProfileWsl   = Pick-Setting "DS_WSL_PROFILE" "profileWsl" { "/mnt/" + $ProfileFile.Substring(0, 1).ToLower() + ($ProfileFile.Substring(2) -replace '\\', '/') }
 # 「배치 보기」 전용 — 비전이 지켜보는 profile.json 은 「실행」(Start-All · Apply-Changes) 때만 바뀐다 (M11 R4)
 $PreviewFile  = Join-Path $Here "profile_preview.json"
@@ -726,7 +729,7 @@ function Start-Vision($cfg) {
     foreach ($b in $buckets) {
         $k++
         $title = if ($groups -gt 1) { "비전 추론 ({0})" -f ($b -join " ") } else { "비전 추론" }
-        Start-WslWindow ("ds_vision_{0}" -f $k) $title ("./venv/bin/python vision/vision_infer.py --devices {0} --models {1} --profile {2}" -f ($b -join " "), ($mods -join " "), $ProfileWsl) $env
+        Start-WslWindow ("ds_vision_{0}" -f $k) $title ("{0} vision/vision_infer.py --devices {1} --models {2} --profile {3}" -f $PyWsl, ($b -join " "), ($mods -join " "), $ProfileWsl) $env
         if ($groups -gt 1) { Start-Sleep -Seconds 3 }
     }
 }

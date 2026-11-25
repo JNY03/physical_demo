@@ -180,6 +180,9 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
   상태 줄은 감독자 보고(`ds_reported:<역할>`)의 `converged` · 구성 요소 상태 · 이유(「반영 안 됨」)를 보여 준다.
 - 화면 선택은 원하는 상태의 `ui` 칸(런처 settings.json 과 같은 모양)에 남아 다시 열면 그대로다.
 - **인증이 없다.** 기본은 127.0.0.1 에만 연다. `--host 0.0.0.0` 은 그 망의 누구나 실행 · 끄기를 할 수 있다 — 테일넷처럼 믿는 망에서만.
+  인증이 없으므로 `Host` 헤더를 검사한다: `localhost` · `127.0.0.1` · `::1` · 이 기기 이름 · `DS_WEB_ALLOWED_HOSTS`(쉼표 구분)
+  만 받고 그 밖은 403(포트는 무시). 아무 웹페이지가 `POST /api/plan` · `/api/register_target` 을 부르는 것과 DNS rebinding 을 막는다.
+  테일넷 이름 · 컨테이너 이름으로 열려면 `DS_WEB_ALLOWED_HOSTS=wsl.tail1234.ts.net` 처럼 넣는다.
 - Windows 바로가기: `tools/launcher/web_launcher.cmd [URL]` — 브라우저만 연다(주소: 인자 → `DS_WEB_LAUNCHER_URL` → `http://localhost:10080/`).
 
 #### 스캔 탐지 창구 `/scan/*` (2026-11-24)

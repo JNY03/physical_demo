@@ -5,6 +5,8 @@ Docker 계획 §5. 런처는 프로세스를 직접 띄우지 않고 이 문서�
 
 저장: Redis 키 `ds_desired`(JSON 글자) + `state/desired.json`(원자적). 읽을 때는 둘 중 version 이 큰 쪽.
 version 은 쓸 때마다 1 씩 오른다. 칸은 추가만 한다(schema 이름이 바뀌면 계약 버전이 바뀐 것).
+쓰기는 `<파일>.lock` 에 배타 잠금(fcntl.flock, state.py 와 같은 방식)을 잡고 **읽기 → version 올리기 → 파일 → Redis**
+를 한 번에 한다 — 탭이 둘이어도 한쪽 뜻이 조용히 덮이지 않는다. 잠금을 몇 초 안에 못 잡으면 실패를 돌려준다.
 
     {
       "schema": "ds_desired/1",
@@ -19,6 +21,7 @@ version 은 쓸 때마다 1 씩 오른다. 칸은 추가만 한다(schema 이름
     }
 """
 import copy
+import fcntl
 import json
 import os
 import tempfile
@@ -26,6 +29,7 @@ import time
 from pathlib import Path
 
 SCHEMA = "ds_desired/1"
+LOCK_WAIT_S = 5.0                    # 쓰기 잠금을 이만큼만 기다린다 (영원히 막히지 않게 — 넘으면 실패)
 REDIS_KEY = "ds_desired"
 SLICE_SOURCE = "cam360_slice"
 SLICE_NEEDS = "cam360"
@@ -140,18 +144,50 @@ def read(r, path):
     return normalize(x), src
 
 
-def write(r, path, d, by="web", clock=time.time):
-    """검사 → version 올림 → 파일(원자적) → Redis. (저장된 문서, 문제 목록). 문제가 있으면 쓰지 않는다."""
+def _lock(path, wait_s=LOCK_WAIT_S, sleep=time.sleep):
+    """`<파일>.lock` 에 배타 잠금 (state.py 와 같은 방식). wait_s 안에 못 잡으면 None."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(str(path) + ".lock", "a+")
+    deadline = time.monotonic() + max(0.0, float(wait_s))
+    while True:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() >= deadline:
+                f.close()
+                return None
+            sleep(0.02)
+
+
+def _unlock(f):
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
+def write(r, path, d, by="web", clock=time.time, wait_s=LOCK_WAIT_S):
+    """검사 → (잠금) 읽기 → version 올림 → 파일(원자적) → Redis. (저장된 문서, 문제 목록). 문제가 있으면 쓰지 않는다.
+
+    읽기부터 Redis 까지 한 잠금 안에서 한다 — 탭이 둘이어도 같은 version 을 둘 다 +1 해서 덮는 일이 없다."""
     errs = validate(d)
     if errs:
         return None, errs
-    cur, _ = read(r, path)
-    out = normalize(d)
-    out.update(schema=SCHEMA, version=int(cur.get("version") or 0) + 1, updated_at=float(clock()), by=by)
-    _atomic_write(path, out)
-    if r is not None:
-        try:
-            r.set(REDIS_KEY, json.dumps(out, ensure_ascii=False))
-        except Exception:  # noqa: BLE001 — 파일에는 남았다. 감독자는 파일도 본다
-            pass
-    return out, []
+    lk = _lock(path, wait_s)
+    if lk is None:
+        return None, ["다른 쪽이 원하는 상태를 쓰고 있습니다. 잠시 뒤 다시 저장하세요."]
+    try:
+        cur, _ = read(r, path)
+        out = normalize(d)
+        out.update(schema=SCHEMA, version=int(cur.get("version") or 0) + 1, updated_at=float(clock()), by=by)
+        _atomic_write(path, out)
+        if r is not None:
+            try:
+                r.set(REDIS_KEY, json.dumps(out, ensure_ascii=False))
+            except Exception:  # noqa: BLE001 — 파일에는 남았다. 감독자는 파일도 본다
+                pass
+        return out, []
+    finally:
+        _unlock(lk)

@@ -1,4 +1,5 @@
 import json
+import threading
 
 from ds_resources import desired as ds
 
@@ -67,3 +68,36 @@ def test_vision_sources_add_slice_and_unknown_fields_survive():
     d = doc(server={"sources": ["cam360"]}, slice={"enabled": True}, extra={"keep": 1})
     assert ds.vision_sources(d) == ["cam360", "cam360_slice"]
     assert ds.normalize(d)["extra"] == {"keep": 1}
+
+
+def test_concurrent_writes_do_not_share_a_version(tmp_path):
+    # 탭이 둘 — 읽기~쓰기가 한 잠금 안에 있어야 같은 version 을 둘 다 +1 하지 않는다
+    r, p = R(), tmp_path / "desired.json"
+    n, got, start = 25, [], threading.Barrier(2)
+
+    def run(by):
+        start.wait()
+        for _ in range(n):
+            out, errs = ds.write(r, p, doc(), by=by)
+            assert errs == []
+            got.append(out["version"])
+    ts = [threading.Thread(target=run, args=("a",)), threading.Thread(target=run, args=("b",))]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert sorted(got) == list(range(1, 2 * n + 1))                             # 겹치지도 빠지지도 않는다
+    assert ds.read(r, p)[0]["version"] == 2 * n
+    assert json.loads(r.kv[ds.REDIS_KEY])["version"] == 2 * n
+
+
+def test_write_gives_up_when_lock_is_held(tmp_path):
+    p = tmp_path / "desired.json"
+    lk = ds._lock(p)                                                            # 다른 프로세스가 쥐고 있는 셈
+    try:
+        out, errs = ds.write(None, p, doc(), wait_s=0.05)                       # 영원히 막히지 않는다
+        assert out is None and errs and "다른 쪽" in errs[0] and not p.exists()
+    finally:
+        ds._unlock(lk)
+    out, errs = ds.write(None, p, doc())                                        # Redis 가 없어도 파일만으로 된다
+    assert errs == [] and out["version"] == 1 and json.loads(p.read_text(encoding="utf-8"))["version"] == 1

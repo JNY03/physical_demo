@@ -9,6 +9,10 @@
 **인증이 없다.** 기본은 127.0.0.1 에만 연다. `--host 0.0.0.0` 은 그 망의 누구나 실행 · 끄기를 할 수 있다는 뜻이다
 (테일넷처럼 믿는 망에서만).
 
+Host 검사: 모든 요청의 `Host` 헤더가 localhost · 127.0.0.1 · ::1 · 이 기기 이름(settings.node_name()) ·
+환경변수 `DS_WEB_ALLOWED_HOSTS`(쉼표 구분) 중 하나여야 한다(포트는 무시). 아니면 403.
+다른 이름(테일넷 이름 등)으로 열려면 그 환경변수에 넣는다.
+
 API
   GET  /health            {"ok": true}
   GET  /api/catalog       cue_catalog.catalog() + sources · robot_cams · slice_v · ports
@@ -47,6 +51,29 @@ STATUS_KO = {"running": "실행 중", "starting": "띄우는 중", "stopping": "
              "failed": "실패", "error": "오류", "backoff": "다시 띄우기 대기", "waiting": "대기", "pending": "대기",
              "restarting": "다시 띄우는 중", "refused": "못 함", "degraded": "낮춤"}
 BAD = {"failed", "error", "backoff", "refused", "crashloop"}
+#: 받아 주는 Host 헤더 (포트는 떼고 비교). 그 밖의 이름으로 오면 403
+#: — 인증이 없으니 아무 웹페이지가 POST /api/plan · /api/register_target 을 부르는 것(과 DNS rebinding)을 여기서 막는다
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def host_of(header):
+    """Host 헤더의 호스트 부분(소문자, 포트 없음). IPv6 은 대괄호를 뗀다. 없으면 빈 글자."""
+    h = (header or "").strip().lower()
+    if h.startswith("["):                                  # [::1]:10080
+        return h[1:].split("]", 1)[0]
+    return h.split(":", 1)[0] if h.count(":") == 1 else h   # 콜론이 여럿이면 대괄호 없는 IPv6 — 그대로
+
+
+def allowed_hosts():
+    """받아 주는 호스트 이름들 — localhost · 127.0.0.1 · ::1 · 이 기기 이름 · DS_WEB_ALLOWED_HOSTS(쉼표)."""
+    from ds_resources import settings
+    out = set(LOCAL_HOSTS)
+    out.add(str(settings.node_name()).lower())
+    for x in (os.environ.get("DS_WEB_ALLOWED_HOSTS") or "").split(","):
+        x = host_of(x)
+        if x:
+            out.add(x)
+    return out
 
 
 # ------------------------------------------------------------ 카탈로그 · 배치 (기본 구현)
@@ -335,6 +362,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         a = self.app
         try:
+            host = host_of(self.headers.get("Host"))
+            if host not in allowed_hosts():
+                return self._send(403, {"errors": [
+                    "이 이름(%s)으로는 받지 않습니다 — localhost · 127.0.0.1 · 이 기기 이름으로 열거나 "
+                    "DS_WEB_ALLOWED_HOSTS 에 넣으세요." % (host or "Host 없음")]})
             if method == "GET" and path == "/health":
                 return self._send(200, {"ok": True})
             if method == "GET" and path == "/api/catalog":
