@@ -133,6 +133,703 @@ cpu_tasks:
     image: null
     local_command: [python, e2p/slice360_live.py]   # python = DS_PYTHON (기본: 띄운 쪽과 같은 Python)
 
+#: 기능 계약 (functions/1, 2026-11-25) — 「무엇을 · 어디에서 돌려야 하는가」를 기능마다 선언한다.
+#:
+#: 왜 더했나: cpu_tasks 에는 중요도 · 마감 · 고정 · 센서 요구를 적는 칸이 없어 「안전 제어는 로봇 안에서만,
+#: 1차 추론은 기기, 무거운 모델은 서버」(비전_오케스트레이션_의사결정_스케줄링_261125.md §10)를 코드로 적을 수
+#: 없었다. 이 절이 그 계약이다. 읽는 쪽은 ds_resources/functions.py (load · expand · pairs · as_cpu_task).
+#: 배치 알고리즘(placement/1)은 아직 이 절을 쓰지 않는다 — 계약을 먼저 정하는 것이 목적이다.
+#: cpu_tasks 는 호환을 위해 그대로 두고, 그 작업들은 functions.py 가 단일 단계 기능으로도 읽는다(별칭).
+#:
+#: 기능마다
+#:   pattern      resident     기기 안에 늘 떠 있다 (systemd). 오케스트레이터는 「놓는」 게 아니라 있는지 보고 없으면 알린다
+#:                device_only  기기에서만 돈다 (데이터 중력 · 상태). 서버 단계가 있으면 보조다
+#:                cascade      기기에서 거르고 서버에서 확인한다. 기기 단계가 없어도 기능은 산다 (품질만 낮춤)
+#:                split        한 기능을 기기 · 서버가 나눠 맡는다. 한쪽이 없으면 기능이 안 된다
+#:                server_only  서버에서만 돈다
+#:                config       값을 만들어 두고 기기가 적용한다 (배치 대상 아님 — 있는지만 본다)
+#:                pipeline     받아서 적용하거나 모아서 분석한다 (배치 대상 아님 — 있는지만 본다)
+#:   criticality  safety       링크가 끊겨도 돌아야 한다 — 기기 고정 (k3s 우선순위 ds-safety-high)
+#:                mission      요청해서 돌리는 임무 작업 (ds-mission)
+#:                best_effort  남는 자원으로 (ds-vision-low)
+#:   trigger      always · on_activity(움직임 · 변화가 있을 때) · on_request · periodic
+#:   note         한 줄 설명. 한국어 이름을 앞에 적는다
+#:   forbid       그 쪽에 단계를 두면 안 되는 것 — [device] · [server] (기본 빈 목록). 단계가 있으면 ValueError
+#:   stages       {device, server} 중 있는 것만
+#:
+#: 단계마다 (없으면 기본값)
+#:   pin          device | server | none(기본) — 그 쪽에 붙박이라 옮길 수 없다
+#:   needs        {arch: arm64|amd64|any(기본), sensors: [camera|imu|lidar|serial](기본 없음),
+#:                 accel: none(기본)|gpu|npu, cores: 소수(기본 없음)}
+#:   deadline_ms  그 단계가 지켜야 하는 마감 (없으면 null = 마감 없음)
+#:   egress_kb    그 단계가 **내보내는** 장당 크기. frame_kb(받는 양)와 다르다 —
+#:                1차 거름은 받는 건 크고(압축 프레임) 보내는 건 수십 바이트다
+#:   state        stateless(기본) | sticky — sticky 는 노드를 옮기면 상태를 잃는다
+#:   optional     참이면 이 단계가 못 놓여도 기능은 산다 (품질만 낮아진다). 기본 거짓
+#:   note         그 단계만의 한 줄 (선택)
+#:   자원 칸은 cpu_tasks 와 같은 이름 · 같은 뜻을 쓴다:
+#:     cpu_m · mem_mb (requests, limits 는 2배) · frame_kb · fps · proc_ms (네트워크 비용) ·
+#:     roles (둘 수 있는 노드 역할: gpu · robot · sensor · small) · placement (any | measured) ·
+#:     image · command · env (k3s 파드) · local_command (data_stream 기기에서 돌릴 때)
+#:   실행체가 아직 없으면 image: null · command: null 이고 note 에 「실행체 없음 — 계약만」이라고 적는다
+#:
+#: 패턴이 지키는 규칙 (functions.py load 가 ValueError 로 거부한다)
+#:   cascade      두 단계 모두 있어야 하고 기기 단계는 optional: true (없으면 품질만 낮춘다)
+#:   split        두 단계 모두 있어야 하고 어느 단계도 optional 일 수 없다 (한쪽이 없으면 기능 거절)
+#:   device_only  기기 단계 필수. 서버 단계가 있으면 optional: true (보조다)
+#:   server_only  서버 단계 필수. 기기 단계가 있으면 optional: true
+#:   resident     기기 단계 필수 · pin: device
+#:   safety       기기 단계가 있고 pin: device — 안전은 서버로 옮기지 않는다
+#:   배치 대상 패턴(device_only · cascade · split · server_only)의 단계는 cpu_m · mem_mb 를 적어야 한다
+#:
+#: 23줄 표에서 「경로 계획」만 둘로 쪼갰다(로컬 회피는 safety 상주, 전역 경로는 mission 서버) — 그래서 24개다
+functions:
+  motor_control:
+    note: 로봇 모터 제어 — 로봇 안 systemd 상주, 모터 버스를 직접 쥔다. 실행체 없음 — 계약만
+    pattern: resident
+    criticality: safety
+    trigger: always
+    forbid: [server]
+    stages:
+      device:
+        pin: device
+        needs: {arch: arm64, sensors: [serial], accel: none, cores: 0.5}
+        deadline_ms: 10
+        egress_kb: 0.2
+        cpu_m: 500
+        mem_mb: 128
+        roles: [robot]
+        image: null
+        command: null
+
+  emergency_stop:
+    note: 긴급정지 · 충돌방지 — 로봇 안 systemd 상주. 링크가 끊겨도 혼자 돈다. 실행체 없음 — 계약만
+    pattern: resident
+    criticality: safety
+    trigger: always
+    stages:
+      device:
+        pin: device
+        needs: {arch: arm64, sensors: [camera, serial], accel: none, cores: 0.5}
+        deadline_ms: 50
+        egress_kb: 0.1
+        cpu_m: 400
+        mem_mb: 128
+        roles: [robot]
+        image: null
+        command: null
+        note: 근접 · 깊이로 스스로 멈춘다. 링크 무관 — k3s 파드로는 이 보장이 안 된다(orchestrator/k3s/priorityclass-safety.yaml)
+      server:
+        pin: server
+        optional: true
+        egress_kb: 0.5
+        cpu_m: 100
+        mem_mb: 128
+        roles: [gpu]
+        image: null
+        command: null
+        note: 상태 읽기만 — 서버는 멈추라고 하지 않는다
+
+  sensor_collect:
+    note: 센서 데이터 수집 — 기기 systemd 상주로 센서를 읽고, 서버가 모아 저장한다. 실행체 없음 — 계약만
+    pattern: resident
+    criticality: mission
+    trigger: always
+    stages:
+      device:
+        pin: device
+        needs: {sensors: [camera, imu], cores: 0.5}
+        deadline_ms: 100
+        egress_kb: 2
+        cpu_m: 400
+        mem_mb: 256
+        roles: [robot, sensor]
+        image: null
+        command: null
+      server:
+        pin: server
+        optional: true
+        egress_kb: 0
+        cpu_m: 500
+        mem_mb: 1024
+        roles: [gpu]
+        image: null
+        command: null
+        note: 통합 저장 — 없어도 기기는 계속 읽는다
+
+  camera_calibration:
+    note: 카메라 캘리브레이션 — 서버가 보정값을 산출하고 기기는 파일 버전을 적용한다. 실행체 없음 — 계약만
+    pattern: config
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        egress_kb: 0.1
+        cpu_m: 50
+        mem_mb: 64
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+        note: 보정값 적용 — 파일 버전으로 받는다 (vision/vision_config.yaml devices)
+      server:
+        pin: server
+        egress_kb: 4
+        cpu_m: 1000
+        mem_mb: 1024
+        roles: [gpu]
+        image: null
+        command: null
+
+  video_preprocess:
+    note: 영상 전처리 · 압축 — 원본은 카메라 노드에만 있다(데이터 중력). 실행체 없음 — 계약만
+    pattern: device_only
+    criticality: mission
+    trigger: always
+    stages:
+      device:
+        pin: device
+        needs: {sensors: [camera], cores: 2.0}
+        deadline_ms: 150
+        frame_kb: 2700
+        egress_kb: 120
+        fps: 5
+        proc_ms: 120
+        cpu_m: 1200
+        mem_mb: 400
+        roles: [robot, sensor, gpu]
+        image: null
+        command: null
+        note: 파이 5 에는 H.264 하드웨어 인코더가 없다 — 제어와 CPU 를 다투면 해상도 · fps · 화질을 낮춘다 (§10)
+      server:
+        optional: true
+        frame_kb: 120
+        egress_kb: 60
+        proc_ms: 40
+        cpu_m: 1000
+        mem_mb: 512
+        roles: [gpu]
+        image: null
+        command: null
+        note: 보조 재인코딩 — 저장 · 가시화용
+
+  object_detect:
+    note: 객체 탐지 — 기기에서 int8 320px 로 거르고 서버 고성능 모델이 확인한다
+    pattern: cascade
+    criticality: mission
+    trigger: on_activity
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], accel: none, cores: 2.0}
+        deadline_ms: 1000
+        frame_kb: 120
+        egress_kb: 0.05
+        fps: 2
+        proc_ms: 400
+        cpu_m: 1600
+        mem_mb: 512
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 1~5 fps · 1~2 스레드. 파이마다 성능이 달라 placement 는 measured — 비교 측정 전에는 옮기지 않는다. 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 500
+        frame_kb: 120
+        egress_kb: 2
+        cpu_m: 500
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+        note: options.yoloe 가 맡는다 (GPU Executor 가 띄운다 — image · command 로 올리는 작업이 아니다)
+
+  zeroshot_detect:
+    note: Zero-shot 객체 탐지 — 기기는 사전 등록 프롬프트 임베딩만, 서버가 동적 프롬프트로 정밀하게
+    pattern: cascade
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 2.0}
+        deadline_ms: 1000
+        frame_kb: 120
+        egress_kb: 0.05
+        fps: 1
+        proc_ms: 700
+        cpu_m: 1200
+        mem_mb: 512
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 2000
+        frame_kb: 120
+        egress_kb: 4
+        cpu_m: 500
+        mem_mb: 3072
+        roles: [gpu]
+        image: null
+        command: null
+        note: options.river · targeted 가 맡는다 (YOLOE 텍스트 arm · Grounding DINO)
+
+  segmentation:
+    note: Segmentation — 기기 경량 분할로 거르고 서버 Foundation 모델이 맡는다. 실행체 없음 — 계약만
+    pattern: cascade
+    criticality: best_effort
+    trigger: on_request
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 2.0}
+        deadline_ms: 2000
+        frame_kb: 120
+        egress_kb: 8
+        fps: 1
+        proc_ms: 1200
+        cpu_m: 1500
+        mem_mb: 512
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 3000
+        frame_kb: 120
+        egress_kb: 40
+        cpu_m: 500
+        mem_mb: 4096
+        roles: [gpu]
+        image: null
+        command: null
+
+  depth_estimate:
+    note: Depth Estimation — 기기는 상대 깊이로 근거리만 보고, 서버가 정밀 거리 · 다중 시점을 맡는다
+    pattern: cascade
+    criticality: mission
+    trigger: on_activity
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 2.0}
+        deadline_ms: 500
+        frame_kb: 120
+        egress_kb: 1
+        fps: 2
+        proc_ms: 300
+        cpu_m: 1200
+        mem_mb: 512
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 상대 깊이 · 근거리 판단만 — 거리값으로 쓰지 않는다. 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 1000
+        frame_kb: 120
+        egress_kb: 30
+        cpu_m: 500
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+        note: options.unidepth · moge2_aerial 가 맡는다
+
+  single_cam_track:
+    note: 단일 카메라 Tracking — 그 카메라 노드에서 돈다. 궤적은 노드를 옮기면 잃는다(sticky). 실행체 없음 — 계약만
+    pattern: device_only
+    criticality: mission
+    trigger: on_activity
+    stages:
+      device:
+        needs: {sensors: [camera], cores: 1.0}
+        deadline_ms: 200
+        frame_kb: 120
+        egress_kb: 1
+        fps: 5
+        proc_ms: 80
+        state: sticky
+        cpu_m: 800
+        mem_mb: 256
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+      server:
+        optional: true
+        deadline_ms: 500
+        egress_kb: 1
+        cpu_m: 300
+        mem_mb: 512
+        roles: [gpu]
+        image: null
+        command: null
+        note: 보조 — 끊긴 궤적 이어 붙이기
+
+  multi_cam_track:
+    note: 다중 카메라 Tracking — 기기가 특징을 뽑고 서버가 카메라 사이 객체를 잇는다. 실행체 없음 — 계약만
+    pattern: split
+    criticality: mission
+    trigger: on_activity
+    stages:
+      device:
+        needs: {sensors: [camera], cores: 1.0}
+        deadline_ms: 200
+        frame_kb: 120
+        egress_kb: 8
+        fps: 5
+        proc_ms: 100
+        cpu_m: 1000
+        mem_mb: 384
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 500
+        egress_kb: 4
+        state: sticky
+        cpu_m: 800
+        mem_mb: 1024
+        roles: [gpu]
+        image: null
+        command: null
+        note: 객체 연결 표를 들고 있다 — 옮기면 잃는다
+
+  reid:
+    note: ReID — 기기가 경량 임베딩을 보내고 서버가 유사도 · 증거를 융합한다
+    pattern: split
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        needs: {sensors: [camera], cores: 1.0}
+        deadline_ms: 500
+        frame_kb: 120
+        egress_kb: 2
+        fps: 2
+        proc_ms: 250
+        cpu_m: 1000
+        mem_mb: 384
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 2000
+        egress_kb: 4
+        cpu_m: 500
+        mem_mb: 1024
+        roles: [gpu]
+        image: null
+        command: null
+        note: models.reid (LightGlue + SuperPoint · CLIP) 가 맡는다
+
+  anomaly_detect:
+    note: 이상 탐지 — 기기가 1차로 감지하고 서버가 검증한다. 실행체 없음 — 계약만
+    pattern: cascade
+    criticality: mission
+    trigger: on_activity
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera, imu], cores: 1.0}
+        deadline_ms: 1000
+        frame_kb: 120
+        egress_kb: 0.1
+        fps: 2
+        proc_ms: 200
+        cpu_m: 800
+        mem_mb: 256
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 3000
+        frame_kb: 120
+        egress_kb: 4
+        cpu_m: 500
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+
+  slam:
+    note: SLAM — 로컬 위치 추정은 기기 붙박이(지도를 들고 있다), 서버는 여러 지도를 합친다. 실행체 없음 — 계약만
+    pattern: split
+    criticality: mission
+    trigger: always
+    stages:
+      device:
+        pin: device
+        needs: {sensors: [camera, imu], cores: 2.0}
+        deadline_ms: 100
+        frame_kb: 120
+        egress_kb: 1
+        fps: 10
+        proc_ms: 60
+        state: sticky
+        cpu_m: 1500
+        mem_mb: 512
+        roles: [robot, sensor]
+        image: null
+        command: null
+      server:
+        pin: server
+        deadline_ms: 2000
+        egress_kb: 20
+        state: sticky
+        cpu_m: 1000
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+
+  vlm:
+    note: VLM — 상황 분석은 서버 전용. 기기 경량 판은 선택이다. 실행체 없음 — 계약만
+    pattern: server_only
+    criticality: best_effort
+    trigger: on_request
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 2.0}
+        egress_kb: 0.5
+        frame_kb: 120
+        cpu_m: 1000
+        mem_mb: 1024
+        roles: [sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 선택적 경량 판 — 없는 것이 기본이다
+      server:
+        needs: {accel: gpu}
+        frame_kb: 120
+        egress_kb: 4
+        cpu_m: 500
+        mem_mb: 8192
+        roles: [gpu]
+        image: null
+        command: null
+
+  grounding_explain:
+    note: 근거 설명 — 기기가 측정값 · 특징을 뽑고 서버가 증거를 모아 자연어로 적는다
+    pattern: split
+    criticality: best_effort
+    trigger: on_request
+    stages:
+      device:
+        needs: {sensors: [camera], cores: 0.5}
+        deadline_ms: 500
+        frame_kb: 120
+        egress_kb: 4
+        fps: 1
+        proc_ms: 120
+        cpu_m: 600
+        mem_mb: 256
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+        note: 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        egress_kb: 8
+        cpu_m: 500
+        mem_mb: 4096
+        roles: [gpu]
+        image: null
+        command: null
+        note: 증거 통합은 vision/hazard_verify.py · scan_assess.py 의 판정 근거를 쓴다
+
+  motion_forecast:
+    note: 객체 이동 예측 — 기기는 단기(다음 몇 프레임), 서버는 장기 · 다중 객체. 실행체 없음 — 계약만
+    pattern: cascade
+    criticality: mission
+    trigger: on_activity
+    stages:
+      device:
+        optional: true
+        needs: {cores: 0.5}
+        deadline_ms: 200
+        egress_kb: 1
+        fps: 5
+        proc_ms: 30
+        cpu_m: 400
+        mem_mb: 192
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+      server:
+        deadline_ms: 1000
+        egress_kb: 8
+        cpu_m: 600
+        mem_mb: 1024
+        roles: [gpu]
+        image: null
+        command: null
+
+  local_avoidance:
+    note: 경로 계획(로컬 회피) — 로봇 안 systemd 상주. 전역 경로(global_path_plan)와 나눈 반쪽이다. 실행체 없음 — 계약만
+    pattern: resident
+    criticality: safety
+    trigger: always
+    forbid: [server]
+    stages:
+      device:
+        pin: device
+        needs: {arch: arm64, sensors: [camera, lidar], accel: none, cores: 1.0}
+        deadline_ms: 50
+        egress_kb: 0.5
+        cpu_m: 600
+        mem_mb: 256
+        roles: [robot]
+        image: null
+        command: null
+
+  global_path_plan:
+    note: 경로 계획(전역 경로 · 임무) — 서버에서 긴 경로를 짠다. 로컬 회피가 거부권을 가진다. 실행체 없음 — 계약만
+    pattern: server_only
+    criticality: mission
+    trigger: on_request
+    stages:
+      server:
+        pin: server
+        deadline_ms: 2000
+        egress_kb: 4
+        cpu_m: 1000
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+
+  multi_robot_assign:
+    note: 다중 로봇 임무 배정 — 전체 최적화는 서버, 기기는 수락 · 실행만. 실행체 없음 — 계약만
+    pattern: server_only
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        optional: true
+        egress_kb: 0.5
+        deadline_ms: 500
+        cpu_m: 200
+        mem_mb: 128
+        roles: [robot]
+        image: null
+        command: null
+        note: 수락 · 실행만 — 배정은 하지 않는다
+      server:
+        pin: server
+        deadline_ms: 5000
+        egress_kb: 2
+        cpu_m: 1000
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+
+  digital_twin:
+    note: 디지털 트윈 — 기기가 관측을 발행하고 서버가 전역 상태를 들고 있다. 실행체 없음 — 계약만
+    pattern: split
+    criticality: best_effort
+    trigger: periodic
+    stages:
+      device:
+        egress_kb: 1
+        deadline_ms: 1000
+        cpu_m: 300
+        mem_mb: 192
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+      server:
+        pin: server
+        egress_kb: 20
+        state: sticky
+        cpu_m: 1000
+        mem_mb: 2048
+        roles: [gpu]
+        image: null
+        command: null
+
+  model_train:
+    note: 모델 학습 — 서버 전용. 기기 학습은 금지다(forbid device) — 제어와 다투고 발열로 throttle 된다
+    pattern: server_only
+    criticality: best_effort
+    trigger: on_request
+    forbid: [device]
+    stages:
+      server:
+        pin: server
+        needs: {arch: amd64, accel: gpu}
+        egress_kb: 0
+        cpu_m: 2000
+        mem_mb: 16384
+        roles: [gpu]
+        image: null
+        command: null
+        local_command: [python, vision/train_custom_pe.py]
+        note: 지정 클래스 탐지의 대상별 학습은 vision/train_custom_pe.py 가 맡는다
+
+  model_update:
+    note: 모델 업데이트 — 서버가 버전을 쥐고 기기가 받아서 적용한다
+    pattern: pipeline
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        egress_kb: 0.1
+        cpu_m: 200
+        mem_mb: 256
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+        local_command: [python, tools/fetch_models.py]
+        note: 받아서 적용 — models.<키>.source 를 tools/fetch_models.py 가 내려받고 해시로 확인한다
+      server:
+        pin: server
+        egress_kb: 0
+        cpu_m: 300
+        mem_mb: 512
+        roles: [gpu]
+        image: null
+        command: null
+        note: 버전 관리 — 이 레지스트리의 rev · commit · sha256 이 그 판이다
+
+  resource_status:
+    note: 자원 상태 관리 — 기기가 수집하고 서버가 분석한다. 수집은 이미 node_resource_stream 이 하고 있다
+    pattern: pipeline
+    criticality: mission
+    trigger: periodic
+    stages:
+      device:
+        egress_kb: 0.5
+        cpu_m: 100
+        mem_mb: 128
+        roles: [robot, sensor, small, gpu]
+        image: null
+        command: null
+        note: 수집 — orchestrator/k3s_source.py · ds_resources/probe.py 가 이미 맡는다 (따로 띄우지 않는다)
+      server:
+        pin: server
+        egress_kb: 2
+        cpu_m: 200
+        mem_mb: 512
+        roles: [gpu]
+        image: null
+        command: null
+        note: 분석 — ds_resources/memory.py 의 기억 · p95 가 그 자리다
+
 #: targeted 밖 선택지(river 등)의 단서 유형 이름 (런처 설명용). targeted 단서는 위 label 을 쓴다
 cue_type_labels: {match: 기준 사진 유사도, material: 재질 규칙, structure: 구조 규칙, distance: 거리}
 

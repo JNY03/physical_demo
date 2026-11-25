@@ -1,0 +1,353 @@
+"""기능 계약 — 레지스트리 functions 절을 읽고 · 검증하고 · 단계로 펼친다 (functions/1, core, 2026-11-25).
+
+표준 라이브러리 + yaml 만 쓴다. orchestrator/ 를 import 하지 않는다 — 계약은 실행 방식보다 아래에 있다.
+
+왜 있나: cpu_tasks 에는 중요도 · 마감 · 고정 · 센서 요구를 적는 칸이 없어 「안전 제어는 로봇 안에서만,
+1차 추론은 기기, 무거운 모델은 서버」(비전_오케스트레이션_의사결정_스케줄링_261125.md §10)를 코드로 적을 수
+없었다. 이 모듈이 그 계약을 읽는다. 배치 알고리즘(placement/1)은 아직 이것을 쓰지 않는다 — 계약이 먼저다.
+
+  load(경로 | 사전)         → {기능: {pattern, criticality, trigger, note, forbid, stages, ...}}
+                             모르는 칸 이름 · 범위 밖 값은 ValueError 다. 메시지에 가능한 값을 나열한다
+                             (streams.check_code 와 같은 방식 — 문구 비교로 되돌아가지 않게)
+                             레지스트리에 없고 여기서 더하는 칸: priority_class (criticality 로 고른 k3s
+                             PriorityClass), legacy (옛 cpu_tasks 에서 온 별칭인가), 단계의 unit (배치표 이름)
+  expand(funcs, names)     → (배치_단계들, 상주들, 그밖). resident 는 상주로, config · pipeline 은 그밖으로
+                             빠진다 — 오케스트레이터는 그것을 「놓는」 게 아니라 있는지 보고 없으면 알린다
+  pairs(stages, placed)    → {기능: {verdict: ok | degraded | rejected, ...}}. 판정만 돌려준다 — 스트림에 쓰지 않는다
+  as_cpu_task(stage)       → placement.place_cpu 가 받는 작업 사전 (옛 cpu_tasks 와 같은 칸 이름 · 같은 뜻)
+
+옛 cpu_tasks.<이름> 도 단일 단계 기능으로 읽힌다(별칭). 그 별칭 단계의 unit 은 기능 이름 그대로여서
+배치표 · 가시화가 쓰던 이름(cpu:<이름>)이 바뀌지 않는다. functions 에 같은 이름이 있으면 functions 가 이긴다.
+그 밖의 단계는 unit 이 「<기능>.<단계>」 다 — 한 기능이 기기 · 서버 둘에 놓일 수 있으니 이름이 갈려야 한다.
+"""
+import re
+
+import yaml
+
+from ds_resources.settings import REPO
+
+FORMAT = "functions/1"
+REGISTRY = REPO / "vision" / "model_registry.yaml"
+
+PATTERNS = ("resident", "device_only", "cascade", "split", "server_only", "config", "pipeline")
+#: 배치 대상 — 오케스트레이터가 노드에 놓는 패턴
+PLACEABLE = ("device_only", "cascade", "split", "server_only")
+#: 상주 — 기기 안에 늘 떠 있어야 하는 것 (놓지 않고 있는지만 본다)
+RESIDENT = ("resident",)
+#: 그밖 — 값을 만들어 두거나 받아서 적용하는 흐름 (놓지 않고 있는지만 본다)
+DECLARED = ("config", "pipeline")
+CRITICALITY = ("safety", "mission", "best_effort")
+TRIGGERS = ("always", "on_activity", "on_request", "periodic")
+SIDES = ("device", "server")
+PINS = ("device", "server", "none")
+ARCHS = ("arm64", "amd64", "any")
+SENSORS = ("camera", "imu", "lidar", "serial")
+ACCELS = ("none", "gpu", "npu")
+STATES = ("stateless", "sticky")
+PLACEMENTS = ("any", "measured")
+#: 둘 수 있는 노드 역할 — orchestrator/cluster/nodes.json 과 같은 이름
+ROLES = ("gpu", "robot", "sensor", "small")
+VERDICTS = ("ok", "degraded", "rejected")
+#: criticality → k3s PriorityClass (orchestrator/k3s/priorityclass*.yaml). 여기서는 알려만 준다 — 붙이는 건 실행 쪽 일이다
+PRIORITY_CLASSES = {"safety": "ds-safety-high", "mission": "ds-mission", "best_effort": "ds-vision-low"}
+
+#: 기능 칸 — 칸 추가만 한다. 기존 칸의 이름 · 뜻은 바꾸지 않는다
+FUNCTION_KEYS = ("pattern", "criticality", "trigger", "note", "forbid", "stages")
+FUNCTION_REQUIRED = ("pattern", "criticality", "trigger", "note", "stages")
+NEEDS_KEYS = ("arch", "sensors", "accel", "cores")
+#: 자원 칸 — cpu_tasks 와 같은 이름 · 같은 뜻
+RESOURCE_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms", "roles", "placement",
+                 "image", "command", "local_command", "env")
+STAGE_KEYS = ("pin", "needs", "deadline_ms", "egress_kb", "state", "optional", "note") + RESOURCE_KEYS
+#: 수로 적는 자원 칸 (없으면 null)
+NUMERIC_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms")
+NAME_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+# ---------------------------------------------------------------- 검사 (streams.check_code 방식)
+def _one(value, allowed, what):
+    if value not in allowed:
+        raise ValueError("모르는 %s %r (가능: %s)" % (what, value, ", ".join(allowed)))
+    return value
+
+
+def _dict(body, allowed, what):
+    if not isinstance(body, dict):
+        raise ValueError("%s 는 사전이어야 한다 (받은 것: %s)" % (what, type(body).__name__))
+    extra = sorted(set(body) - set(allowed))
+    if extra:
+        raise ValueError("%s 에 모르는 칸 %s (가능: %s)" % (what, ", ".join(extra), ", ".join(allowed)))
+    return body
+
+
+def _num(value, what, low=0.0):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("%s 는 수여야 한다 (받은 것: %r)" % (what, value))
+    if value < low:
+        raise ValueError("%s 는 %g 이상이어야 한다 (받은 것: %r)" % (what, low, value))
+    return value
+
+
+def _opt_num(body, key, what, low=0.0):
+    return None if body.get(key) is None else _num(body[key], "%s.%s" % (what, key), low)
+
+
+def _bool(value, what):
+    if not isinstance(value, bool):
+        raise ValueError("%s 는 참/거짓이어야 한다 (받은 것: %r)" % (what, value))
+    return value
+
+
+def _list(value, what):
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError("%s 는 목록이어야 한다 (받은 것: %r)" % (what, value))
+    return list(value)
+
+
+def _subset(value, allowed, what):
+    out = _list(value, what)
+    bad = sorted(set(map(str, out)) - set(allowed))
+    if bad:
+        raise ValueError("모르는 %s %s (가능: %s)" % (what, ", ".join(bad), ", ".join(allowed)))
+    return [str(x) for x in out]
+
+
+def _cmd(value, what):
+    if value is None:
+        return None
+    out = _list(value, what)
+    if not out or not all(isinstance(x, str) for x in out):
+        raise ValueError("%s 는 글자 목록이어야 한다 (예: [python, e2p/slice360_live.py])" % what)
+    return out
+
+
+def _env(value, what):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("%s 는 사전이어야 한다 (받은 것: %r)" % (what, value))
+    return {str(k): str(v) for k, v in value.items()}
+
+
+def _needs(value, what):
+    body = _dict({} if value is None else value, NEEDS_KEYS, what)
+    return {"arch": _one(body.get("arch", "any"), ARCHS, what + ".arch"),
+            "sensors": sorted(_subset(body.get("sensors"), SENSORS, what + ".sensors")),
+            "accel": _one(body.get("accel", "none"), ACCELS, what + ".accel"),
+            "cores": _opt_num(body, "cores", what)}
+
+
+# ---------------------------------------------------------------- 읽기
+def _stage(fn, side, body, what):
+    body = _dict({} if body is None else body, STAGE_KEYS, what)
+    st = {"function": fn, "stage": side, "unit": "%s.%s" % (fn, side),
+          "pin": _one(body.get("pin", "none"), PINS, what + ".pin"),
+          "needs": _needs(body.get("needs"), what + ".needs"),
+          "deadline_ms": _opt_num(body, "deadline_ms", what),
+          "egress_kb": _opt_num(body, "egress_kb", what),
+          "state": _one(body.get("state", "stateless"), STATES, what + ".state"),
+          "optional": _bool(body.get("optional", False), what + ".optional"),
+          "note": str(body.get("note") or ""),
+          "roles": sorted(_subset(body.get("roles"), ROLES, what + ".roles")),
+          "placement": _one(body.get("placement", "any"), PLACEMENTS, what + ".placement"),
+          "image": None if body.get("image") is None else str(body["image"]),
+          "command": _cmd(body.get("command"), what + ".command"),
+          "local_command": _cmd(body.get("local_command"), what + ".local_command"),
+          "env": _env(body.get("env"), what + ".env")}
+    for k in NUMERIC_KEYS:
+        st[k] = _opt_num(body, k, what)
+    if st["pin"] not in ("none", side):
+        raise ValueError("%s.pin 은 %r 일 수 없다 (그 단계 쪽인 %r 이나 none)" % (what, st["pin"], side))
+    return st
+
+
+def _rules(what, fn):
+    """패턴 · 중요도가 지키는 규칙. 어기면 ValueError — 계약은 읽을 때 거부한다"""
+    p, st = fn["pattern"], fn["stages"]
+    if p in ("cascade", "split") and set(st) != set(SIDES):
+        raise ValueError("%s 는 %s 라서 기기 · 서버 단계가 모두 있어야 한다 (있는 것: %s)"
+                         % (what, p, " · ".join(sorted(st)) or "없음"))
+    if p == "cascade" and not st["device"]["optional"]:
+        raise ValueError("%s 는 cascade 라서 기기 단계가 optional: true 여야 한다 (없으면 품질만 낮춘다)" % what)
+    if p == "split" and any(s["optional"] for s in st.values()):
+        raise ValueError("%s 는 split 라서 어느 단계도 optional 일 수 없다 (한쪽이 없으면 기능 거절)" % what)
+    if p in ("resident", "device_only") and "device" not in st:
+        raise ValueError("%s 는 %s 라서 기기 단계가 있어야 한다" % (what, p))
+    if p == "device_only" and "server" in st and not st["server"]["optional"]:
+        raise ValueError("%s 는 device_only 라서 서버 단계는 optional: true 여야 한다 (보조다)" % what)
+    if p == "server_only":
+        if "server" not in st:
+            raise ValueError("%s 는 server_only 라서 서버 단계가 있어야 한다" % what)
+        if "device" in st and not st["device"]["optional"]:
+            raise ValueError("%s 는 server_only 라서 기기 단계는 optional: true 여야 한다" % what)
+    if p == "resident" and st["device"]["pin"] != "device":
+        raise ValueError("%s 는 resident 라서 기기 단계가 pin: device 여야 한다 (상주는 그 기기에 붙박이다)" % what)
+    if fn["criticality"] == "safety" and ("device" not in st or st["device"]["pin"] != "device"):
+        raise ValueError("%s 는 safety 라서 기기 단계가 있고 pin: device 여야 한다 (안전은 서버로 옮기지 않는다)" % what)
+    if p in PLACEABLE:
+        for side, s in sorted(st.items()):
+            for k in ("cpu_m", "mem_mb"):
+                if s[k] is None:
+                    raise ValueError("%s.stages.%s 에 %s 가 없다 (배치 대상 패턴 %s 의 단계는 cpu_m · mem_mb 를 적는다)"
+                                     % (what, side, k, p))
+
+
+def _function(name, body):
+    what = "functions.%s" % name
+    if not NAME_RE.match(str(name)):
+        raise ValueError("기능 이름 %r 은 영어 소문자 snake_case 여야 한다" % name)
+    body = _dict(body, FUNCTION_KEYS, what)
+    for k in FUNCTION_REQUIRED:
+        if body.get(k) in (None, "", {}, []):
+            raise ValueError("%s 에 %s 가 없다 (있어야 하는 칸: %s)" % (what, k, ", ".join(FUNCTION_REQUIRED)))
+    fn = {"function": name,
+          "pattern": _one(body["pattern"], PATTERNS, what + ".pattern"),
+          "criticality": _one(body["criticality"], CRITICALITY, what + ".criticality"),
+          "trigger": _one(body["trigger"], TRIGGERS, what + ".trigger"),
+          "note": str(body["note"]),
+          "forbid": sorted(_subset(body.get("forbid"), SIDES, what + ".forbid")),
+          "legacy": False,
+          "stages": {}}
+    fn["priority_class"] = PRIORITY_CLASSES[fn["criticality"]]
+    stages = _dict(body["stages"], SIDES, what + ".stages")
+    for side in SIDES:
+        if side in stages:
+            fn["stages"][side] = _stage(name, side, stages[side], "%s.stages.%s" % (what, side))
+    for side in fn["forbid"]:
+        if side in fn["stages"]:
+            raise ValueError("%s 는 %s 단계를 두면 안 된다 (forbid: %s)" % (what, side, " · ".join(fn["forbid"])))
+    _rules(what, fn)
+    for s in fn["stages"].values():                 # 단계가 혼자서도 읽히게 — 배치 쪽은 단계만 들고 간다
+        s.update({"pattern": fn["pattern"], "criticality": fn["criticality"], "trigger": fn["trigger"],
+                  "priority_class": fn["priority_class"]})
+    return fn
+
+
+def _from_cpu_task(name, body):
+    """옛 cpu_tasks.<이름> → 단일 단계 기능 (별칭). 배치표 이름(unit)은 그대로 <이름> 이다"""
+    what = "cpu_tasks.%s" % name
+    stage = _stage(name, "device", body, what)
+    stage["unit"] = name
+    fn = {"function": name, "pattern": "device_only", "criticality": "best_effort", "trigger": "on_request",
+          "note": stage["note"] or ("%s — 옛 cpu_tasks 작업" % name), "forbid": [], "legacy": True,
+          "priority_class": PRIORITY_CLASSES["best_effort"], "stages": {"device": stage}}
+    _rules(what, fn)
+    stage.update({"pattern": fn["pattern"], "criticality": fn["criticality"], "trigger": fn["trigger"],
+                  "priority_class": fn["priority_class"]})
+    return fn
+
+
+def _registry(src=None):
+    if isinstance(src, dict):
+        return src
+    path = REGISTRY if src is None else src
+    with open(path, encoding="utf-8") as f:
+        reg = yaml.safe_load(f) or {}
+    if not isinstance(reg, dict):
+        raise ValueError("레지스트리 %s 가 사전이 아니다" % path)
+    return reg
+
+
+def load(src=None):
+    """레지스트리(경로 · 사전) → {기능: 기능 계약}. 이름순이다. 어긴 계약은 ValueError"""
+    reg = _registry(src)
+    funcs = {}
+    for section, maker in (("functions", _function), ("cpu_tasks", _from_cpu_task)):
+        body = reg.get(section) or {}
+        if not isinstance(body, dict):
+            raise ValueError("레지스트리 %s 절은 사전이어야 한다" % section)
+        for name, item in sorted(body.items()):
+            if name in funcs:                       # functions 에 같은 이름이 있으면 그것이 이긴다
+                continue
+            funcs[name] = maker(name, item)
+    return dict(sorted(funcs.items()))
+
+
+# ---------------------------------------------------------------- 펼치기 · 판정
+def expand(funcs, names=None):
+    """기능 이름들 → (배치_단계들, 상주들, 그밖).
+
+    배치_단계들  device_only · cascade · split · server_only 의 단계 — 오케스트레이터가 놓는 것
+    상주들       resident 의 단계 — 놓는 게 아니라 있는지 보고 없으면 알린다
+    그밖         config · pipeline 의 단계 — 같다 (값을 만들어 두거나 받아서 적용하는 흐름)
+    세 목록 모두 같은 모양의 단계 사전이고 기능 이름순 · 기기 → 서버 순이다. 모르는 이름은 ValueError"""
+    picked = sorted(funcs) if names is None else sorted(set(names))
+    placeable, residents, others = [], [], []
+    for n in picked:
+        if n not in funcs:
+            raise ValueError("모르는 기능 %r (가능: %s)" % (n, ", ".join(sorted(funcs))))
+        fn = funcs[n]
+        bucket = placeable if fn["pattern"] in PLACEABLE else (residents if fn["pattern"] in RESIDENT else others)
+        for side in SIDES:
+            if side in fn["stages"]:
+                bucket.append(dict(fn["stages"][side]))
+    return placeable, residents, others
+
+
+def _pair_key(x):
+    if isinstance(x, dict):
+        return x["function"], x["stage"]
+    if isinstance(x, (tuple, list)) and len(x) == 2:
+        return str(x[0]), str(x[1])
+    raise ValueError("놓인 단계는 (기능, 단계) 쌍이나 단계 사전이어야 한다 (받은 것: %r)" % (x,))
+
+
+def pairs(stages, placed=None):
+    """같은 기능의 단계 쌍 규칙 — 판정만 돌려준다. 스트림에 쓰지 않는다 (코드로 옮기는 건 오케스트레이터 일이다).
+
+    stages  expand 가 낸 단계 목록 (그 기능이 **선언한** 단계 전부)
+    placed  실제로 놓인 단계 — (기능, 단계) 쌍이나 단계 사전의 모음. None 이면 전부 놓였다고 본다
+    → {기능: {pattern, criticality, verdict, placed, missing, missing_optional, reason}}
+
+    규칙은 하나다: 없는 단계가 optional 이면 degraded(품질만 낮춘다), 아니면 rejected(기능 거절).
+    그래서 cascade 는 기기 단계가 빠져도 degraded 고(기기 단계는 optional 이다 — load 가 확인한다),
+    split 은 어느 쪽이 빠져도 rejected 다(어느 단계도 optional 일 수 없다)."""
+    have = None if placed is None else {_pair_key(x) for x in placed}
+    out = {}
+    for st in stages:
+        g = out.setdefault(st["function"], {"pattern": st.get("pattern"), "criticality": st.get("criticality"),
+                                            "placed": [], "missing": [], "missing_optional": []})
+        if have is None or (st["function"], st["stage"]) in have:
+            g["placed"].append(st["stage"])
+        else:
+            g["missing"].append(st["stage"])
+            if st["optional"]:
+                g["missing_optional"].append(st["stage"])
+    for g in out.values():
+        need = [s for s in g["missing"] if s not in g["missing_optional"]]
+        if not g["placed"]:
+            g["verdict"] = "rejected"
+            g["reason"] = "놓인 단계가 없음 — 기능 거절 (%s)" % g["pattern"]
+        elif need:
+            g["verdict"] = "rejected"
+            g["reason"] = "%s 단계가 없음 — 필수 단계라 기능 거절 (%s)" % (" · ".join(need), g["pattern"])
+        elif g["missing"]:
+            g["verdict"] = "degraded"
+            g["reason"] = "%s 단계가 없음 — optional 이라 품질만 낮춤 (%s)" % (" · ".join(g["missing"]), g["pattern"])
+        else:
+            g["verdict"] = "ok"
+            g["reason"] = "선언한 단계가 모두 놓임 (%s)" % g["pattern"]
+    return dict(sorted(out.items()))
+
+
+def as_cpu_task(stage, measured=None):
+    """단계 → placement.place_cpu 가 받는 작업 사전 (옛 cpu_tasks 와 같은 칸 이름 · 같은 뜻).
+
+    cpu_m · mem_mb 가 없는 단계는 CPU 작업으로 낼 수 없다 — ValueError.
+    measured: {노드: ms} 노드별 비교 측정 (기억에서 온다). placement: measured 인 작업은 이것이 없으면 옮기지 않는다"""
+    for k in ("cpu_m", "mem_mb"):
+        if stage.get(k) is None:
+            raise ValueError("%s 단계에 %s 가 없어 CPU 작업으로 낼 수 없다" % (stage.get("unit"), k))
+    task = {"task": stage["unit"], "cpu_m": stage["cpu_m"], "mem_mb": stage["mem_mb"],
+            "roles": list(stage["roles"]), "placement": stage["placement"],
+            "frame_kb": stage["frame_kb"], "fps": stage["fps"], "proc_ms": stage["proc_ms"],
+            "image": stage["image"], "command": stage["command"], "local_command": stage["local_command"]}
+    if stage.get("note"):
+        task["note"] = stage["note"]
+    if stage.get("env"):
+        task["env"] = dict(stage["env"])
+    if measured:
+        task["measured"] = dict(measured)
+    return task
