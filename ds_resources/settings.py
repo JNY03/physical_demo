@@ -7,6 +7,7 @@
   DS_CONFIG_DIR  config/ 대신 쓸 폴더 (기본 DS_HOME/config)
   DS_PYTHON      비전 등 자식 프로세스를 띄울 Python (기본 sys.executable — venv 로 띄웠으면 그 venv)
   DS_NODE_NAME   이 기기 이름 (기억 파일의 열쇠 · k3s 노드 이름과 맞춤). 없으면 호스트 이름
+  DS_CORES_RESERVED  제어용으로 남길 CPU 코어 수 (없으면 config/node.json 의 cores_reserved, 그것도 없으면 0)
 
 옛 이름도 그대로 읽는다: config/hosts.json 이 없으면 저장소 루트의 hosts.local.json.
 """
@@ -70,6 +71,33 @@ def load_hosts():
 def python():
     """자식 프로세스용 Python — DS_PYTHON > 지금 Python."""
     return os.environ.get("DS_PYTHON") or sys.executable
+
+
+def node_config():
+    """이 기기의 설정 {cores_reserved, …} — config/node.json. 없거나 틀린 JSON 이면 {}."""
+    path = config_file("node.json")
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def cores_reserved():
+    """제어용으로 남길 CPU 코어 수 — DS_CORES_RESERVED > config/node.json 의 cores_reserved > 0.
+
+    로봇 노드는 1 을 권한다(로봇 제어가 비전에 코어를 다 뺏기지 않게). 기본값으로 박지 않는다 —
+    기기마다 다르니 그 기기의 설정으로 준다."""
+    v = os.environ.get("DS_CORES_RESERVED")
+    if v is None or str(v).strip() == "":
+        v = node_config().get("cores_reserved", 0)
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, n)
 
 
 def node_name():

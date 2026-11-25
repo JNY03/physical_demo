@@ -1,14 +1,35 @@
 """이 기기의 자원 재기 — k3s 없이 (core, 2026-11-24). 리눅스 /proc 와 nvidia-smi 만 쓴다.
 
 호출마다 시간 제한(기본 2초)이 있다. 못 재면 그 칸을 None 으로 두고 멈추지 않는다.
+
+노드별 특성(2026-11-25): caps() 는 잘 안 바뀌는 특성(아키텍처 · 기기 이름 · 센서 · 가속기 · 남길 코어),
+thermal() 은 자주 바뀌는 온도 · throttle 을 낸다. 둘 다 **확인된 것만** 낸다 — 못 읽은 칸은 None 이고
+추측하지 않는다(배치가 모르는 것을 안다고 믿으면 엉뚱한 곳에 작업을 올린다).
 """
+import glob
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
 
 NVSMI_TIMEOUT = 2.0
+VCGENCMD_TIMEOUT = 2.0
+
+#: platform.machine() → 컨테이너 이미지가 쓰는 이름
+ARCH_ALIAS = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+#: 보드 · 기기 이름이 적힌 곳 — 라즈베리파이는 device-tree, x86 은 DMI
+MODEL_FILES = ("/proc/device-tree/model", "/sys/devices/virtual/dmi/id/product_name")
+#: 리눅스 일반 온도 (파이가 아닌 기기)
+THERMAL_ZONES = "/sys/class/thermal/thermal_zone*/temp"
+#: USB 카메라를 찾을 장치 번호 상한 (/dev/video0 ~ /dev/video9)
+CAM_MAX = 10
+#: V4L2 기능 비트 — 캡처(단일 · 다중 평면)이고 메모리↔메모리(코덱 · ISP)가 아니어야 카메라다
+V4L2_CAPTURE = 0x0001 | 0x1000
+V4L2_M2M = 0x4000 | 0x8000
+#: VIDIOC_QUERYCAP — _IOR('V', 0, struct v4l2_capability(104바이트))
+VIDIOC_QUERYCAP = 0x80685600
 
 
 def node_name():
@@ -133,3 +154,122 @@ def baseline(bench=True):
     if bench:
         out["jpeg_720p_fps"] = jpeg_bench()
     return out
+
+
+# ---------------------------------------------------------------- 노드별 특성 (2026-11-25)
+def norm_arch(machine=None):
+    """아키텍처 이름 정규화 — x86_64 → amd64, aarch64 → arm64. 모르는 이름은 소문자로 그대로, 비면 None."""
+    m = str(machine if machine is not None else platform.machine() or "").strip().lower()
+    return ARCH_ALIAS.get(m, m or None)
+
+
+def model_name(files=MODEL_FILES):
+    """보드 · 기기 이름 — /proc/device-tree/model(파이) 또는 DMI product_name. 없으면 None.
+    device-tree 값은 끝에 NUL 이 붙는다."""
+    for p in files:
+        txt = _read(p)
+        if txt:
+            txt = txt.replace("\x00", "").strip()
+            if txt:
+                return txt
+    return None
+
+
+def v4l2_capture(path):
+    """그 /dev/video* 가 실제 캡처 장치인가 — V4L2 기능 비트로 본다. 못 물어보면 False(모르면 세지 않는다).
+
+    라즈베리파이 5 의 /dev/video19 이상은 ISP · 코덱(메모리↔메모리) 노드라 **카메라가 없어도 생긴다**
+    (pi6 실측: /dev/video19~35, video19 = rpi-hevc-dec, Device Caps 0x04204000 = M2M 다중 평면).
+    그래서 번호만 보고 카메라로 세면 안 된다 — 캡처 비트가 있고 M2M 비트가 없어야 카메라다."""
+    import fcntl
+    import struct
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        buf = fcntl.ioctl(fd, VIDIOC_QUERYCAP, bytes(104))
+        caps_all, dev_caps = struct.unpack_from("<II", buf, 16 + 32 + 32 + 4)
+        bits = dev_caps or caps_all
+        return bool(bits & V4L2_CAPTURE) and not (bits & V4L2_M2M)
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def sensors(dev="/dev", is_capture=v4l2_capture):
+    """확인된 센서만 — i2c · serial · camera. 알 수 없으면 넣지 않는다.
+
+    camera 는 /dev/video0~9 중 V4L2 캡처 장치(USB 카메라)만 센다. 파이의 CSI 카메라는 libcamera 쪽을
+    봐야 알 수 있어 여기서는 가리지 않는다 — 달려 있어도 'camera' 가 안 나올 수 있다(모르면 모른다)."""
+    out = []
+    if glob.glob(os.path.join(dev, "i2c-*")):
+        out.append("i2c")
+    if glob.glob(os.path.join(dev, "ttyACM*")) or glob.glob(os.path.join(dev, "ttyUSB*")):
+        out.append("serial")
+    for i in range(CAM_MAX):
+        p = os.path.join(dev, "video%d" % i)
+        if os.path.exists(p) and is_capture(p):
+            out.append("camera")
+            break
+    return out
+
+
+def accel(dev="/dev", gpu_list=None):
+    """가속기 — /dev/hailo* 있으면 npu, NVIDIA GPU 가 보이면 gpu, 아니면 none."""
+    if glob.glob(os.path.join(dev, "hailo*")):
+        return "npu"
+    return "gpu" if (gpu_list if gpu_list is not None else gpus()) else "none"
+
+
+def cores_reserved():
+    """제어용으로 남길 코어 수 — DS_CORES_RESERVED > 설정 파일 > 0. 규칙은 settings 한 곳."""
+    from ds_resources import settings
+    return settings.cores_reserved()
+
+
+def caps(dev="/dev", model_files=MODEL_FILES, is_capture=v4l2_capture):
+    """이 기기의 특성 {arch, model, sensors, accel, cores_reserved} — 잘 안 바뀌는 것만.
+    읽을 수 없는 값은 None 이다(추측하지 않는다)."""
+    return {"arch": norm_arch(), "model": model_name(model_files),
+            "sensors": sensors(dev, is_capture), "accel": accel(dev),
+            "cores_reserved": cores_reserved()}
+
+
+def _vcgencmd(exe, arg, timeout):
+    try:
+        out = subprocess.run([exe, arg], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def thermal(timeout=VCGENCMD_TIMEOUT, which=None, zones=THERMAL_ZONES):
+    """{temp_c, throttled} — 지금 뜨거운가. 파이는 vcgencmd(measure_temp · get_throttled),
+    그 밖의 리눅스는 /sys/class/thermal/thermal_zone*/temp 중 가장 높은 값. 둘 다 없으면 둘 다 None.
+
+    throttled 는 파이의 get_throttled 비트가 0 이 아니면 참이다(지금 또는 부팅 뒤 한 번이라도 조여졌음).
+    일반 리눅스에서는 알 수 없어 None 으로 둔다."""
+    exe = (which or shutil.which)("vcgencmd")
+    if exe:
+        temp = thr = None
+        m = re.search(r"-?\d+(?:\.\d+)?", _vcgencmd(exe, "measure_temp", timeout) or "")   # temp=55.4'C
+        if m:
+            temp = float(m.group())
+        txt = _vcgencmd(exe, "get_throttled", timeout) or ""                                # throttled=0x0
+        if "=" in txt:
+            try:
+                thr = int(txt.split("=", 1)[1].strip(), 0) != 0
+            except ValueError:
+                thr = None
+        if temp is not None or thr is not None:
+            return {"temp_c": temp, "throttled": thr}
+    temps = []
+    for p in sorted(glob.glob(zones)):                  # CPU 가 몇 번 zone 인지는 기기마다 달라 가장 높은 값을 쓴다
+        v = (_read(p) or "").strip()
+        if v.lstrip("-").isdigit():
+            temps.append(int(v) / 1000.0)
+    return {"temp_c": max(temps) if temps else None, "throttled": None}

@@ -2,6 +2,8 @@
 
 데이터 서버(server_stream_multi_source.py) 안에서 스레드로 돈다. k3s 가 없어도 돈다.
   * 처음 · 재부팅 · 커널/OS 변화 · recheck 시각에 기본 자원을 잰다 (JPEG 벤치마크 2초 포함)
+  * 노드 특성(센서 · 가속기 · arch · 기기 이름 · 남길 코어)을 같은 주기로 읽고, 온도 · throttle 은 tick 마다 읽는다
+    — 특성 · 온도는 기억에만 넣는다(node_resource_stream 의 칸은 그대로 둔다)
   * 사용량(CPU · 메모리 · GPU)을 PollSchedule 주기로 재서 로봇 서비스 몫 기억과 기록 억제를 거쳐 스트림에 쓴다
   * 비전 프로세스가 남긴 vision_telemetry:<프로세스> 를 읽어 모델 조합 사용량을 기억한다
 이 기기(로컬 노드)의 기록은 이 기록기만 쓴다. k3s 쪽 감시는 다른 노드만 쓴다.
@@ -108,6 +110,23 @@ class LocalRecorder:
             changed = self.mem.record_baseline(self.node, ident, probe.baseline(bench=self.bench))
             self.log("자원 기억: %s 기본 자원을 %s" % (self.node, "새로 잼" if changed else "다시 잼 (같음)"))
 
+    def check_caps(self):
+        """이 기기의 특성(센서 · 가속기 · 아키텍처 …) — 처음 · 다시 읽을 주기에만 읽는다(가속기 확인이 좀 걸린다)."""
+        if not self.mem.caps_due(self.node):
+            return
+        c = probe.caps()
+        if self.mem.record_caps(self.node, c):
+            self.log("자원 기억: %s 특성 — arch %s · 기기 %s · 센서 %s · 가속기 %s · 남길 코어 %s"
+                     % (self.node, c.get("arch"), c.get("model") or "모름",
+                        ", ".join(c.get("sensors") or []) or "없음", c.get("accel"), c.get("cores_reserved")))
+
+    def check_thermal(self):
+        """온도 · throttle — tick 마다 (자주 바뀌는 값이라 창으로 본다). 못 읽는 기기는 건너뛴다."""
+        t = probe.thermal()
+        if t.get("temp_c") is None and t.get("throttled") is None:
+            return
+        self.mem.record_thermal(self.node, t.get("temp_c"), t.get("throttled"))
+
     def read_telemetry(self):
         active = False
         try:
@@ -148,6 +167,8 @@ class LocalRecorder:
 
     def tick(self):
         self.check_baseline()
+        self.check_caps()
+        self.check_thermal()
         active = self.read_telemetry()
         u = self.usage.sample()
         self.mem.update_usage(self.node, u["cpu_pct"], u["mem_mb"])
@@ -179,6 +200,14 @@ class LocalRecorder:
             for name, s in rows:
                 seen.add(name)
                 ident, base = s.pop("identity", None), s.get("baseline")
+                caps, therm = s.pop("caps", None), s.pop("thermal", None)   # 기억으로만 간다 (스트림 칸은 그대로)
+                if caps and any(v is not None for v in caps.values()):
+                    if self.mem.record_caps(name, caps):
+                        self.log("자원 기억: %s 특성 — arch %s · 기기 %s · 센서 %s · 가속기 %s"
+                                 % (name, caps.get("arch"), caps.get("model") or "모름",
+                                    ", ".join(caps.get("sensors") or []) or "모름", caps.get("accel") or "모름"))
+                if therm and (therm.get("temp_c") is not None or therm.get("throttled") is not None):
+                    self.mem.record_thermal(name, therm.get("temp_c"), therm.get("throttled"))
                 first = False
                 if base is not None and self.mem.baseline_due(name, ident):
                     first = self.mem.node(name) is None or (self.mem.node(name) or {}).get("identity") != ident

@@ -6,6 +6,12 @@ core(ds_resources)는 이 파일을 import 하지 않는다. 자원 기록기가
 
 읽는 것 (kubectl JSON, 호출마다 시간 제한)
   Node            ready · role(ds.role) · taint · 용량 · 할당 가능량 · 신원(bootID · 커널 · OS) · 테일넷 주소
+  특성 · 온도      arch 는 .status.nodeInfo.architecture, 나머지는 파이가 올린 라벨 · 애너테이션 (2026-11-25)
+                   ds.model · ds.sensors(쉼표 구분) · ds.accel · ds.cores_reserved ·
+                   ds.thermal/temp_c · ds.thermal/throttled
+                   라벨 값에는 공백 · 쉼표를 쓸 수 없어(k8s 규칙) 기기 이름 · 센서 목록은 애너테이션으로 올린다 —
+                   손으로 라벨에 붙인 것도 읽는다(라벨 > 같은 이름의 애너테이션). 없는 칸은 None 이다(추측 안 함).
+                   올리는 쪽은 cluster_up.sh caps (파이에서 pi_node.sh caps 로 읽어 kubectl 로 붙인다).
   metrics API     CPU(n코어) · 메모리 — 측정 시각(timestamp)이 STALE_S 보다 오래되면 stale
 GPU 는 여기서 읽지 않는다(metrics-server 는 GPU 를 모른다) — data_stream 기기의 nvidia-smi 가 따로 잰다.
 data_stream 기기 자신의 노드는 건너뛴다 — 그 기록은 로컬 기록기가 쓴다. 로컬 노드 = 다음 중 하나라도 맞는 노드
@@ -174,6 +180,67 @@ def bandwidth_probe_ex(node, server_ip, timeout=60.0):
         srv.server_close()
 
 
+def _tagged(labels, ann, key):
+    """라벨 > 같은 이름의 애너테이션 (없으면 None). 라벨 값에는 공백 · 쉼표를 쓸 수 없어 기기 이름 ·
+    센서 목록은 애너테이션으로 올라온다 — 손으로 라벨에 붙인 것도 읽는다."""
+    v = (labels or {}).get(key)
+    if v is None or str(v).strip() == "":
+        v = (ann or {}).get(key)
+    v = None if v is None else str(v).strip()
+    return v or None
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _flag(v):
+    """throttled 애너테이션 → 참 · 거짓 · None. 파이의 get_throttled 값(0x0 · 0x50005)을 그대로 올리니
+    숫자면 0 이 아닌지로 본다. true/false 도 받는다."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("true", "yes", "1"):
+        return True
+    if s in ("false", "no", "0"):
+        return False
+    try:
+        return int(s, 0) != 0
+    except ValueError:
+        return None
+
+
+def node_caps(info, labels, ann):
+    """노드 특성 {arch, model, sensors, accel, cores_reserved} — arch 는 k3s 가 아는 값, 나머지는 파이가 올린 것.
+
+    카메라는 /dev 로 확인할 수 없다 — 파이 5 의 CSI 카메라는 libcamera 쪽이라 /dev/video* 에 캡처 장치로
+    안 보인다(파이가 올리는 목록에 camera 가 빠진다). 그래서 **ds.source 라벨**(그 노드가 영상 소스를 맡고
+    있다는 사실, cluster_up.sh 가 nodes.json 을 보고 붙인다)을 카메라가 달렸다는 근거로 쓴다.
+    이미 올라온 목록에 **더하기만** 한다. 목록이 아예 없으면(모름) 그대로 모름으로 둔다 —
+    모름을 「camera 하나만 있음」으로 바꾸면 다른 센서를 찾는 작업이 잘못 떨어진다."""
+    sensors = _tagged(labels, ann, "ds.sensors")
+    cores = _num(_tagged(labels, ann, "ds.cores_reserved"))
+    got = sorted({x.strip() for x in sensors.split(",") if x.strip()}) if sensors else None
+    if got is not None and (labels or {}).get("ds.source"):
+        got = sorted(set(got) | {"camera"})
+    return {"arch": (info or {}).get("architecture") or None,
+            "model": _tagged(labels, ann, "ds.model"),
+            "sensors": got,
+            "accel": _tagged(labels, ann, "ds.accel"),
+            "cores_reserved": None if cores is None else max(0, int(cores))}
+
+
+def node_thermal(ann):
+    """노드 온도 {temp_c, throttled} 또는 None — 애너테이션이 둘 다 없으면 None(파이가 아직 안 올렸음)."""
+    temp, thr = (ann or {}).get("ds.thermal/temp_c"), (ann or {}).get("ds.thermal/throttled")
+    if temp is None and thr is None:
+        return None
+    return {"temp_c": _num(temp), "throttled": _flag(thr)}
+
+
 def local_node_names():
     """이 기기를 가리킬 수 있는 노드 이름들 — probe.node_name() · 호스트 이름 · DS_NODE_NAME · DS_K3S_LOCAL_NODE"""
     names = {socket.gethostname(), socket.gethostname().lower()}
@@ -225,6 +292,7 @@ class K3sNodeSource:
             m_now = mem_mb(m["usage"]["memory"]) if m else None
             alloc_c, alloc_m = cpu_m(alloc.get("cpu", "0")), mem_mb(alloc.get("memory", "0"))
             labels = n["metadata"].get("labels", {})
+            ann = n["metadata"].get("annotations", {})
             role, source = labels.get("ds.role", ""), labels.get("ds.source")
             out.append({"name": name, "ip": ip, "role": role, "source_name": source, "ready": ready, "stale": stale,
                         "identity": {"boot_id": info.get("bootID"), "kernel": info.get("kernelVersion"),
@@ -233,6 +301,7 @@ class K3sNodeSource:
                                      "mem_total_mb": round(mem_mb(cap.get("memory", "0"))),
                                      "disk_total_gb": round(mem_mb(cap.get("ephemeral-storage", "0")) / 1024),
                                      "gpus": []},
+                        "caps": node_caps(info, labels, ann), "thermal": node_thermal(ann),
                         "taints": [t["key"] for t in n.get("spec", {}).get("taints", [])],
                         "cpu_alloc_m": alloc_c, "mem_alloc_mb": alloc_m, "cpu_now_m": c_now, "mem_now_mb": m_now,
                         "cpu_pct": (100.0 * c_now / alloc_c) if c_now is not None and alloc_c else None,
@@ -257,6 +326,7 @@ class K3sNodeSource:
                                     "cpu_pct": r["cpu_pct"], "mem_pct": r["mem_pct"], "mem_mb": r["mem_now_mb"],
                                     "cpu_m": r["cpu_now_m"], "temp_c": None, "gpu": [],
                                     "identity": r["identity"], "baseline": r["baseline"], "ip": r["ip"],
+                                    "caps": r["caps"], "thermal": r["thermal"],
                                     "source_name": r["source_name"]}))
         return out
 
@@ -339,5 +409,9 @@ class K3sNodeSource:
             elif r["role"] == "robot":
                 n["service"] = {"cpu_p95_m": 0, "mem_p95_mb": 0, "active_measured": False}
             n["net"] = mem.get("net") or {}
+            # 특성 · 온도 — 지금 읽은 라벨 · 애너테이션이 우선, 없는 칸은 기억(지난번 값 · 최근 최고 온도)에서
+            n["caps"] = dict(mem.get("caps") or {}, **{k: v for k, v in r["caps"].items() if v is not None})
+            n["thermal"] = dict(mem.get("thermal") or {},
+                                **{k: v for k, v in (r["thermal"] or {}).items() if v is not None})
             out.append(n)
         return out

@@ -53,6 +53,153 @@ def test_save_load_roundtrip_is_atomic(tmp_path):
     assert mm.ResourceMemory(p).data["nodes"] == {}                   # 깨진 파일 → 빈 기억으로 시작
 
 
+# ---------------------------------------------------------------- 노드 특성 읽기 (probe)
+def _dev(tmp_path, *names):
+    d = tmp_path / "dev"
+    d.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (d / n).write_text("", encoding="utf-8")
+    return str(d)
+
+
+def test_probe_caps_pi5_isp_nodes_are_not_cameras(tmp_path, monkeypatch):
+    """pi6 실측 모양 — /dev/i2c-1,13,14 와 /dev/video19~35(ISP · 코덱). 카메라로 세면 안 된다."""
+    dev = _dev(tmp_path, "i2c-1", "i2c-13", "i2c-14", *["video%d" % i for i in range(19, 36)])
+    model = tmp_path / "model"
+    model.write_text("Raspberry Pi 5 Model B Rev 1.0\x00", encoding="utf-8")
+    monkeypatch.setattr(probe.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(probe, "gpus", lambda timeout=2: [])
+    monkeypatch.delenv("DS_CORES_RESERVED", raising=False)
+    monkeypatch.setenv("DS_CONFIG_DIR", str(tmp_path / "nocfg"))
+    c = probe.caps(dev=dev, model_files=(str(model),), is_capture=lambda p: True)   # 캡처라고 해도 번호가 19+ 면 안 본다
+    assert c == {"arch": "arm64", "model": "Raspberry Pi 5 Model B Rev 1.0", "sensors": ["i2c"],
+                 "accel": "none", "cores_reserved": 0}
+
+
+def test_probe_caps_usb_camera_serial_and_accel(tmp_path, monkeypatch):
+    dev = _dev(tmp_path, "ttyUSB0", "video0", "video19")
+    monkeypatch.setattr(probe.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(probe, "gpus", lambda timeout=2: [{"name": "RTX 3060"}])
+    monkeypatch.setenv("DS_CORES_RESERVED", "1")
+    c = probe.caps(dev=dev, model_files=(str(tmp_path / "없음"),), is_capture=lambda p: p.endswith("video0"))
+    assert c["arch"] == "amd64" and c["model"] is None and c["sensors"] == ["serial", "camera"]
+    assert c["accel"] == "gpu" and c["cores_reserved"] == 1
+    assert probe.accel(dev=_dev(tmp_path / "h", "hailo0"), gpu_list=[]) == "npu"
+    assert probe.sensors(dev=dev, is_capture=lambda p: False) == ["serial"]          # 확인 못 하면 안 센다
+
+
+def test_probe_v4l2_capture_says_no_when_it_cannot_ask(tmp_path):
+    p = tmp_path / "video0"
+    p.write_text("", encoding="utf-8")
+    assert probe.v4l2_capture(str(p)) is False                                      # 장치가 아니면 False
+    assert probe.v4l2_capture(str(tmp_path / "없음")) is False
+
+
+def test_probe_norm_arch():
+    assert probe.norm_arch("x86_64") == "amd64" and probe.norm_arch("aarch64") == "arm64"
+    assert probe.norm_arch("armv7l") == "armv7l" and probe.norm_arch("") is None
+
+
+def test_probe_thermal_vcgencmd_then_sysfs(tmp_path, monkeypatch):
+    out = {"measure_temp": "temp=55.4'C", "get_throttled": "throttled=0x0"}
+    monkeypatch.setattr(probe, "_vcgencmd", lambda exe, arg, timeout: out.get(arg))
+    which = lambda name: "/usr/bin/vcgencmd" if name == "vcgencmd" else None         # noqa: E731
+    assert probe.thermal(which=which) == {"temp_c": 55.4, "throttled": False}
+    out["get_throttled"] = "throttled=0x50005"
+    assert probe.thermal(which=which) == {"temp_c": 55.4, "throttled": True}
+    for i, v in enumerate((41000, 57123)):                                           # 리눅스 일반 — 가장 높은 zone
+        z = tmp_path / ("thermal_zone%d" % i)
+        z.mkdir()
+        (z / "temp").write_text(str(v), encoding="utf-8")
+    zones = str(tmp_path / "thermal_zone*" / "temp")
+    assert probe.thermal(which=lambda n: None, zones=zones) == {"temp_c": 57.123, "throttled": None}
+    assert probe.thermal(which=lambda n: None, zones=str(tmp_path / "없음*")) == {"temp_c": None, "throttled": None}
+
+
+def test_cores_reserved_env_beats_config(tmp_path, monkeypatch):
+    from ds_resources import settings
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setenv("DS_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("DS_CORES_RESERVED", raising=False)
+    assert settings.cores_reserved() == 0                                            # 기본 0 — 박아 두지 않는다
+    (cfg / "node.json").write_text('{"cores_reserved": 1}', encoding="utf-8")
+    assert settings.cores_reserved() == 1                                            # 로봇 노드는 설정으로 1
+    monkeypatch.setenv("DS_CORES_RESERVED", "2")
+    assert settings.cores_reserved() == 2
+    monkeypatch.setenv("DS_CORES_RESERVED", "엉뚱")
+    assert settings.cores_reserved() == 0
+    (cfg / "node.json").write_text("{깨짐", encoding="utf-8")
+    monkeypatch.delenv("DS_CORES_RESERVED")
+    assert settings.cores_reserved() == 0
+
+
+# ---------------------------------------------------------------- 노드 특성 · 온도 기억
+def test_record_caps_changes_now_and_recheck_grows(tmp_path):
+    c = Clock()
+    m = mm.ResourceMemory(tmp_path / "m.json", clock=c)
+    caps = {"arch": "arm64", "model": "Raspberry Pi 5 Model B Rev 1.0", "sensors": ["i2c"], "accel": "none",
+            "cores_reserved": 1}
+    assert m.caps_due("pi6")                                            # 기억 없음
+    assert m.record_caps("pi6", caps) is True
+    assert not m.caps_due("pi6")
+    saved = m.node("pi6")["caps"]
+    assert saved == dict(caps, measured_at=c.t) and m.node("pi6")["caps_interval"] == mm.RECHECK_MIN_S
+    c.t += mm.DAY + 1
+    assert m.caps_due("pi6")
+    assert m.record_caps("pi6", caps) is False                          # 같음 → 주기 두 배
+    assert m.node("pi6")["caps_interval"] == 2 * mm.DAY
+    assert m.record_caps("pi6", dict(caps, sensors=["camera", "i2c"])) is True   # 센서가 붙음 → 바로 갱신
+    n = m.node("pi6")
+    assert n["caps"]["sensors"] == ["camera", "i2c"] and n["caps_interval"] == mm.RECHECK_MIN_S
+
+
+def test_record_caps_normalizes_and_fills_unknown_with_none(tmp_path):
+    m = mm.ResourceMemory(tmp_path / "m.json", clock=Clock())
+    m.record_caps("pi13", {"arch": "arm64", "sensors": "serial, i2c"})   # 원천이 쉼표 문자열로 줄 수도 있다
+    caps = m.node("pi13")["caps"]
+    assert caps["sensors"] == ["i2c", "serial"] and caps["model"] is None and caps["accel"] is None
+    assert caps["cores_reserved"] is None and set(caps) == set(mm.CAPS_KEYS) | {"measured_at"}
+    assert m.record_caps("pi13", {"arch": "arm64", "sensors": ["i2c", "serial"]}) is False   # 같은 값 — 모양만 다름
+
+
+def test_record_thermal_keeps_recent_peak(tmp_path):
+    c = Clock()
+    m = mm.ResourceMemory(tmp_path / "m.json", clock=c)
+    m.record_thermal("pi6", 55.4, False)
+    t = m.node("pi6")["thermal"]
+    assert (t["temp_c"], t["temp_max_c"], t["throttled"], t["throttled_recent"], t["samples"]) == \
+        (55.4, 55.4, False, False, 1)
+    m.record_thermal("pi6", 81.0, True)
+    m.record_thermal("pi6", 56.0, False)
+    t = m.node("pi6")["thermal"]
+    assert t["temp_c"] == 56.0 and t["temp_max_c"] == 81.0               # 한 점으로는 '지금 뜨겁다'를 모른다
+    assert t["throttled"] is False and t["throttled_recent"] is True     # 창 안에 조여진 적 있음
+    for _ in range(mm.THERMAL_WINDOW):
+        m.record_thermal("pi6", 50.0, False)
+    t = m.node("pi6")["thermal"]
+    assert t["temp_max_c"] == 50.0 and t["throttled_recent"] is False    # 창이 지나면 잊는다
+    assert t["samples"] == mm.THERMAL_WINDOW and t["updated_at"] == c.t
+    m.record_thermal("pi13", None, None)                                 # 못 읽는 기기
+    t = m.node("pi13")["thermal"]
+    assert t["temp_c"] is None and t["temp_max_c"] is None and t["throttled_recent"] is None
+
+
+def test_old_memory_file_without_caps_or_thermal(tmp_path):
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps({"version": 1, "combos": {}, "nodes": {
+        "pi1": {"identity": {"boot_id": "a"}, "baseline": {"cpu_count": 4},
+                "net": {"bw_mbps": 80.0, "net_status": "ok", "next_try": 9e18}}}}), encoding="utf-8")
+    m = mm.ResourceMemory(p, clock=Clock())
+    assert m.node("pi1")["baseline"] == {"cpu_count": 4}                 # 두 칸이 없어도 그대로 읽힌다
+    assert m.caps_due("pi1") and not m.net_due("pi1")
+    m.record_caps("pi1", {"arch": "arm64"})
+    m.record_thermal("pi1", 44.0, False)
+    assert m.save()
+    n = mm.ResourceMemory(p, writer=False).node("pi1")
+    assert n["caps"]["arch"] == "arm64" and n["thermal"]["temp_c"] == 44.0 and n["net"]["bw_mbps"] == 80.0
+
+
 # ---------------------------------------------------------------- 로봇 서비스 몫
 def test_service_share_uses_p95_after_enough_samples(tmp_path):
     m = mm.ResourceMemory(tmp_path / "m.json", clock=Clock())

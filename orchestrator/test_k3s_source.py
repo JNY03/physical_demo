@@ -75,6 +75,76 @@ def test_robot_without_memory_is_unmeasured(monkeypatch):
     assert n["service"]["active_measured"] is False
 
 
+# ---------------------------------------------------------------- 노드 특성 · 온도 (2026-11-25)
+def pi6_node():
+    """cluster_up.sh caps 가 올린 모양 — 가속기만 라벨(값 규칙), 기기 이름 · 센서 · 온도는 애너테이션."""
+    n = node("pi6", "100.76.251.100", role="sensor")
+    n["metadata"]["labels"]["ds.accel"] = "none"
+    n["metadata"]["annotations"] = {"ds.model": "Raspberry Pi 5 Model B Rev 1.0", "ds.sensors": "i2c",
+                                    "ds.thermal/temp_c": "55.4", "ds.thermal/throttled": "0x0"}
+    return n
+
+
+def test_caps_and_thermal_ride_along_in_samples(monkeypatch):
+    fake(monkeypatch, [pi6_node()], [metric("pi6", 10)])
+    name, s = ks.K3sNodeSource(probe_net=False, clock=lambda: NOW).samples()[0]
+    assert name == "pi6"
+    assert s["caps"] == {"arch": "arm64", "model": "Raspberry Pi 5 Model B Rev 1.0", "sensors": ["i2c"],
+                         "accel": "none", "cores_reserved": None}
+    assert s["thermal"] == {"temp_c": 55.4, "throttled": False}         # 0x0 — 조여지지 않았다
+    assert s["baseline"]["arch"] == "arm64" and s["identity"]["boot_id"] == "b1"   # 기존 계약 그대로
+
+
+def test_caps_labels_and_missing_values_stay_none(monkeypatch):
+    n = node("pi7", "100.72.109.9")                                     # 라벨 · 애너테이션 아직 없음
+    hand = node("pi13", "100.0.0.13", role="small")
+    hand["metadata"]["labels"].update({"ds.sensors": "i2c", "ds.accel": "npu",
+                                       "ds.model": "손으로-붙인-이름", "ds.cores_reserved": "1"})
+    fake(monkeypatch, [n, hand], [])
+    rows = {k: v for k, v in ks.K3sNodeSource(probe_net=False, clock=lambda: NOW).samples()}
+    c = rows["pi7"]["caps"]
+    assert c == {"arch": "arm64", "model": None, "sensors": None, "accel": None, "cores_reserved": None}
+    assert rows["pi7"]["thermal"] is None                               # 파이가 아직 안 올렸다 — 추측하지 않는다
+    c = rows["pi13"]["caps"]                                            # 라벨로 손수 붙인 것도 읽는다
+    assert c["accel"] == "npu" and c["model"] == "손으로-붙인-이름" and c["cores_reserved"] == 1
+    assert c["sensors"] == ["i2c"]
+
+
+def test_thermal_flag_forms(monkeypatch):
+    assert ks._flag("0x50005") is True and ks._flag("0x0") is False
+    assert ks._flag("true") is True and ks._flag("false") is False
+    assert ks._flag(None) is None and ks._flag("뭐라고") is None
+
+
+def test_nodes_snapshot_carries_caps_and_remembered_peak(monkeypatch):
+    fake(monkeypatch, [pi6_node()], [metric("pi6", 10)])
+
+    class Mem:
+        def node(self, name):
+            return {"caps": {"arch": "arm64", "sensors": ["i2c"], "cores_reserved": 1, "measured_at": NOW - 10},
+                    "thermal": {"temp_c": 50.0, "temp_max_c": 81.0, "throttled_recent": True},
+                    "net": {"bw_mbps": 80.0}}
+
+        def service_share(self, name):
+            return None
+    n = ks.K3sNodeSource(memory=Mem(), probe_net=False, clock=lambda: NOW).nodes()[0]
+    assert n["caps"]["model"] == "Raspberry Pi 5 Model B Rev 1.0"       # 지금 읽은 값
+    assert n["caps"]["cores_reserved"] == 1 and n["caps"]["measured_at"] == NOW - 10   # 기억에서 채운 칸
+    assert n["thermal"]["temp_c"] == 55.4 and n["thermal"]["temp_max_c"] == 81.0
+    assert n["thermal"]["throttled_recent"] is True and n["net"]["bw_mbps"] == 80.0
+
+
+def test_pi_scripts_read_and_upload_caps():
+    from pathlib import Path
+    cl = Path(ks.__file__).resolve().parent / "cluster"
+    pi = (cl / "pi_node.sh").read_text(encoding="utf-8")
+    up = (cl / "cluster_up.sh").read_text(encoding="utf-8")
+    assert "\ncaps)" in pi and "/dev/video[0-9]" in pi                  # 파이는 읽기만 (0~9 만 카메라로 본다)
+    assert 'echo "accel=$ac"' in pi                                     # key=value 로 내보낸다 (올리는 것은 서버)
+    assert "pi_node.sh caps" in up and 'kset label "ds.accel"' in up
+    assert 'kset annotate "ds.thermal/temp_c"' in up and "--overwrite" in up   # 멱등
+
+
 def test_check_reports_failure(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("connection refused")

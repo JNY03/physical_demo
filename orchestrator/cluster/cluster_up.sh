@@ -4,7 +4,8 @@
 #   bash orchestrator/cluster/cluster_up.sh prep    기존(다른) k3s 제거 · cgroup 설정 · 필요하면 재부팅
 #   bash orchestrator/cluster/cluster_up.sh join    agent 설치 · 라벨 · taint (서버 설치 뒤)
 #   bash orchestrator/cluster/cluster_up.sh registry 사설 레지스트리(이 기기 테일넷 :REGISTRY_PORT, 기본 5000)를 파이 containerd 에 등록
-#   bash orchestrator/cluster/cluster_up.sh all     prep · join · registry
+#   bash orchestrator/cluster/cluster_up.sh caps    파이의 특성(센서 · 가속기 · 기기 이름) · 온도를 읽어 라벨 · 애너테이션으로 올린다
+#   bash orchestrator/cluster/cluster_up.sh all     prep · join · registry · caps
 #   ... <명령> pi7 pi10                              일부 노드만
 #
 # 준비: 파이에 SSH 키 로그인(physical@<이름>). 파이 sudo 에 비밀번호가 필요하면 PI_SUDO_PASS 환경변수로 준다
@@ -88,5 +89,33 @@ for line in "${ALL[@]}"; do
     if [ "$step" = registry ] || [ "$step" = all ]; then
         log "$name: 레지스트리 $REGISTRY — $(rsudo "$name" registry "$REGISTRY")"
     fi
+    if [ "$step" = caps ] || [ "$step" = all ]; then
+        # 파이에서 특성 · 온도를 읽어(읽기만) 이 기기의 kubectl 로 올린다 — 파이에는 kubectl 이 없다.
+        # 라벨 값에는 공백 · 쉼표를 쓸 수 없어(k8s 규칙) 가속기만 라벨, 기기 이름 · 센서 목록 · 온도는 애너테이션.
+        # --overwrite 와 「없으면 지우기」라서 다시 돌려도 같은 결과다(멱등).
+        caps_out="$("${SSH[@]}" "$PI_USER@$name" "bash /tmp/pi_node.sh caps" 2>/dev/null || true)"
+        c_arch=""; c_model=""; c_sensors=""; c_accel=""; c_temp=""; c_thr=""
+        while IFS='=' read -r k v; do
+            case "$k" in
+            arch) c_arch="$v";; model) c_model="$v";; sensors) c_sensors="$v";;
+            accel) c_accel="$v";; temp_c) c_temp="$v";; throttled) c_thr="$v";;
+            esac
+        done <<<"$caps_out"
+        if [ -z "$c_arch" ]; then
+            log "$name: 특성을 못 읽음 (SSH · pi_node.sh caps) — 건너뜀"
+        else
+            kset() {  # kset <키> <값> — 값이 비면 지운다 (옛 값이 남아 배치를 속이지 않게)
+                local kind="$1" key="$2" val="$3"
+                if [ -n "$val" ]; then kubectl "$kind" node "$name" "$key=$val" --overwrite >/dev/null 2>&1 || true
+                else kubectl "$kind" node "$name" "$key-" >/dev/null 2>&1 || true; fi
+            }
+            kset label "ds.accel" "$c_accel"
+            kset annotate "ds.model" "$c_model"
+            kset annotate "ds.sensors" "$c_sensors"
+            kset annotate "ds.thermal/temp_c" "$c_temp"
+            kset annotate "ds.thermal/throttled" "$c_thr"
+            log "$name: 특성 arch=$c_arch accel=${c_accel:--} sensors=${c_sensors:--} temp=${c_temp:--} throttled=${c_thr:--} model=${c_model:--}"
+        fi
+    fi
 done
-if [ "$step" != prep ]; then kubectl get nodes -L ds.role -o wide 2>/dev/null || true; fi
+if [ "$step" != prep ]; then kubectl get nodes -L ds.role -L ds.accel -o wide 2>/dev/null || true; fi

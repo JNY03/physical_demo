@@ -6,6 +6,8 @@
 #   cgroup                      부팅 줄에 cgroup_memory=1 cgroup_enable=memory 를 더한다 (재부팅 필요하면 "changed")
 #   join <ver> <url> <name> <ip> <role> <taint 0|1>   k3s agent 설치 — 토큰은 표준입력 첫 줄
 #   registry <host:port>        사설 레지스트리(http)를 containerd 미러로 등록. 바뀌었을 때만 k3s-agent 재시작 ("changed" | "same")
+#   caps                        이 파이의 특성 · 온도를 key=value 로 낸다 (읽기만 — 아무것도 고치지 않는다).
+#                               kubectl 은 서버에만 있으니 cluster_up.sh caps 가 이 값을 라벨 · 애너테이션으로 올린다.
 set -euo pipefail
 cmd="${1:-}"; shift || true
 SVC_ENV=/etc/systemd/system/k3s-agent.service.env
@@ -61,6 +63,50 @@ join)
         INSTALL_K3S_EXEC="agent --node-name $name --node-ip $ip --flannel-iface tailscale0 $extra" sh - >/dev/null
     systemctl is-active k3s-agent
     ;;
+caps)
+    # 이 파이의 특성 · 온도를 key=value 로 낸다 — 못 읽은 칸은 아예 내지 않는다(모르는 것을 짐작하지 않는다).
+    a="$(uname -m)"; case "$a" in x86_64|amd64) a=amd64;; aarch64|arm64) a=arm64;; esac
+    echo "arch=$a"
+    m=""
+    [ -r /proc/device-tree/model ] && m="$(tr -d '\0' < /proc/device-tree/model)"
+    [ -z "$m" ] && [ -r /sys/devices/virtual/dmi/id/product_name ] && m="$(cat /sys/devices/virtual/dmi/id/product_name)"
+    [ -n "$m" ] && echo "model=$m"
+    s=""
+    compgen -G "/dev/i2c-*" >/dev/null 2>&1 && s="i2c"
+    if compgen -G "/dev/ttyACM*" >/dev/null 2>&1 || compgen -G "/dev/ttyUSB*" >/dev/null 2>&1; then s="${s:+$s,}serial"; fi
+    # 카메라: /dev/video0~9 중 **V4L2 캡처 장치**만 센다. 파이 5 의 /dev/video19 이상은 ISP · 코덱
+    # (메모리↔메모리) 노드라 카메라가 없어도 생긴다 — 번호만 보고 세면 안 된다. 캡처 비트(0x1001)가 있고
+    # M2M 비트(0xC000)가 없어야 카메라다. v4l2-ctl 이 없으면 확인할 수 없어 세지 않는다.
+    # CSI 카메라는 libcamera 쪽을 봐야 알 수 있어 여기서는 가리지 않는다 (모르면 모른다).
+    cam=no
+    if command -v v4l2-ctl >/dev/null 2>&1; then
+        for d in /dev/video[0-9]; do
+            [ -e "$d" ] || continue
+            ch="$(v4l2-ctl --device="$d" --info 2>/dev/null |
+                  sed -n 's/^[[:space:]]*Device Caps[[:space:]]*:[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' | head -1)"
+            [ -n "$ch" ] || continue
+            if [ $(( ch & 0x1001 )) -ne 0 ] && [ $(( ch & 0xC000 )) -eq 0 ]; then cam=yes; fi
+        done
+    fi
+    [ "$cam" = yes ] && s="${s:+$s,}camera"
+    [ -n "$s" ] && echo "sensors=$s"
+    ac=none
+    compgen -G "/dev/hailo*" >/dev/null 2>&1 && ac=npu
+    if [ "$ac" = none ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then ac=gpu; fi
+    echo "accel=$ac"
+    t=""; thr=""
+    if command -v vcgencmd >/dev/null 2>&1; then
+        t="$(timeout 3 vcgencmd measure_temp 2>/dev/null | sed -n "s/^temp=\([0-9.]*\).*/\1/p")"
+        thr="$(timeout 3 vcgencmd get_throttled 2>/dev/null | sed -n 's/^throttled=//p')"
+    fi
+    if [ -z "$t" ]; then
+        z="$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1 || true)"
+        if [ -n "$z" ]; then t="$(awk -v v="$z" 'BEGIN{printf "%.1f", v/1000}')"; fi
+    fi
+    [ -n "$t" ] && echo "temp_c=$t"
+    [ -n "$thr" ] && echo "throttled=$thr"
+    exit 0
+    ;;
 *)
-    echo "사용법: $0 check | remove-old <url> | cgroup | join <ver> <url> <name> <ip> <role> <taint>" >&2; exit 2;;
+    echo "사용법: $0 check | remove-old <url> | cgroup | join <ver> <url> <name> <ip> <role> <taint> | caps" >&2; exit 2;;
 esac

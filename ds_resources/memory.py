@@ -9,6 +9,13 @@ k3s 가 없거나 멈춰도 이 기억만으로 배치를 정한다(basis = save
                net_status(ok | failed | unsupported), attempts, next_try, error} — net_status 뒤 칸은 M11 에 더함.
                net_due(): net 없음 · 실패(물러남 5분 → 최대 6시간) · 재측정 주기(NET_RECHECK_S) 지남이면 다시 잰다.
                unsupported(테일넷 주소가 없는 설치 등 잴 수 없음)는 다시 묻지 않는다. 옛 기억(net_status 없음)도 읽는다.
+노드 특성      nodes.<노드>.caps = {arch, model, sensors(확인된 것만), accel(npu | gpu | none),
+               cores_reserved, measured_at} — 센서가 붙은 노드 · arm64 전용 이미지 같은 「그 노드만 되는 일」을
+               배치가 보려면 필요하다. 바뀌면 바로 갱신(신원 변화와 같은 취급)하고, 그 밖에는 baseline 과 같은
+               주기 방식(caps_due · 같으면 두 배, 최대 30일)으로 다시 읽는다. 읽지 못한 칸은 None 이다.
+노드 온도      nodes.<노드>.thermal = {temp_c, throttled, temp_max_c, throttled_recent, samples, updated_at} —
+               최근값 하나로는 「지금 뜨겁다」를 알 수 없어 최근 THERMAL_WINDOW 표본의 최고 온도도 남긴다
+               (창은 사용량 p95 처럼 메모리에만 두고, 낸 값만 저장한다).
 로봇 서비스 몫  노드 사용량 표본으로 p95 와 지수 이동 평균. 배치는 「가용 − p95 − 여유」만 쓴다.
 모델 조합      kind "gpu"  (선택지 묶음 · 설정 해시 · 장치 종류) → 프로세스 GPU 메모리 최대치
                kind "cost" (선택지 묶음 · 설정 해시 · 장치 종류 · 해상도 구간) → 처리 시간 p50/p90 · fps
@@ -33,6 +40,7 @@ EWMA = 0.2
 ESTIMATE_MARGIN = 1.2
 MAX_COMBOS = 300
 USAGE_WINDOW = 240                      # p95 를 낼 최근 표본 수 (노드마다, 메모리에만)
+THERMAL_WINDOW = 20                     # 최근 최고 온도를 낼 표본 수 — 짧게 둔다(지금 뜨거운지를 보는 값이라)
 NET_RECHECK_S = 1 * DAY                 # 잰 대역폭을 다시 잴 주기
 NET_RETRY_MIN_S = 300.0                 # 측정 실패 뒤 물러남: 5분에서 두 배씩
 NET_RETRY_MAX_S = 6 * 3600.0            #                      최대 6시간
@@ -88,6 +96,30 @@ def same_baseline(old, new):
     return True
 
 
+#: 기억하는 노드 특성 칸 (measured_at 은 따로 붙인다)
+CAPS_KEYS = ("arch", "model", "sensors", "accel", "cores_reserved")
+
+
+def clean_caps(caps):
+    """특성 사전을 기억에 넣을 모양으로 — 아는 칸만 남기고, 없는 칸은 None, sensors 는 정렬한 목록."""
+    out = {k: (caps or {}).get(k) for k in CAPS_KEYS}
+    s = out["sensors"]
+    if isinstance(s, (list, tuple, set)):
+        out["sensors"] = sorted({str(x) for x in s})
+    elif isinstance(s, str):
+        out["sensors"] = sorted({x.strip() for x in s.split(",") if x.strip()})
+    elif s is not None:
+        out["sensors"] = []
+    return out
+
+
+def same_caps(old, new):
+    """특성이 같은가 — measured_at 은 빼고 본다(잴 때마다 달라지는 값이라 '바뀜' 이 되면 안 된다)."""
+    if not isinstance(old, dict):
+        return False
+    return all(old.get(k) == new.get(k) for k in CAPS_KEYS)
+
+
 def _positive(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
 
@@ -107,6 +139,7 @@ class ResourceMemory:
         self.lock = threading.RLock()
         self.data = {"version": 1, "nodes": {}, "combos": {}}
         self.usage = {}                   # 노드 → deque[(cpu_pct, mem_mb)] (저장하지 않음)
+        self.temps = {}                   # 노드 → deque[(temp_c, throttled)] (저장하지 않음)
         self.dirty = False
         self.writer, self._lockf = False, None
         if writer:
@@ -175,6 +208,52 @@ class ResourceMemory:
             self.data["nodes"][name] = n
             self.dirty = True
             return not same
+
+    # ------------------------------------------------------------ 노드 특성 · 온도
+    def caps_due(self, name):
+        """특성을 (다시) 읽어야 하나 — 기억에 없음 · 다시 읽을 시각 지남. 바뀌었는지는 record_caps 가 가린다.
+        옛 기억 파일(caps 칸이 없는 것)은 True 가 되어 다음 tick 에 채워진다."""
+        self.refresh()
+        with self.lock:
+            n = self.data["nodes"].get(name) or {}
+            if not n.get("caps"):
+                return True
+            return self.clock() >= float(n.get("caps_next_check") or 0)
+
+    def record_caps(self, name, caps):
+        """읽은 특성을 기억한다. 바뀌었는지(True/False)를 돌려준다 — 바뀌면 바로 갱신하고 주기를 되돌린다
+        (신원 변화와 같은 취급). 같으면 주기를 두 배(최대 30일)로 늘린다."""
+        now = self.clock()
+        new = clean_caps(caps)
+        with self.lock:
+            n = self.data["nodes"].setdefault(name, {})
+            same = same_caps(n.get("caps"), new)
+            interval = min(RECHECK_MAX_S, max(RECHECK_MIN_S, n.get("caps_interval", RECHECK_MIN_S) * 2)) if same \
+                else RECHECK_MIN_S
+            new["measured_at"] = now
+            n.update({"caps": new, "caps_interval": interval, "caps_next_check": now + interval})
+            self.dirty = True
+            return not same
+
+    def record_thermal(self, name, temp_c, throttled=None):
+        """온도 표본. 최근값과 **최근 THERMAL_WINDOW 표본의 최고 온도**를 남긴다 — 순간 값 하나로는
+        '지금 뜨겁다'를 알 수 없다(널뛴다). throttled 도 최근값과 창 안에 한 번이라도 참이었나를 남긴다.
+        창은 메모리에만 두니(사용량 p95 와 같다) 프로세스를 다시 띄우면 최근값부터 다시 쌓인다."""
+        now = self.clock()
+        t_val = None if temp_c is None else float(temp_c)
+        thr = None if throttled is None else bool(throttled)
+        with self.lock:
+            n = self.data["nodes"].setdefault(name, {})
+            t = n.setdefault("thermal", {})
+            q = self.temps.setdefault(name, deque(maxlen=THERMAL_WINDOW))
+            q.append((t_val, thr))
+            temps = [v for v, _ in q if v is not None]
+            flags = [x for _, x in q if x is not None]
+            t.update({"temp_c": t_val, "temp_max_c": max(temps) if temps else None, "throttled": thr,
+                      "throttled_recent": any(flags) if flags else None,
+                      "samples": len(q), "updated_at": now})
+            self.dirty = True
+            return t["temp_max_c"]
 
     def record_net(self, name, net):
         """노드까지의 네트워크 (지연 · 중계 · 대역폭, 측정 시각) 를 기억하고 다음 측정 시각을 정한다.
