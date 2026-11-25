@@ -24,6 +24,7 @@ from pathlib import Path
 
 from ds_resources import gpu_executor as ge
 from ds_resources import memory as mm
+from ds_resources import functions as fnc
 from ds_resources import placement, probe, settings
 from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record, reason_item
 
@@ -36,7 +37,8 @@ WAIT_RES = (1920, 1080)               # 입력 대기 소스의 해상도를 모
 COMBO_STALE_S = 7 * 86400.0
 DEGRADED_RATIO = 0.8
 DEGRADED_AFTER_S = 30.0
-WARMUP_S = 30.0                       # running 뒤 이만큼은 fps 저하 판정을 하지 않는다 (2026-11-25 실측: 첫 30초 0.1~0.2 fps)
+THERMAL_TTL_S = 10.0                  # 이 기기 온도를 다시 읽는 간격 (vcgencmd · sysfs 를 매 tick 부르지 않게)
+WARMUP_S = 30.0                     # running 뒤 이만큼은 fps 저하 판정을 하지 않는다 (2026-11-25 실측: 첫 30초 0.1~0.2 fps)
 CPU_HEARTBEAT_FRESH_S = 30.0          # cpu_telemetry:<unit> 이 이 안에 있어야 running
 CPU_REPLACE_AFTER_S = 60.0            # running 이던 CPU 작업이 이만큼 하트비트가 없으면 다시 배치
 NODE_BAD_GRACE_S = 30.0               # 노드가 Ready 아님 · stale 인 채로 이만큼 이어져야 옮긴다 — metrics 가 잠깐
@@ -83,6 +85,11 @@ def _is_wsl():
 def _fps_text(fps):
     """{"robot1": 2.02} → "robot1 2.0 fps" (None 이면 '?')"""
     return ", ".join("%s %s fps" % (s, "?" if f is None else "%.1f" % f) for s, f in sorted((fps or {}).items())) or "-"
+
+
+def _stream_tags(x):
+    """배치표 항목 · 단위에서 스트림 칸으로 옮길 것만 (function · stage · quality). 없는 칸은 넣지 않는다."""
+    return {k: x[k] for k in ("function", "stage", "quality") if x.get(k)}
 
 
 def check_cluster(cluster):
@@ -162,9 +169,29 @@ class Controller:
         return {"need_mb": round(req), "basis": basis, "estimate_mb": est, "needs": need,
                 "p90_ms": p90, "p90_basis": p90_basis, "cfg_hash": h}
 
+    def local_caps(self):
+        """이 기기의 특성 · 온도 (배치가 보는 칸). 특성은 잘 안 바뀌어 한 번만 읽고, 온도는 THERMAL_TTL_S 마다.
+        못 읽으면 빈 사전 — 배치는 「모름」을 통과로 다룬다(모른다고 막으면 지금 동작이 퇴행한다)."""
+        if not hasattr(self, "_caps_cache"):
+            try:
+                self._caps_cache = probe.caps()
+            except Exception:  # noqa: BLE001 — 특성을 못 읽어도 배치는 돌아야 한다
+                self._caps_cache = {}
+            self._therm_cache, self._therm_at = {}, None
+        now = self.clock()
+        if self._therm_at is None or now - self._therm_at >= THERMAL_TTL_S:
+            try:
+                self._therm_cache = probe.thermal() or {}
+            except Exception:  # noqa: BLE001
+                self._therm_cache = {}
+            self._therm_at = now
+        return dict(self._caps_cache), dict(self._therm_cache)
+
     def local_node_snapshot(self):
         g = self.gpus()
-        loaded = [u for u in self.ex.active_units().values() if u.get("status") == "loaded"]
+        # 적재 중(starting)도 처리량 몫을 이미 쥐고 있다 — gpu_executor.active_units() 와 같은 기준으로 센다.
+        # (loaded 만 세면 적재 창 안에서 예산이 비어 보여 헛요청 · gpu_mem 재시도가 생긴다)
+        active = list(self.ex.active_units().values())
         mem = {}
         try:
             for line in open("/proc/meminfo", encoding="utf-8"):
@@ -175,9 +202,11 @@ class Controller:
         except (OSError, ValueError):
             load1 = 0.0
         import os
+        caps, therm = self.local_caps()
         return {"name": self.local, "role": "gpu", "ready": bool(g), "stale": not g,
+                "caps": caps, "thermal": therm,
                 "gpus": [{"mem_total_mb": x["mem_total_mb"], "mem_used_mb": x["mem_used_mb"]} for x in g],
-                "gpu_util_committed": sum(float(u.get("gpu_util") or 0) for u in loaded),
+                "gpu_util_committed": sum(float(u.get("gpu_util") or 0) for u in active),
                 "cpu_alloc_m": (os.cpu_count() or 1) * 1000.0, "cpu_now_m": load1 * 1000.0,
                 "mem_alloc_mb": mem.get("MemTotal", 0.0),
                 "mem_now_mb": mem.get("MemTotal", 0.0) - mem.get("MemAvailable", 0.0), "net": {}}
@@ -195,8 +224,23 @@ class Controller:
             out.append(t)
         return out
 
-    def prepare(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, task_specs=None, request_id=None):
-        """클러스터 확인 → 입력 영상 → 스냅숏 → placement/1. 아무것도 띄우지 않고 기록도 하지 않는다(미리보기와 같은 계산)."""
+    def function_contract(self):
+        """작업 계약 (vision/model_registry.yaml 의 functions · 옛 cpu_tasks 별칭). 한 번만 읽는다.
+        계약이 깨져 있으면 빈 사전으로 두고 알린다 — 기능 배치만 못 하고 옛 경로는 그대로 돈다."""
+        if not hasattr(self, "_funcs"):
+            try:
+                self._funcs = fnc.load(self.reg)
+            except Exception as e:  # noqa: BLE001
+                self._funcs = {}
+                self.log("작업 계약을 읽지 못함 (%s) — 기능 배치 없이 옛 경로로만 돈다" % e)
+        return self._funcs
+
+    def prepare(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, task_specs=None, request_id=None,
+                functions=None):
+        """클러스터 확인 → 입력 영상 → 스냅숏 → placement/2. 아무것도 띄우지 않고 기록도 하지 않는다(미리보기와 같은 계산).
+
+        functions: 런처가 고른 **기능 이름들**. 단계로 펼치는 것은 여기서 한다 — 상주(resident)와 설정 · 배포
+        흐름은 배치 목록에서 빠지고 따로 돌려준다(놓는 게 아니라 있는지 보고 알릴 몫이다)."""
         ok, why, caps = check_cluster(self.cluster)
         nodes = []
         if ok:
@@ -226,20 +270,28 @@ class Controller:
         specs = self.cpu_specs(cpu_tasks, task_specs)
         if mode != "k3s" or self.cpu_ex is None:        # k3s 가 없으면 CPU 작업도 data_stream 기기에만
             specs = [dict(t, roles=[r for r in t.get("roles", []) if r == "gpu"]) for t in specs]
+        stages, residents, others = [], [], []
+        if functions:
+            stages, residents, others = fnc.expand(self.function_contract(), functions)
+            if mode != "k3s" or self.cpu_ex is None:     # k3s 가 없으면 기능 단계도 data_stream 기기에만
+                stages = [dict(s, roles=[r for r in (s.get("roles") or []) if r == "gpu"]) for s in stages]
         req = {"request_id": request_id,
                "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps, "waiting": sorted(waiting)}]
                if infos and models else [],
                "cpu": specs}
+        if stages:
+            req["functions"] = stages
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
         placed = {s for u in plan["gpu_units"] for s in u["sources"]}
         plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상 없음. 들어오면 바로 처리")
                            for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])
-        return {"ok": ok, "why": why, "caps": caps, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
+        return {"ok": ok, "why": why, "caps": caps, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot,
+                "residents": residents, "others": others}
 
-    def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None):
+    def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, functions=None):
         """런처 「배치 보기」 — prepare + GPU 단위마다 지금 들일 수 있는지(Executor admit, 읽기만)"""
-        p = self.prepare(sources, models, profile, target_fps, cpu_tasks)
+        p = self.prepare(sources, models, profile, target_fps, cpu_tasks, functions=functions)
         for u in p["plan"]["gpu_units"]:
             c = p["snapshot"]["costs"]["+".join(u["models"])]
             ok, why, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"])
@@ -248,15 +300,17 @@ class Controller:
         return p
 
     def submit(self, sources, models, profile=None, profile_path=None, target_fps=None, cpu_tasks=None,
-               task_specs=None):
+               task_specs=None, functions=None):
         rid = "req-" + uuid.uuid4().hex[:10]
         request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {},
-                   "cpu_tasks": sorted(cpu_tasks or [])}
+                   "cpu_tasks": sorted(cpu_tasks or []), "functions": sorted(functions or [])}
         self._resubmit[rid] = dict(sources=sources, models=models, profile=profile, profile_path=profile_path,
-                                   target_fps=target_fps, cpu_tasks=cpu_tasks, task_specs=task_specs)
+                                   target_fps=target_fps, cpu_tasks=cpu_tasks, task_specs=task_specs,
+                                   functions=functions)
         self.state.put_request(rid, dict(request, status="requested", at=self.clock()))
         self.emit("requested", rid, request=request)
-        p = self.prepare(sources, models, profile, target_fps, cpu_tasks, task_specs, request_id=rid)
+        p = self.prepare(sources, models, profile, target_fps, cpu_tasks, task_specs, request_id=rid,
+                         functions=functions)
         ok, why, mode, basis, plan, snapshot = p["ok"], p["why"], p["mode"], p["basis"], p["plan"], p["snapshot"]
         caps = p.get("caps") or {}
         self.emit("cluster_checked", rid, reason=why or caps.get("why") or "",
@@ -269,9 +323,11 @@ class Controller:
         req_rec = dict(request, status="planned", plan=plan, mode=mode, execution_id=xid, at=self.clock(), refused=refused)
         self.state.put_request(rid, req_rec)
         for item in plan["degraded"] + plan.get("waiting", []):
-            self.emit("degraded", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item)
+            self.emit("degraded", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item,
+                      **_stream_tags(item))
         for item in plan["refused"]:
-            self.emit("failed", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item)
+            self.emit("failed", rid, execution_id=xid, mode=mode, reason=item["reason"], detail=item,
+                      **_stream_tags(item))
         late = []
         for u in plan["gpu_units"]:
             if u["node"] != self.local:                 # GPU 노드가 늘면 그 노드의 Executor 로 (지금은 data_stream 기기 하나)
@@ -297,7 +353,10 @@ class Controller:
                       detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"], "node": u["node"], "where": where})
         if late:
             self.state.put_request(rid, dict(req_rec, refused=refused + late))
+        qual = {n: g.get("quality") for n, g in (plan.get("functions") or {}).items()}
         for u in plan["cpu_units"]:
+            if u.get("function") and qual.get(u["function"]):   # 쌍이 깨져 낮춰 도는 중이면 기록에 품질을 남긴다
+                u = dict(u, quality=qual[u["function"]])
             self.launch_cpu(rid, xid, mode, u)
         return rid
 
@@ -306,12 +365,12 @@ class Controller:
         uid = "cpu-%s-%s" % (u["task"], uuid.uuid4().hex[:6])
         rec = {"unit_id": uid, "kind": "cpu", "task": u["task"], "node": u["node"], "requests": u["requests"],
                "limits": u["limits"], "priority_class": u["priority_class"], "request_id": rid, "execution_id": xid,
-               "status": "starting", "started_at": self.clock(), "replaces": replaces}
+               "status": "starting", "started_at": self.clock(), "replaces": replaces, **_stream_tags(u)}
         if u["node"] == self.local or self.cpu_ex is None:
             rec.update(status="local", where="data_stream 기기 (런처가 띄우는 기존 방식)")
             self.state.put_unit(uid, rec)
             self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s → %s (data_stream 기기)" % (u["task"], self.local),
-                      detail={"unit_id": uid, "node": u["node"], "note": u.get("reason")})
+                      detail={"unit_id": uid, "node": u["node"], "note": u.get("reason")}, **_stream_tags(u))
             return uid
         try:
             self.cpu_ex.launch(rec)
@@ -319,12 +378,12 @@ class Controller:
             rec.update(status="failed", reason=str(e)[:200])
             self.state.put_unit(uid, rec)
             self.emit("failed", rid, execution_id=xid, mode=mode, reason="CPU 작업을 못 띄움: %s" % e,
-                      code="cpu_launch_failed", detail={"unit_id": uid})
+                      code="cpu_launch_failed", detail={"unit_id": uid}, **_stream_tags(u))
             return uid
         self.state.put_unit(uid, rec)
         self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s → %s (k3s 파드)" % (u["task"], u["node"]),
                   detail={"unit_id": uid, "node": u["node"], "requests": u["requests"], "limits": u["limits"],
-                          "priority_class": u["priority_class"]})
+                          "priority_class": u["priority_class"]}, **_stream_tags(u))
         return uid
 
     def heartbeat_age(self, uid):

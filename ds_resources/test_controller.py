@@ -89,7 +89,7 @@ def test_local_fallback_event_sequence_and_fps_cap(tmp_path):
     assert fb["mode"] == "local" and fb["basis"] == "saved"
     plan = json.loads([x for x in r.rows if x["event"] == "planned"][0]["plan"])
     u = plan["gpu_units"][0]
-    assert u["need_mb"] == round(1300 * 1.2) and plan["algorithm"] == "placement/1"
+    assert u["need_mb"] == round(1300 * 1.2) and plan["algorithm"] == "placement/2"
     unit = list(k.state.units().values())[0]
     assert unit["request_id"] == rid and unit["execution_id"].startswith("exe-")
     cmd = k.ex.procs[unit["unit_id"]].cmd
@@ -442,3 +442,72 @@ def test_unbudgeted_waiting_source_triggers_replan_when_it_comes_online(tmp_path
     live = [u for u in k.state.units().values() if u.get("status") in ("starting", "loaded")]
     assert [sorted(u["devices"]) for u in live] == [["a2", "robot1"]]   # 영상 오는 둘끼리 예산을 다시 나눔
     assert k.pending_sources(new) == ["drone"]
+
+
+def test_snapshot_counts_loading_units_in_gpu_budget(tmp_path):
+    # 적재 중(starting)인 단위도 처리량 몫을 쥐고 있다 — gpu_executor.active_units() 와 같은 기준
+    k, _, _ = make(tmp_path)
+    assert k.local_node_snapshot()["gpu_util_committed"] == 0.0
+    k.state.put_unit("loading", {"kind": "gpu", "status": "starting", "gpu_util": 0.4})
+    assert k.local_node_snapshot()["gpu_util_committed"] == 0.4          # 적재 창 안에서도 예산에 잡힌다
+    k.state.put_unit("done", {"kind": "gpu", "status": "loaded", "gpu_util": 0.3})
+    assert abs(k.local_node_snapshot()["gpu_util_committed"] - 0.7) < 1e-9
+    k.state.update_unit("loading", status="stopped")                     # 끝난 단위는 빠진다
+    assert abs(k.local_node_snapshot()["gpu_util_committed"] - 0.3) < 1e-9
+
+
+# ---------------------------------------------------------------- 기능 단위 배치 (placement/2 · functions 계약)
+FUNCS = {"functions": {
+    "det": {"pattern": "cascade", "criticality": "mission", "trigger": "always", "note": "거름 → 서버 탐지",
+            "stages": {"device": {"cpu_m": 1600, "mem_mb": 512, "roles": ["robot"], "optional": True,
+                                  "egress_kb": 0.05, "note": "파이 1차 거름"},
+                       "server": {"cpu_m": 500, "mem_mb": 2048, "roles": ["gpu"], "note": "서버 탐지"}}},
+    "reid": {"pattern": "split", "criticality": "mission", "trigger": "on_request", "note": "특징 → 융합",
+             "stages": {"device": {"cpu_m": 900, "mem_mb": 256, "roles": ["robot"], "note": "특징 추출"},
+                        "server": {"cpu_m": 400, "mem_mb": 1024, "roles": ["gpu"], "note": "유사도 융합"}}}}}
+
+
+def func_setup(tmp_path, names):
+    """기능 계약을 가짜로 끼운다 — 실제 레지스트리가 바뀌어도 이 시험은 흔들리지 않게.
+    Nodes() 에는 robot 역할 노드가 없으므로 device 단계는 어디에도 놓이지 않는다."""
+    from ds_resources import functions as fnc
+    k, r, c = make(tmp_path)
+    k.cluster, k.cpu_ex = Nodes(), FakeCpu()
+    k._funcs = fnc.load(FUNCS)
+    rid = k.submit([], [], functions=names)
+    return k, r, rid
+
+
+def test_cascade_without_the_device_stage_runs_degraded_as_server_only(tmp_path):
+    """캐스케이드의 기기 단계가 못 놓이면 기능은 살고 품질만 낮아진다 — 기록에 quality 가 남는다"""
+    k, r, rid = func_setup(tmp_path, ["det"])
+    plan = (k.state.data["requests"][rid]).get("plan")
+    assert plan["algorithm"] == "placement/2"
+    assert plan["functions"]["det"]["verdict"] == "degraded"
+    assert plan["functions"]["det"]["quality"] == "server_only"
+    # 서버 단계는 실제로 놓였고, 그 단위 기록 · applied 기록에 기능 · 단계 · 품질이 함께 남는다
+    assert [u["task"] for u in plan["cpu_units"]] == ["det.server"]
+    applied = [x for x in r.rows if x["event"] == "applied" and x.get("function") == "det"]
+    assert applied and applied[0]["stage"] == "server" and applied[0]["quality"] == "server_only"
+    low = [x for x in r.rows if x["event"] == "degraded" and x.get("code") == "pair_incomplete"]
+    assert low and low[0]["function"] == "det"
+
+
+def test_split_with_one_stage_missing_is_rejected_and_cancels_the_other(tmp_path):
+    """split 은 한쪽이 없으면 기능을 거절하고, 이미 놓인 단계도 취소한다"""
+    k, r, rid = func_setup(tmp_path, ["reid"])
+    plan = (k.state.data["requests"][rid]).get("plan")
+    assert plan["functions"]["reid"]["verdict"] == "rejected"
+    assert "quality" not in plan["functions"]["reid"]
+    assert plan["cpu_units"] == []                              # 놓였던 서버 단계까지 취소
+    assert not k.cpu_ex.launched                                # 파드를 띄우지 않았다
+    bad = [x for x in r.rows if x["event"] == "failed" and x.get("code") == "pair_incomplete"]
+    assert bad and bad[0]["function"] == "reid"
+
+
+def test_old_path_is_untouched_by_the_functions_contract(tmp_path):
+    """기능을 주지 않으면 요청에 functions 칸이 없고 옛 경로와 똑같다"""
+    k, _r, _c, rid = cpu_setup(tmp_path)
+    plan = (k.state.data["requests"][rid]).get("plan")
+    assert "functions" not in plan
+    assert [u["task"] for u in plan["cpu_units"]] == ["probe"]

@@ -134,6 +134,8 @@ def main(argv=None):
     ap.add_argument("--models", nargs="*", default=[])
     ap.add_argument("--cpu-tasks", nargs="*", default=[])
     ap.add_argument("--profile")
+    ap.add_argument("--functions", nargs="*", default=[],
+                    help="기능 이름들 (vision/model_registry.yaml functions). 단계로 펼쳐 기기 · 서버에 나눠 놓는다")
     ap.add_argument("--cluster", default=os.environ.get("DS_CLUSTER", "auto"), help="auto | none | 모듈:클래스")
     ap.add_argument("--redis", default="redis://127.0.0.1:6380/0")
     ap.add_argument("--redis-public", help="파이 파드가 닿는 Redis 주소 (기본: 이 기기 테일넷 주소 :6380)")
@@ -162,7 +164,7 @@ def main(argv=None):
     profile = load_profile(a.profile)
     if a.cmd == "plan":
         k = build(a, writer=False)
-        p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks)
+        p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks, functions=a.functions)
         print(json.dumps(p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"], "caps": p.get("caps") or {}},
                          ensure_ascii=False)
               if a.json else brief(p))
@@ -184,7 +186,8 @@ def main(argv=None):
             and not any(u.get("status") == "local" for u in k.state.units().values() if u.get("request_id") == rid)
 
     # 바로 앞 프로세스가 GPU 메모리를 아직 반납하는 중일 수 있다 — 배치표든 admit 이든 gpu_mem 이면 다시
-    rid = submit_with_retry(k, lambda: k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks),
+    rid = submit_with_retry(k, lambda: k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks,
+                                                       functions=a.functions),
                             nothing_running, stopped=lambda: stop["flag"])
     req = k.state.data["requests"].get(rid) or {}
     log("요청 %s — %s" % (rid, (req.get("mode") or "")))
