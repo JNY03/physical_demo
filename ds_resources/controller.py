@@ -94,6 +94,7 @@ def load_yaml(path):
 class Controller:
     def __init__(self, redis_client, state, executor, memory, local_node=None, cluster=None, cfg=None,
                  clock=time.time, log=print, gpus=probe.gpus, cpu_executor=None):
+        self._resubmit = {}                                # request_id → submit 인자 (빠진 입력 대기 소스가 들어오면 다시 배치)
         self.r, self.state, self.ex, self.mem = redis_client, state, executor, memory
         self.cpu_ex = cpu_executor                    # k3s CPU 실행기 (orchestrator 가 주입) — 없으면 파이에 못 둔다
         self.local = local_node or probe.node_name()
@@ -213,12 +214,14 @@ class Controller:
         if mode != "k3s" or self.cpu_ex is None:        # k3s 가 없으면 CPU 작업도 data_stream 기기에만
             specs = [dict(t, roles=[r for r in t.get("roles", []) if r == "gpu"]) for t in specs]
         req = {"request_id": request_id,
-               "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps}] if infos and models else [],
+               "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps, "waiting": sorted(waiting)}]
+               if infos and models else [],
                "cpu": specs}
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
+        placed = {s for u in plan["gpu_units"] for s in u["sources"]}
         plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상이 들어오면 바로 처리 (예산을 미리 잡음)")
-                           for s in waiting]
+                           for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])
         return {"ok": ok, "why": why, "caps": caps, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot}
 
     def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None):
@@ -236,6 +239,8 @@ class Controller:
         rid = "req-" + uuid.uuid4().hex[:10]
         request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {},
                    "cpu_tasks": sorted(cpu_tasks or [])}
+        self._resubmit[rid] = dict(sources=sources, models=models, profile=profile, profile_path=profile_path,
+                                   target_fps=target_fps, cpu_tasks=cpu_tasks, task_specs=task_specs)
         self.state.put_request(rid, dict(request, status="requested", at=self.clock()))
         self.emit("requested", rid, request=request)
         p = self.prepare(sources, models, profile, target_fps, cpu_tasks, task_specs, request_id=rid)
@@ -385,6 +390,33 @@ class Controller:
         return events
 
     # ------------------------------------------------------------ 감시
+    def unbudgeted_up(self, rid):
+        """예산이 모자라 배치표에서 뺀 입력 대기 소스 중 지금 영상이 들어오는 것"""
+        req = self.state.data["requests"].get(rid) or {}
+        srcs = [x["item"].split(":", 1)[1] for x in (req.get("plan") or {}).get("waiting", [])
+                if x.get("code") == "input_wait_unbudgeted"]
+        now_ms = int(self.clock() * 1000)
+        return [s for s in srcs if (source_info(self.r, s, now_ms) or {}).get("age_s", 1e9) <= INPUT_FRESH_S]
+
+    def pending_sources(self, rid):
+        """예산이 모자라 빠진 채 영상을 기다리는 소스 — 돌 것이 없어도 끝내지 않고 기다릴 이유"""
+        req = self.state.data["requests"].get(rid) or {}
+        return [x["item"].split(":", 1)[1] for x in (req.get("plan") or {}).get("waiting", [])
+                if x.get("code") == "input_wait_unbudgeted"]
+
+    def replan_if_needed(self, rid):
+        """빠졌던 입력 대기 소스에 영상이 들어오면 같은 요청을 다시 배치한다. 새 request_id 를 돌려준다(없으면 None).
+        영상이 오는 소스끼리 GPU 예산을 다시 나누므로 지금 돌던 단위를 멈추고 새로 띄운다."""
+        args = self._resubmit.get(rid)
+        came = self.unbudgeted_up(rid) if args else []
+        if not came:
+            return None
+        self.emit("replanned", rid, reason="입력 들어옴: %s — 예산을 다시 나눔" % ", ".join(came), detail={"sources_up": came})
+        self.stop(rid, "다시 배치")
+        new = self.submit(**args)
+        self._resubmit.pop(rid, None)
+        return new
+
     def poll(self):
         self.flush_outbox()
         events = self.poll_cpu()

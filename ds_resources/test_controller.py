@@ -412,3 +412,26 @@ def test_submit_with_retry_resubmits_until_launched(tmp_path):
     rid = cli.submit_with_retry(k, submit, lambda rid: not mine(), sleep=sleeps.append, retries=5, gap=0)
     assert n["submits"] == 3 and len(sleeps) == 2
     assert k.state.data["requests"][rid]["refused"] == [] and mine()
+
+
+def test_unbudgeted_waiting_source_triggers_replan_when_it_comes_online(tmp_path):
+    # 2026-11-25 실측: 영상이 오는 robot1 은 바로 돌고, 꺼진 a2 · drone 은 예산 밖 대기 → a2 가 켜지면 다시 배치
+    k, r, c = make(tmp_path)
+    r.add_frames("robot1")
+
+    def costs(models, sources, profile=None):                         # 영상이 없는 소스는 크기를 몰라 xl(무겁게)
+        p90 = {s: (1300.0 if sources[s].get("waiting") else 300.0) for s in sources}
+        return {"need_mb": 2000, "basis": "measured", "estimate_mb": 1700, "needs": [], "p90_ms": p90,
+                "p90_basis": {s: "registry" for s in sources}, "cfg_hash": "h"}
+    k.costs = costs
+    rid = k.submit(["robot1", "a2", "drone"], ["targeted"])
+    units = list(k.state.units().values())
+    assert [u["devices"] for u in units] == [["robot1"]] and "failed" not in r.events()
+    assert sorted(k.pending_sources(rid)) == ["a2", "drone"]
+    assert k.replan_if_needed(rid) is None                             # 아직 아무도 안 켜짐
+    r.add_frames("a2")                                                 # a2 로봇이 켜졌다
+    new = k.replan_if_needed(rid)
+    assert new and new != rid and "replanned" in r.events()
+    live = [u for u in k.state.units().values() if u.get("status") in ("starting", "loaded")]
+    assert [sorted(u["devices"]) for u in live] == [["a2", "robot1"]]   # 영상 오는 둘끼리 예산을 다시 나눔
+    assert k.pending_sources(new) == ["drone"]

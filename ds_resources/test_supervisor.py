@@ -325,6 +325,12 @@ class FakeCtl:
         self.calls.append("cleanup")
         return 0
 
+    def pending_sources(self, rid):
+        return []
+
+    def replan_if_needed(self, rid):
+        return None
+
     def submit(self, sources, models, profile, profile_path, target_fps=None):
         self.calls.append(("submit", tuple(sources), tuple(models), (profile or {}).get("profile_version")))
         rid = "req-%d" % len(self.calls)

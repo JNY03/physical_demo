@@ -72,6 +72,14 @@ def place_gpu(request, nodes, costs, out):
     reserved = {k: v[0] for k, v in ledger.items()}
     util = {k: v[1] for k, v in ledger.items()}
     fits = [n for n in gnodes if need <= _room(n, reserved[n["name"]])]
+    exclusive = False
+    if not fits and costs.get("basis", "estimate") == "estimate" and costs.get("estimate_mb") is not None:
+        # 실측이 없어 여유분(×1.2)까지는 안 들어가지만 추정치 자체는 들어간다 — GPU Executor 의 단독 측정(exclusive)과
+        # 같은 규칙으로 배치표에도 놓는다. 그 노드에 이 배치표 · 이미 도는 몫이 없을 때만 (2026-11-25 실측: 5580 > 5298)
+        est = float(costs["estimate_mb"])
+        fits = [n for n in gnodes if not reserved[n["name"]] and not util[n["name"]]
+                and est <= _room(n, reserved[n["name"]])]
+        exclusive = bool(fits)
     if not fits:
         best = max(gnodes, key=lambda n: (_room(n, reserved[n["name"]]), n["name"]))
         out["refused"].append(reason_item("gpu:%s" % "+".join(models), "gpu_mem",
@@ -81,28 +89,40 @@ def place_gpu(request, nodes, costs, out):
     node = max(fits, key=lambda n: (_room(n, reserved[n["name"]]) - util[n["name"]] * 1000, n["name"]))
     budget = max(0.0, GPU_BUDGET - util[node["name"]])
     p90 = costs["p90_ms"]
-    fps = {s: float(request.get("target_fps", {}).get(s, 10.0)) for s in srcs}
+    waiting = set(request.get("waiting") or ())
+    target = {s: float(request.get("target_fps", {}).get(s, 10.0)) for s in srcs}
     load = lambda f: sum(f[s] * p90[s] / 1000.0 for s in f)  # noqa: E731
-    degraded = []
-    if load(fps) > budget:
-        scale = budget / load(fps) if load(fps) else 0
-        # 내림 — 반올림하면 6.296 → 6.30 처럼 올라가 부하가 예산을 살짝 넘고 소스가 통째로 빠진다(2026-11-24 실측 버그)
-        fps = {s: max(FPS_FLOOR, math.floor(fps[s] * scale * 100) / 100.0) for s in fps}
-        degraded = sorted(fps)
-    while fps and load(fps) > budget + 1e-9:
-        drop = sorted(fps)[-1]
-        out["refused"].append(reason_item("gpu:%s:%s" % ("+".join(models), drop), "gpu_throughput",
-                                          "GPU 처리량 부족: fps %.1f 까지 낮춰도 p90 합이 예산 %.2f 를 넘음" % (
-                                              FPS_FLOOR, budget)))
-        fps.pop(drop)
-        degraded = [d for d in degraded if d != drop]
+    keep = list(srcs)
+    # 넘치면 빼는 순서: 입력 대기 소스 먼저(영상이 오는 소스를 지킨다), 그다음 p90 이 큰 것 — 뺀 뒤에는 남은 것끼리 다시 나눈다
+    drop_order = sorted(srcs, key=lambda s: (s not in waiting, -p90[s], s))
+    while True:
+        fps = {s: target[s] for s in keep}
+        degraded = []
+        if fps and load(fps) > budget:
+            scale = budget / load(fps)
+            # 내림 — 반올림하면 6.296 → 6.30 처럼 올라가 부하가 예산을 살짝 넘고 소스가 통째로 빠진다(2026-11-24 실측 버그)
+            fps = {s: max(FPS_FLOOR, math.floor(fps[s] * scale * 100) / 100.0) for s in fps}
+            degraded = sorted(fps)
+        if not fps or load(fps) <= budget + 1e-9:
+            break
+        drop = next(s for s in drop_order if s in keep)
+        keep.remove(drop)
+        if drop in waiting:
+            out.setdefault("waiting", []).append(reason_item(
+                "input:%s" % drop, "input_wait_unbudgeted",
+                "입력 대기 — 지금 예산으로는 미리 잡지 못함 (p90 %.0f ms), 영상이 들어오면 다시 배치" % p90[drop]))
+        else:
+            out["refused"].append(reason_item("gpu:%s:%s" % ("+".join(models), drop), "gpu_throughput",
+                                              "GPU 처리량 부족: fps %.1f 까지 낮춰도 p90 합이 예산 %.2f 를 넘음" % (
+                                                  FPS_FLOOR, budget)))
     if not fps:
         return
     ledger[node["name"]][0] += need
     ledger[node["name"]][1] += load(fps)
     out["gpu_units"].append({"unit": "gpu:%s" % "+".join(models), "node": node["name"], "models": models,
                              "sources": sorted(fps), "fps_cap": fps, "need_mb": round(need),
-                             "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load(fps), 3)})
+                             "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load(fps), 3),
+                             **({"exclusive": True} if exclusive else {})})
     for s in degraded:
         out["degraded"].append(reason_item("gpu:%s:%s" % ("+".join(models), s), "fps_lowered",
                                            "fps %.1f → %.2f (p90 %.0f ms 기준 예산)" % (

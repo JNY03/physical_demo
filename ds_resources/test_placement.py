@@ -49,12 +49,37 @@ def test_throughput_full_scales_fps_by_p90_then_refuses():
     assert u["gpu_util"] <= pl.GPU_BUDGET + 1e-3 and not out["refused"]
     assert u["fps_cap"]["pi13"] == u["fps_cap"]["a2"] < 5.0
     assert {d["item"] for d in out["degraded"]} == {"gpu:yoloe:a2", "gpu:yoloe:pi13"}
-    # 바닥 fps 로도 안 들어가는 경우 — 소스를 이름 역순으로 뺀다
-    heavy = {"river": {"need_mb": 3360, "p90_ms": {"pi13": 600.0, "a2": 700.0}}}    # 둘 1.3 > 0.85, a2 혼자 0.7
+    # 바닥 fps 로도 안 들어가는 경우 — p90 이 큰 소스부터 뺀다 (2026-11-25: 이름순이던 것을 바꿈)
+    heavy = {"river": {"need_mb": 3360, "p90_ms": {"pi13": 600.0, "a2": 700.0}}}    # 둘 1.3 > 0.85, pi13 혼자 0.6
     out = pl.plan(req(G(["river"], ["pi13", "a2"], {"pi13": 1.0, "a2": 1.0})), {"nodes": [gpu_node()], "costs": heavy},
                   "h", "wsl")
-    assert [r["item"] for r in out["refused"]] == ["gpu:river:pi13"]
-    assert out["gpu_units"][0]["sources"] == ["a2"]
+    assert [r["item"] for r in out["refused"]] == ["gpu:river:a2"]
+    assert out["gpu_units"][0]["sources"] == ["pi13"]
+
+
+def test_waiting_sources_are_dropped_before_live_ones_and_fps_rescaled():
+    # 2026-11-25 실측: Go1(robot1, 영상 옴, s 420 ms) + drone · a2(꺼짐, 크기를 몰라 xl 1300 ms) → 예전에는 셋 다 거절
+    costs = {"targeted": {"need_mb": 2000, "p90_ms": {"robot1": 420.0, "drone": 1300.0, "a2": 1300.0}}}
+    g = G(["targeted"], ["robot1", "drone", "a2"], {"robot1": 30.0, "drone": 10.0, "a2": 10.0})
+    g["waiting"] = ["drone", "a2"]
+    out = pl.plan(req(g), {"nodes": [gpu_node()], "costs": costs}, "h", "wsl")
+    u = out["gpu_units"][0]
+    assert u["sources"] == ["robot1"] and not out["refused"]
+    assert u["fps_cap"]["robot1"] == 2.02                     # 남은 것끼리 다시 나눔: 0.85 / 0.42 내림
+    assert sorted(w["item"] for w in out["waiting"]) == ["input:a2", "input:drone"]
+    assert {w["code"] for w in out["waiting"]} == {"input_wait_unbudgeted"}
+
+
+def test_estimate_that_fits_without_margin_is_placed_as_exclusive():
+    # 추정 4650 × 1.2 = 5580 > 여유 5298 이지만 추정치 자체는 들어간다 — Executor 단독 측정과 같은 규칙
+    node = gpu_node()
+    node["gpus"][0]["mem_used_mb"] = node["gpus"][0]["mem_total_mb"] - 5298 - pl.SPARE_MB
+    costs = {"targeted": {"need_mb": 5580, "estimate_mb": 4650, "basis": "estimate", "p90_ms": {"robot1": 420.0}}}
+    out = pl.plan(req(G(["targeted"], ["robot1"], {"robot1": 2.0})), {"nodes": [node], "costs": costs}, "h", "wsl")
+    assert out["gpu_units"] and out["gpu_units"][0].get("exclusive") is True
+    costs["targeted"]["basis"] = "measured"                   # 실측이면 여유분까지 들어가야 한다
+    out = pl.plan(req(G(["targeted"], ["robot1"], {"robot1": 2.0})), {"nodes": [node], "costs": costs}, "h", "wsl")
+    assert not out["gpu_units"] and out["refused"][0]["code"] == "gpu_mem"
 
 
 def test_scaling_never_rounds_over_budget():

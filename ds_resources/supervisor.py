@@ -370,7 +370,7 @@ class VisionOrch(Component):
     def alive(self):
         if self.k is None:
             return False
-        if nothing_running(self.k, self.rid):
+        if nothing_running(self.k, self.rid) and not self.k.pending_sources(self.rid):
             req = self.k.state.data["requests"].get(self.rid) or {}
             why = [x["reason"] for x in (req.get("plan") or {}).get("refused", [])]
             self._why = "돌고 있는 비전 작업이 없음" + ((" — " + " / ".join(why)) if why else "")
@@ -421,6 +421,10 @@ class VisionOrch(Component):
             return
         for e in self.k.poll():
             self.sup.log("vision %-9s %s" % (e["event"], e["reason"]))
+        new = self.k.replan_if_needed(self.rid)          # 빠졌던 입력 대기 소스에 영상이 들어옴 → 다시 배치
+        if new:
+            self.sup.log("vision 다시 배치: %s → %s" % (self.rid, new))
+            self.rid = new
 
     def exit_reason(self):
         return self._why or "돌고 있는 비전 작업이 없음"

@@ -195,7 +195,12 @@ def main(argv=None):
         while not stop["flag"]:
             for e in k.poll():
                 log("%-9s %s" % (e["event"], e["reason"]))
-            if nothing_running(rid):
+            new = k.replan_if_needed(rid)                # 빠졌던 입력 대기 소스에 영상이 들어옴 → 다시 배치
+            if new:
+                log("다시 배치: %s → %s" % (rid, new))
+                rid = new
+                continue
+            if nothing_running(rid) and not k.pending_sources(rid):
                 req = k.state.data["requests"].get(rid) or {}
                 why = [x["reason"] for x in (req.get("refused") if req.get("refused") is not None
                                               else (req.get("plan") or {}).get("refused", []))]

@@ -52,6 +52,7 @@ REASON_CODES = {
     "no_cpu_capability": "k3s 노드는 읽히지만 CPU 작업을 올릴 수 없음 (클러스터 객체 없음 등)",
     "cpu_launch_failed": "CPU 작업을 띄우지 못함",
     "input_wait": "입력 영상 대기",
+    "input_wait_unbudgeted": "입력 영상 대기 — 지금 예산으로는 미리 잡지 못함, 들어오면 다시 배치",
 }
 MODES = ("k3s", "local")
 BASES = ("live", "saved")
