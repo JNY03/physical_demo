@@ -36,6 +36,7 @@ WAIT_RES = (1920, 1080)               # 입력 대기 소스의 해상도를 모
 COMBO_STALE_S = 7 * 86400.0
 DEGRADED_RATIO = 0.8
 DEGRADED_AFTER_S = 30.0
+WARMUP_S = 30.0                       # running 뒤 이만큼은 fps 저하 판정을 하지 않는다 (2026-11-25 실측: 첫 30초 0.1~0.2 fps)
 CPU_HEARTBEAT_FRESH_S = 30.0          # cpu_telemetry:<unit> 이 이 안에 있어야 running
 CPU_REPLACE_AFTER_S = 60.0            # running 이던 CPU 작업이 이만큼 하트비트가 없으면 다시 배치
 NODE_BAD_GRACE_S = 30.0               # 노드가 Ready 아님 · stale 인 채로 이만큼 이어져야 옮긴다 — metrics 가 잠깐
@@ -70,6 +71,13 @@ def source_info(r, src, now_ms=None):
         return {"age_s": (now_ms - ts) / 1000.0, "w": w, "h": h, "fps": round(len(recent) / 10.0, 2)}
     except Exception:  # noqa: BLE001
         return None
+
+
+def _is_wsl():
+    try:
+        return "microsoft" in open("/proc/version", encoding="utf-8").read().lower()
+    except OSError:
+        return False
 
 
 def _fps_text(fps):
@@ -410,7 +418,8 @@ class Controller:
                 self._gpu_name = g[0]["name"] if g else ""
             except Exception:  # noqa: BLE001
                 self._gpu_name = ""
-        return "%s GPU%s" % (node, (" (%s)" % self._gpu_name) if self._gpu_name else "")
+        here = "이 기기 · WSL" if _is_wsl() else "이 기기"
+        return "%s GPU%s — %s" % (node, (" (%s)" % self._gpu_name) if self._gpu_name else "", here)
 
     def unbudgeted_up(self, rid):
         """예산이 모자라 배치표에서 뺀 입력 대기 소스 중 지금 영상이 들어오는 것"""
@@ -493,7 +502,8 @@ class Controller:
             if came or down:
                 self.state.update_unit(uid, sources_up=sorted((prev_up | came) - down))
             live = (prev_up | came) - down
-            low = [s for s, cap in (u.get("fps_cap") or {}).items()
+            warm = now - float(u.get("running_at") or now) < WARMUP_S     # 적재 직후 첫 장들은 느리다 — 저하로 보지 않는다
+            low = [] if warm else [s for s, cap in (u.get("fps_cap") or {}).items()
                    if s in live and (streams.get(s) or {}).get("fps") is not None and streams[s]["fps"] < DEGRADED_RATIO * cap]
             since = u.get("low_since")
             if low and since is None:

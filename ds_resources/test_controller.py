@@ -161,7 +161,10 @@ def test_degraded_after_sustained_low_fps(tmp_path):
     r.kv[key] = json.dumps({"streams": {"pi13": {"frames": 30, "fps": 5.0}}})
     k.poll(), k.poll()                                                # loaded → running
     r.kv[key] = json.dumps({"streams": {"pi13": {"frames": 10, "fps": 2.0}}})
-    assert k.poll() == []                                             # 낮아지기 시작
+    assert k.poll() == []                                             # 적재 직후(워밍업) — 낮아도 세지 않는다
+    c.t += ctl.WARMUP_S + 1
+    r.add_frames("pi13", n=100)
+    assert k.poll() == []                                             # 워밍업 뒤 낮아지기 시작
     c.t += 31
     r.add_frames("pi13", n=100)
     ev = k.poll()
