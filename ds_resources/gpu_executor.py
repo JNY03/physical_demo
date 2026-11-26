@@ -23,6 +23,13 @@ GPU 는 k3s 스케줄링 자원이 아니다. k3s 는 WSL GPU 의 실제 사용�
               칸이 늘어도 복사 목록을 고칠 일이 없다. spec 이 없는 옛 기록은 남은 칸(fps_cap · gpu_util 포함)으로 되살린다.
               exclusive 는 admit.mode 에서 다시 계산된다.
 들이기 거절  계산 근거(calc)에 이유 코드 code 를 단다 — gpu_mem · gpu_exclusive · gpu_unreadable (streams.REASON_CODES).
+우선순위    (2026-11-26, 「GPU 는 오케스트레이터가 우선순위로 판단」) 단위는 rank(placement.gpu_rank — safety 0 ·
+              mission 1 · best_effort 2, 기능 없이 온 옛 단위는 mission)를 갖는다. admit 에 rank 를 주면, 메모리가
+              모자랄 때 **더 낮은** 우선순위의 starting · loaded 단위를 비우면 들어가는지 계산해 calc["evict"] 로 제안한다
+              (낮은 우선순위 → 비우면 풀리는 메모리가 큰 것 → unit_id 순, 들어갈 만큼만 — 모자라면 아무것도 제안하지 않는다).
+              같거나 높은 우선순위는 비우지 않는다. admit 은 읽기만 한다 — 실제로 멈추는 것은 preempt() 다.
+밀려남      preempt() 는 단위를 멈추고(status preempted) 미룬 목록(state 의 gpu_deferred)에 넣는다 — 메모리가 비면
+              컨트롤러가 우선순위순으로 다시 들인다. 밀려난 단위는 READMIT_HOLD_S 동안 다시 들이지 않는다(되풀이 방지).
 """
 import json
 import os
@@ -33,7 +40,7 @@ import time
 import uuid
 from pathlib import Path
 
-from ds_resources import probe
+from ds_resources import placement, probe
 from ds_resources.state import StateFile
 
 REPO = Path(__file__).resolve().parent.parent
@@ -44,10 +51,21 @@ STOP_WAITS = (6.0, 2.0, 1.0)  # 멈춤: SIGINT 뒤 6초 · SIGTERM 뒤 2초 · S
                               # (기다리지 않으면 바로 다음 요청이 아직 반납 전 메모리를 보고 거절됐다, 2026-11-24 런처 E2E)
 MAX_RESTARTS = 2
 TELEMETRY_PREFIX = "vision_telemetry:"
+#: 밀려난(preempted) 단위를 다시 들이기 전에 기다리는 초 — 높은 우선순위 일이 잠깐 비운 틈에 다시 들어왔다가
+#: 곧바로 또 밀리는 되풀이(flapping)를 막는다. 모델 적재가 수십 초 걸리므로 그보다 길게 둔다
+READMIT_HOLD_S = 60.0
+#: 미룬 단위를 다시 들여 볼 간격 — GPU 단위가 멈추거나 끝난 poll 에서는 바로, 그 밖에는 이 간격마다
+#: (다른 프로세스가 GPU 를 놓은 것은 이벤트가 없으니 주기적으로 본다)
+DEFERRED_RETRY_S = 10.0
 #: 단위 기록 중 실행 중에 생기는 칸 — spec 이 없는 옛 기록을 되살릴 때 이것을 뺀 나머지를 실행 조건으로 본다
 RUNTIME_KEYS = ("unit_id", "kind", "pid", "status", "reserved_mb", "admit", "exclusive", "started_at", "restarts", "log",
                 "loaded_at", "ended_at", "reason", "running_emitted", "running_at", "sources_up", "low_since",
-                "degraded_emitted", "spec")
+                "degraded_emitted", "spec", "preempted_at", "preempted_by", "resumed_from")
+
+
+def unit_rank(u):
+    """단위의 우선순위 (작을수록 높다). rank · criticality 칸이 없는 옛 단위는 mission"""
+    return placement.gpu_rank(u or {})
 
 
 def _catalog():
@@ -114,27 +132,107 @@ class GpuExecutor:
         return {k: u for k, u in self.state.units().items()
                 if u.get("kind") == "gpu" and u.get("status") in ("starting", "loaded")}
 
-    def admit(self, need_mb, basis="estimate", estimate=None):
-        """(들일 수 있나, 이유, 계산 근거). 계산 근거의 mode: normal | exclusive. 지금 nvidia-smi 를 읽는다."""
+    def admit(self, need_mb, basis="estimate", estimate=None, rank=None):
+        """(들일 수 있나, 이유, 계산 근거). 계산 근거의 mode: normal | exclusive. 지금 nvidia-smi 를 읽는다.
+
+        rank 를 주면(우선순위로 판단할 때) 거절인 경우 **더 낮은** 우선순위 단위를 비우면 들어가는지 계산해
+        calc 에 evict(비울 unit_id 목록) · evict_mode · evict_mb 를 단다. 읽기만 한다 — 멈추지 않는다."""
         free, err = self.live_free_mb()
         if free is None:
             return False, "GPU 상태를 지금 확인할 수 없어 들이지 않음 (%s)" % err, {"code": "gpu_unreadable"}
         active = self.active_units()
+        est = need_mb / MARGIN if estimate is None else float(estimate)
         if any(u.get("exclusive") for u in active.values()):
-            return False, "단독 측정 실행 중 — 실측이 끝날 때까지 다른 GPU 작업을 들이지 않음", {"code": "gpu_exclusive"}
+            calc = {"code": "gpu_exclusive"}
+            if rank is not None:
+                self._propose(calc, active, free, self.pending_mb(), need_mb, est, basis, rank)
+            return False, "단독 측정 실행 중 — 실측이 끝날 때까지 다른 GPU 작업을 들이지 않음", calc
         pend = self.pending_mb()
         room = free - pend - SPARE_MB
         calc = {"free_mb": round(free), "pending_mb": round(pend), "spare_mb": SPARE_MB,
                 "room_mb": round(room), "need_mb": round(need_mb), "basis": basis, "mode": "normal"}
         if need_mb <= room:
             return True, "", calc
-        est = need_mb / MARGIN if estimate is None else float(estimate)
         if basis == "estimate" and not active and est <= free - SPARE_MB:
             calc["mode"] = "exclusive"
             return True, "실측이 없어 단독 측정 실행으로 들임 (추정 %d MB, 여유 %d MB)" % (est, free), calc
         calc["code"] = "gpu_mem"
+        if rank is not None:
+            self._propose(calc, active, free, pend, need_mb, est, basis, rank)
         return False, "GPU 메모리 부족: 필요 %d MB > 여유 %d MB (지금 여유 %d − 적재 중 예약 %d − 남김 %d)" % (
             need_mb, room, free, pend, SPARE_MB), calc
+
+    @staticmethod
+    def freeable_mb(u):
+        """그 단위를 멈추면 풀린다고 볼 메모리 — 적재 중(starting)은 예약 그대로(여유 계산에서 빼던 몫),
+        적재 끝(loaded)은 예약 ÷ MARGIN(이미 기기 사용량에 든 실제 몫 — 여유분은 빼고 보수적으로)"""
+        mb = float(u.get("reserved_mb") or 0)
+        return mb if u.get("status") == "starting" else mb / MARGIN
+
+    def _propose(self, calc, active, free, pend, need_mb, est, basis, rank):
+        """더 낮은 우선순위 단위를 비우면 들어가는가 — 들어가면 calc 에 evict 를 단다 (읽기만).
+        고르는 순서: 낮은 우선순위 → 풀리는 메모리가 큰 것 → unit_id (되풀이 가능하게). 들어갈 만큼만 고르고,
+        모두 비워도 안 들어가면 아무것도 제안하지 않는다(헛되이 멈추지 않는다)."""
+        victims = sorted((k for k, u in active.items() if unit_rank(u) > rank),
+                         key=lambda k: (-unit_rank(active[k]), -self.freeable_mb(active[k]), k))
+        if not victims:
+            return
+        f, p, chosen = float(free), float(pend), []
+        for uid in victims:
+            u = active[uid]
+            chosen.append(uid)
+            if u.get("status") == "starting":
+                p -= float(u.get("reserved_mb") or 0)
+            else:
+                f += self.freeable_mb(u)
+            rest = [k for k in active if k not in chosen]
+            if any(active[k].get("exclusive") for k in rest):
+                continue                                    # 남는 단독 측정이 있으면 아직 못 들인다
+            if need_mb <= f - p - SPARE_MB:
+                calc.update(evict=list(chosen), evict_mode="normal", evict_mb=round(f - free + pend - p))
+                return
+        if basis == "estimate" and len(chosen) == len(active) and est <= f - SPARE_MB:
+            calc.update(evict=list(chosen), evict_mode="exclusive", evict_mb=round(f - free + pend - p))
+
+    # ------------------------------------------------------------ 우선순위 — 밀어내기 · 미루기
+    def preempt(self, uids, reason, by=None):
+        """단위들을 멈추고(status preempted) 미룬 목록에 넣는다 — 메모리가 비면 다시 들인다(READMIT_HOLD_S 뒤).
+        멈춘 단위 기록들을 돌려준다(멈추기 전 모습 — request_id · execution_id 로 이벤트를 쓴다)."""
+        now = self.clock()
+        out = []
+        for uid in uids:
+            u = self.state.units().get(uid)
+            if not u or u.get("kind") != "gpu" or u.get("status") not in ("starting", "loaded"):
+                continue
+            self.stop(uid, reason, status="preempted")
+            self.state.update_unit(uid, preempted_at=now, preempted_by=by)
+            self.defer(uid, {"unit_id": uid, "unit": "gpu:%s" % "+".join(u.get("models") or []),
+                             "spec": self.relaunch_spec(u), "need_mb": float(u.get("reserved_mb") or 0),
+                             "basis": (u.get("admit") or {}).get("basis") or "estimate", "estimate_mb": None,
+                             "rank": unit_rank(u), "trigger": u.get("trigger"),
+                             "request_id": u.get("request_id"), "execution_id": u.get("execution_id"),
+                             "since": now, "hold_until": now + READMIT_HOLD_S, "reason": reason,
+                             "code": "gpu_preempted"})
+            out.append(u)
+        return out
+
+    def deferred(self):
+        """미룬 단위들 {열쇠: 항목} — 항목: unit_id · unit · spec · need_mb · basis · estimate_mb · rank · trigger ·
+        request_id · execution_id · since · hold_until · reason · code (gpu_preempted | gpu_deferred)"""
+        with self.state.lock:
+            if not self.state.writer:
+                self.state.load()
+            return json.loads(json.dumps(self.state.data.get("gpu_deferred") or {}))
+
+    def defer(self, key, entry):
+        with self.state.lock:
+            self.state.data.setdefault("gpu_deferred", {})[key] = json.loads(json.dumps(entry))
+            self.state._save()
+
+    def undefer(self, key):
+        with self.state.lock:
+            if (self.state.data.get("gpu_deferred") or {}).pop(key, None) is not None:
+                self.state._save()
 
     # ------------------------------------------------------------ 띄우기
     def command(self, unit):
