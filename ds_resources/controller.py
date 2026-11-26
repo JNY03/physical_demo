@@ -33,6 +33,7 @@ from ds_resources import memory as mm
 from ds_resources import functions as fnc
 from ds_resources import placement, probe, settings
 from ds_resources import slots as slt
+from ds_resources import workgraph as wg
 from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record, reason_item
 
 REPO = Path(__file__).resolve().parent.parent
@@ -195,6 +196,35 @@ class Controller:
                      else set(functions))
         picks = slt.check_picks(self.reg, contract, (profile or {}).get("functions"))
         return slt.effective(self.reg, contract, picks, names)
+
+    def function_params(self, functions=None, sources=None, profile=None):
+        """프로필 최상위 function_params → 기본으로 채워 검사한 값 {기능: {이름: 값}} (틀리면 ValueError)"""
+        return wg.check_params(self.function_contract(), (profile or {}).get("function_params"),
+                               functions, sources)
+
+    def work_plan(self, functions, sources, profile=None, fps=None, plan=None):
+        """작업 그래프를 계획 칸으로 — {work, work_warnings, work_edges, work_inputs, work_reid, work_gpu, function_params}"""
+        contract = self.function_contract()
+        srcs = None if isinstance(functions, dict) else sorted(sources or ())
+        params = self.function_params(functions, srcs, profile)
+        picks = slt.check_picks(self.reg, contract, (profile or {}).get("functions"))
+        sel = wg.apply_model_params(contract, self.slot_selection(functions, profile), picks, params)
+        active = None
+        names = ({f for v in functions.values() for f in (v or ())} if isinstance(functions, dict) else set(functions))
+        if "targeted_detect" in names:
+            # 지정 물체 탐지가 실제로 적재할 근거 모델 (대상 · 거리 설정에 따라 depth · ovd 가 갈린다)
+            try:
+                _mb, need = ge.estimate_mb(["targeted"], profile, self.cfg)
+                active = {"targeted_detect": set(need)}
+            except Exception as e:  # noqa: BLE001 — 못 풀면 슬롯을 모두 적재로 본다
+                self.log("지정 물체 탐지 근거 모델을 풀지 못함 (%s) — 슬롯 기본값으로 본다" % e)
+        units = {}
+        for u in (plan or {}).get("gpu_units") or []:
+            for s in u["sources"]:
+                units[(s, "server", None)] = u["unit"]
+        out = wg.build(self.reg, contract, functions, srcs, sel, params, fps or {}, active, units)
+        out["function_params"] = params
+        return out
 
     def local_caps(self):
         """이 기기의 특성 · 온도 (배치가 보는 칸). 특성은 잘 안 바뀌어 한 번만 읽고, 온도는 THERMAL_TTL_S 마다.
@@ -401,6 +431,12 @@ class Controller:
             self.log("역할 슬롯을 구하지 못함: %s" % e)
             fslots = {}
         extra = {"function_slots": fslots}
+        # 기능 매개변수 · 결과물 (work/1) — 런처가 재식별 범위 · 소스 묶음 · 추적 입력을 고르게 한다
+        try:
+            extra["function_params"] = wg.params_schema(contract, functions, sources)
+            extra["artifacts"] = wg.artifacts(contract)
+        except Exception as e:  # noqa: BLE001
+            self.log("기능 매개변수를 구하지 못함: %s" % e)
         try:
             sel = self.slot_selection(functions, profile)
             extra["slot_selection"] = sel
@@ -532,6 +568,9 @@ class Controller:
                 plan["slots"] = {}
                 self.log("역할 슬롯 선택이 틀림 — 계획에 싣지 않음: %s" % e)
             self._slot_pick = plan["slots"]
+            # 작업 그래프 (work/1) — 같은 소스 · 같은 모델 · 같은 입력 크기의 일은 한 번만, 쓰는 기능들을 묶는다.
+            # 칸 추가만 한다(work · work_warnings · …). 틀린 function_params 는 ValueError (부르는 쪽이 알린다)
+            plan.update(self.work_plan(functions, sorted(infos), profile, fps, plan))
         placed = {s for u in plan["gpu_units"] for s in u["sources"]}
         plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상 없음. 들어오면 바로 처리")
                            for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])
@@ -598,6 +637,9 @@ class Controller:
                     "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
                     **({"limit_mode": u["limit_mode"]} if u.get("limit_mode") else {}),
                     **{k: u[k] for k in ("rank", "criticality", "trigger") if u.get(k) is not None},
+                    # 기능 매개변수(추적 입력 · 재식별 범위)는 프로필 파일에도 있지만 cli --function-params 로만 준 것도 간다
+                    **({"function_params": (profile or {})["function_params"]}
+                       if (profile or {}).get("function_params") else {}),
                     "execution_id": xid}
             okk, why2, calc = self.admit_by_priority(u["unit"], spec, u["need_mb"], c["basis"], c["estimate_mb"], rid)
             if not okk:

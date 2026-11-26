@@ -367,6 +367,7 @@ functions:
   object_detect:
     options: [yoloe]                    # 옛 칸 (런처 function_options) — 슬롯 model 의 명시 선택지가 된다
     note: 객체 탐지 — 기기에서 int8 320px 로 거르고 서버 고성능 모델이 확인한다
+    produces: [detections]
     pattern: cascade
     criticality: mission
     trigger: on_activity
@@ -405,6 +406,7 @@ functions:
   zeroshot_detect:
     options: [yoloe]
     note: Zero-shot 객체 탐지 — 기기는 사전 등록 프롬프트 임베딩만, 서버가 동적 프롬프트로 정밀하게
+    produces: [detections]
     pattern: cascade
     criticality: mission
     trigger: on_request
@@ -443,6 +445,7 @@ functions:
   targeted_detect:
     options: [targeted]                 # 도메인 전용 기능 — 모델은 근거(cues)마다 고른다(yoloe_text · yoloe_free · clip · depth …)
     note: 지정 물체 탐지 — 정한 대상을 근거(이름 · 글 설명 · 기준 사진 · 모양 · 재질 · 거리)로 판정한다
+    produces: [target_detections]       # 거리 근거의 depth 는 서버 depth 슬롯이 낸다 — 작업 그래프가 depth_estimate 와 같은 모델이면 한 번만 돌린다
     pattern: cascade
     criticality: mission
     trigger: on_request
@@ -477,6 +480,7 @@ functions:
   river_detect:
     options: [river]                    # 도메인 전용 기능 — 모델은 cue_models(yoloe_text · yoloe_free · clip · depth)
     note: 하천 부유물 탐지 — 물에 떠내려가는 물체를 학습 없이 찾는다
+    produces: [target_detections]
     pattern: cascade
     criticality: mission
     trigger: on_request
@@ -511,6 +515,7 @@ functions:
   segmentation:
     options: [yoloe]
     note: Segmentation — 기기 경량 분할로 거르고 서버 Foundation 모델이 맡는다. 기기 단계 실행체는 ds-device-runner (vision/device_stage.py)
+    produces: [detections, masks]
     pattern: cascade
     criticality: best_effort
     trigger: on_request
@@ -547,6 +552,7 @@ functions:
   depth_estimate:
     options: [unidepth, moge2_aerial]
     note: Depth Estimation — 기기는 상대 깊이로 근거리만 보고, 서버가 정밀 거리 · 다중 시점을 맡는다
+    produces: [depth]
     pattern: cascade
     criticality: mission
     trigger: on_activity
@@ -584,6 +590,8 @@ functions:
 
   single_cam_track:
     note: 단일 카메라 Tracking — 그 카메라 노드에서 돈다. 궤적은 노드를 옮기면 잃는다(sticky). 실행체 없음 — 계약만
+    produces: [tracks]                  # 서버에서 실제로 도는 물체 추적은 object_track (이것은 기기 상주판 계약)
+    consumes: [detections]
     pattern: device_only
     criticality: mission
     trigger: on_activity
@@ -615,8 +623,58 @@ functions:
         command: null
         note: 보조 — 끊긴 궤적 이어 붙이기
 
+  object_track:
+    note: >-
+      물체 추적 — 고른 탐지 기능의 검출에 번호(track_id)와 궤적을 붙인다. 서버 비전 프로세스 안에서 그 탐지 결과를
+      그대로 받아 돈다(탐지를 다시 돌리지 않는다). 결과는 Redis vision_stream:<소스>:track (2026-11-27)
+    pattern: cascade
+    criticality: mission
+    trigger: on_activity
+    produces: [tracks]
+    consumes: [detections]               # target_detections 도 받는다 (지정 물체 · 하천 탐지의 판정 결과)
+    params:
+      # 그 소스에 함께 고른 탐지 기능 중 하나. 없으면 우선순위가 가장 높은 것(중요도 → 이름순)
+      input: {kind: function, artifact: detections, label: 입력 탐지 기능, label_en: input detector}
+      tracker: {kind: model, slot: tracker, label: 추적기, label_en: tracker}
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 0.5}
+        deadline_ms: 200
+        frame_kb: 1
+        egress_kb: 1
+        fps: 5
+        proc_ms: 10
+        state: sticky
+        cpu_m: 300
+        mem_mb: 256
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 기기 탐지 결과에 번호만 붙인다 — 실행체 없음(계약만). 트래커는 cpu_arm64 에도 돈다
+        slots:
+          tracker: {label: 기기 추적기, label_en: on-device tracker, needs: [track], optional: true}
+      server:
+        deadline_ms: 200
+        egress_kb: 1
+        state: sticky
+        cpu_m: 200
+        mem_mb: 256
+        roles: [gpu]
+        image: null
+        command: null
+        note: 비전 프로세스(GPU Executor 가 띄운 것) 안에서 입력 탐지 결과를 받아 돈다 — 따로 띄우지 않는다
+        slots:
+          tracker: {label: 추적기, label_en: tracker, needs: [track], default: botsort}
+
   multi_cam_track:
     note: 다중 카메라 Tracking — 기기가 특징을 뽑고 서버가 카메라 사이 객체를 잇는다. 실행체 없음 — 계약만
+    # = 물체 추적(object_track) + 소스 묶음 재식별 (reid scope: group). 서버 갤러리는 vision/reid_gallery.py
+    produces: [identities]
+    consumes: [tracks]
+    params:
+      group_sources: {kind: sources, min: 2, label: 이을 소스 묶음, label_en: source group}
     pattern: split
     criticality: mission
     trigger: on_activity
@@ -647,10 +705,21 @@ functions:
         image: null
         command: null
         note: 객체 연결 표를 들고 있다 — 옮기면 잃는다
+        slots:
+          embedder: {label: 임베딩 모델, label_en: embedder, needs: [embed], optional: true, auto: false,
+                     choices: [mobileclip_s0_cpu], default: mobileclip_s0_cpu}
 
   reid:
     options: [targeted]
     note: ReID — 기기가 경량 임베딩을 보내고 서버가 유사도 · 증거를 융합한다
+    produces: [identities]
+    consumes: [detections]
+    params:
+      # 소스 안(source): 그 소스 트래커 옆 갤러리 — 기본 매칭은 그대로 features.reid (SuperPoint+LightGlue)
+      # 소스 묶음(group): 소스마다 임베딩 → 서버 갤러리 하나(vision/reid_gallery.py)가 묶음 전체에 전역 번호
+      scope: {kind: choice, choices: [source, group], default: source, labels: {source: 소스 안, group: 소스 묶음},
+              labels_en: {source: within source, group: source group}, label: 재식별 범위, label_en: re-id scope}
+      group_sources: {kind: sources, min: 2, when: {scope: group}, label: 소스 묶음, label_en: source group}
     pattern: split
     criticality: mission
     trigger: on_request
@@ -682,6 +751,10 @@ functions:
         image: null
         command: null
         note: models.reid (LightGlue + SuperPoint · CLIP) 가 맡는다
+        slots:
+          # 소스 묶음(scope: group)일 때 상자마다 임베딩을 뽑는 모델 — 기기 embedder 를 고르지 않았으면 서버가 뽑는다
+          embedder: {label: 임베딩 모델, label_en: embedder, needs: [embed], optional: true, auto: false,
+                     choices: [mobileclip_s0_cpu], default: mobileclip_s0_cpu}
 
   anomaly_detect:
     options: [yoloe]
@@ -748,6 +821,7 @@ functions:
 
   vlm:
     note: VLM — 상황 분석은 서버 전용. 기기 경량 판은 선택이다. 실행체 없음 — 계약만
+    produces: [scene_text]
     pattern: server_only
     criticality: best_effort
     trigger: on_request
@@ -1492,6 +1566,19 @@ models:
     config: {reset_gap_s: 2.0, on_untracked: keep, keep_boxes: detection}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics)
     p90_ms: {s: 8, m: 12, l: 22, xl: 30}
+  bytetrack:
+    note: >-
+      ByteTrack 트래커 (ultralytics 내장, 가중치 없음) — 물체 추적(object_track) 트래커 슬롯 선택지. 어댑터는 botsort 와 같고
+      (vision/runners/bytetrack.py) GMC 가 없다 — 고정 카메라 · CPU 가 빠듯한 기기용. CPU 실측 p90 1.1 ms (검출 7개/장)
+    files: []
+    device: cpu
+    packages: [ultralytics, lap]
+    provides: [track]
+    runs_on: [gpu, cpu_x86, cpu_arm64]
+    runner: bytetrack:Runner
+    config: {reset_gap_s: 2.0, on_untracked: keep, keep_boxes: detection}
+    license: AGPL-3.0 (Ultralytics)
+    p90_ms: {s: 2, m: 2, l: 2, xl: 2}
   yolo26n_reid:
     note: YOLO26n ReID 외모 임베딩 (512차원 ONNX) — botsort with_reid 일 때만 쓴다. 이름만 주면 ultralytics 가 받으러 나가므로 로컬 경로로 준다. BoT-SORT 에 켜면 장당(검출 7개) p90 이 CPU 에서 ~100 ms 늘어난다. onnxruntime CUDA 로 돌려도 빠르지 않았다(검출 수마다 묶음 크기가 바뀌어 p90 110–206 ms) — CPU 에 둔다
     files: [models/yolo26n-reid.onnx]

@@ -61,14 +61,26 @@ VERDICTS = ("ok", "degraded", "rejected")
 PRIORITY_CLASSES = {"safety": "ds-safety-high", "mission": "ds-mission", "best_effort": "ds-vision-low"}
 
 #: 기능 칸 — 칸 추가만 한다. 기존 칸의 이름 · 뜻은 바꾸지 않는다
-FUNCTION_KEYS = ("pattern", "criticality", "trigger", "note", "forbid", "stages", "options")
+FUNCTION_KEYS = ("pattern", "criticality", "trigger", "note", "forbid", "stages", "options",
+                 "produces", "consumes", "params")
 FUNCTION_REQUIRED = ("pattern", "criticality", "trigger", "note", "stages")
 NEEDS_KEYS = ("arch", "sensors", "accel", "cores")
 #: 자원 칸 — cpu_tasks 와 같은 이름 · 같은 뜻
 RESOURCE_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms", "roles", "placement",
                  "image", "command", "local_command", "env")
 STAGE_KEYS = ("pin", "needs", "deadline_ms", "egress_kb", "state", "optional", "note",
-              "per_source", "slots") + RESOURCE_KEYS
+              "per_source", "slots", "produces", "consumes") + RESOURCE_KEYS
+#: 기능 사이에 오가는 결과물 (work/1, 2026-11-27) — 기능 · 단계가 produces · consumes 로 적는다.
+#: 작업 그래프(ds_resources/workgraph.py)가 이것으로 「누가 누구의 결과를 쓰는가」를 잇고 같은 일을 한 번만 돌린다
+ARTIFACTS = ("detections", "target_detections", "tracks", "identities", "depth", "embeddings", "masks", "scene_text")
+#: 기능 매개변수 (work/1) — functions.<기능>.params.<이름>: {kind, ...}. 프로필 최상위 function_params 로 고른다
+#:   choice   {choices, default, labels: {값: 한글}, labels_en}   정해진 값 중 하나 (reid scope)
+#:   function {artifact}       그 소스에 함께 고른 기능 중 그 결과물을 내는 것 하나 (object_track input)
+#:   sources  {min, when: {매개변수: 값}}   사람이 고른 소스 묶음 (reid group_sources — 자동 묶음 없음)
+#:   model    {slot}           그 단계 슬롯의 모델 — 슬롯에서 고른 것이 이긴다 (object_track tracker)
+PARAM_KINDS = ("choice", "function", "sources", "model")
+PARAM_KEYS = ("kind", "label", "label_en", "choices", "default", "labels", "labels_en", "artifact", "min", "when",
+              "slot")
 #: 역할 슬롯 칸 (slots/1) — 칸 추가만 한다
 SLOT_KEYS = ("label", "label_en", "needs", "optional", "multi", "size", "default", "choices", "auto")
 SLOT_SIZES = ("small", "any")
@@ -224,6 +236,48 @@ def _cue_slots(stage, cue_choices):
                       "auto": False, "origin": "cue_model_choices"})
 
 
+# ---------------------------------------------------------------- 결과물 · 매개변수 (work/1)
+def _artifacts(value, what):
+    return _subset(value, ARTIFACTS, what)
+
+
+def _params(body, what):
+    """params.<이름> 선언 → {이름: 고르게 편 사전}. 적은 순서를 지킨다"""
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise ValueError("%s 는 이름 → 선언 사전이어야 한다" % what)
+    out = {}
+    for name, p in body.items():
+        w = "%s.%s" % (what, name)
+        if not NAME_RE.match(str(name)):
+            raise ValueError("%s — 매개변수 이름은 영어 소문자 snake_case" % w)
+        p = _dict(p, PARAM_KEYS, w)
+        kind = _one(p.get("kind"), PARAM_KINDS, w + ".kind")
+        q = {"name": str(name), "kind": kind, "label": str(p.get("label") or name),
+             "label_en": str(p.get("label_en") or p.get("label") or name)}
+        if kind == "choice":
+            ch = [str(x) for x in _list(p.get("choices"), w + ".choices")]
+            if not ch:
+                raise ValueError("%s.choices 가 비었다" % w)
+            d = str(p.get("default", ch[0]))
+            if d not in ch:
+                raise ValueError("%s.default %r 가 choices 에 없다 (%s)" % (w, d, ", ".join(ch)))
+            q.update(choices=ch, default=d, labels={str(k): str(v) for k, v in (p.get("labels") or {}).items()},
+                     labels_en={str(k): str(v) for k, v in (p.get("labels_en") or {}).items()})
+        elif kind == "function":
+            q["artifact"] = _one(p.get("artifact"), ARTIFACTS, w + ".artifact")
+        elif kind == "sources":
+            q["min"] = int(_num(p.get("min", 1), w + ".min", 1))
+            q["when"] = {str(k): str(v) for k, v in (p.get("when") or {}).items()}
+        elif kind == "model":
+            if not p.get("slot"):
+                raise ValueError("%s.slot 이 없다 (그 매개변수가 대신하는 슬롯 역할)" % w)
+            q["slot"] = str(p["slot"])
+        out[str(name)] = q
+    return out
+
+
 # ---------------------------------------------------------------- 읽기
 def _stage(fn, side, body, what):
     body = _dict({} if body is None else body, STAGE_KEYS, what)
@@ -245,7 +299,9 @@ def _stage(fn, side, body, what):
           "command": _cmd(body.get("command"), what + ".command"),
           "local_command": _cmd(body.get("local_command"), what + ".local_command"),
           "env": _env(body.get("env"), what + ".env"),
-          "slots": _slots(body.get("slots"), what + ".slots")}
+          "slots": _slots(body.get("slots"), what + ".slots"),
+          "produces": _artifacts(body.get("produces"), what + ".produces"),
+          "consumes": _artifacts(body.get("consumes"), what + ".consumes")}
     for k in NUMERIC_KEYS:
         st[k] = _opt_num(body, k, what)
     if st["pin"] not in ("none", side):
@@ -302,6 +358,9 @@ def _function(name, body, cue_choices=None):
           # (추적처럼 트래커가 ultralytics 안에 있는 것). 이름은 레지스트리 options 의 열쇠다
           "options": [str(x) for x in (body.get("options") or [])],
           "legacy": False,
+          "produces": _artifacts(body.get("produces"), what + ".produces"),
+          "consumes": _artifacts(body.get("consumes"), what + ".consumes"),
+          "params": _params(body.get("params"), what + ".params"),
           "stages": {}}
     fn["priority_class"] = PRIORITY_CLASSES[fn["criticality"]]
     stages = _dict(body["stages"], SIDES, what + ".stages")
@@ -337,6 +396,7 @@ def _from_cpu_task(name, body):
     stage["unit"] = name
     fn = {"function": name, "pattern": "device_only", "criticality": "best_effort", "trigger": "on_request",
           "note": stage["note"] or ("%s — 옛 cpu_tasks 작업" % name), "forbid": [], "options": [], "legacy": True,
+          "produces": [], "consumes": [], "params": {},
           "priority_class": PRIORITY_CLASSES["best_effort"], "stages": {"device": stage}}
     _rules(what, fn)
     stage.update({"pattern": fn["pattern"], "criticality": fn["criticality"], "trigger": fn["trigger"],

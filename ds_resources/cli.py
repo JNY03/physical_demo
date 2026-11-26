@@ -193,6 +193,9 @@ def main(argv=None):
     ap.add_argument("--functions", nargs="*", default=[],
                     help="기능 이름들 (vision/model_registry.yaml functions). 단계로 펼쳐 기기와 서버에 나눠 놓는다. "
                          "소스마다 다르게 주려면 pi12=object_detect,single_cam_track 처럼 적는다")
+    ap.add_argument("--function-params", metavar="JSON",
+                    help='기능 매개변수 (프로필 function_params 와 같은 칸 — 여기 준 것이 이긴다). 예: '
+                         '\'{"reid": {"scope": "group", "group_sources": ["pi12", "a2"]}, "object_track": {"input": "targeted_detect"}}\'')
     ap.add_argument("--assign", nargs="*", default=[], metavar="기기=모델[,모델]",
                     help="기기별 모델 매칭 (적지 않은 기기는 --models 전부, 빈 값은 비전 없음)")
     ap.add_argument("--pin", nargs="*", default=[], metavar="작업=노드",
@@ -267,10 +270,30 @@ def main(argv=None):
     assign = kv_pairs(a.assign, "--assign") or None
     manual = {k: (v[0] if v else "none") for k, v in kv_pairs(a.pin, "--pin").items()} or None
 
+    fparams = None
+    if a.function_params:
+        try:
+            fparams = json.loads(a.function_params)
+        except ValueError as e:
+            raise SystemExit("--function-params 는 JSON 이어야 합니다: %s" % e)
+        if not isinstance(fparams, dict):
+            raise SystemExit("--function-params 는 {기능: {이름: 값}} 사전이어야 합니다")
+
+    def with_params(prof):
+        """프로필 function_params 위에 --function-params 를 덮는다 (기능마다)"""
+        if not fparams:
+            return prof
+        prof = dict(prof or {})
+        merged = {k: dict(v or {}) for k, v in (prof.get("function_params") or {}).items()}
+        for fn, vals in fparams.items():
+            merged.setdefault(fn, {}).update(vals or {})
+        prof["function_params"] = merged
+        return prof
+
     if a.cmd == "places":
         k = build(a, writer=False)
         pl = k.places(limits, functions=funcs or None, sources=a.sources, assign=assign, manual=manual,
-                      profile=load_profile(a.profile))
+                      profile=with_params(load_profile(a.profile)))
         if a.json:
             print(json.dumps(pl, ensure_ascii=False, indent=1))
         else:
@@ -285,7 +308,7 @@ def main(argv=None):
                       ", 한도 면제" if u["must_device"] else ""))
         return 0
 
-    profile = load_profile(a.profile)
+    profile = with_params(load_profile(a.profile))
     if a.cmd == "plan":
         k = build(a, writer=False)
         p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks, functions=funcs,

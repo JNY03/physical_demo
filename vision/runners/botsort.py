@@ -56,23 +56,28 @@ class Runner:
     name = "botsort"
     kind = "track"
     provides = ("track",)
+    #: ultralytics 의 트래커 설정 파일 · 모듈 · 클래스 — bytetrack.py 가 이 셋만 바꿔 같은 어댑터를 쓴다 (2026-11-27)
+    TRACKER_YAML = "botsort.yaml"
+    TRACKER_MODULE = "ultralytics.trackers.bot_sort"
+    TRACKER_CLASS = "BOTSORT"
 
     def __init__(self, cfg: dict, device: str = "cpu"):
+        import importlib
         import yaml
         import ultralytics
-        from ultralytics.trackers.bot_sort import BOTSORT
         from ultralytics.utils import IterableSimpleNamespace
+        BOTSORT = getattr(importlib.import_module(self.TRACKER_MODULE), self.TRACKER_CLASS)
         try:
             import lap  # noqa: F401
         except ImportError as exc:
             # 없으면 ultralytics 가 런타임에 받으려 한다 — 폐쇄망에서 조용히 나가지 않게 먼저 거절
             raise ImportError("lap 이 없다 (pip install 'lap>=0.5.12')") from exc
         cfg = dict(cfg or {})
-        spec = Path(ultralytics.__file__).parent / "cfg" / "trackers" / "botsort.yaml"
+        spec = Path(ultralytics.__file__).parent / "cfg" / "trackers" / self.TRACKER_YAML
         args = yaml.safe_load(spec.read_text(encoding="utf-8"))
         unknown = sorted(k for k in cfg if k not in args and k not in OWN_KEYS)
         if unknown:
-            raise ValueError("botsort 가 모르는 값: %s (받는 것: %s)"
+            raise ValueError(self.name + " 가 모르는 값: %s (받는 것: %s)"
                              % (", ".join(unknown), ", ".join(sorted(set(args) | set(OWN_KEYS)))))
         args.update({k: v for k, v in cfg.items() if k in args})
         if args.get("with_reid"):
@@ -132,7 +137,7 @@ class Runner:
         t0 = time.perf_counter()
         out = self.update(list(dets or []), ts, bgr, stream=stream)
         ms = (time.perf_counter() - t0) * 1000
-        return {"track_ms": round(ms, 2), "tracker": "botsort", "gmc": self.args.get("gmc_method"),
+        return {"track_ms": round(ms, 2), "tracker": self.name, "gmc": self.args.get("gmc_method"),
                 "reid": bool(self.args.get("with_reid")), "stream": stream}, out
 
     def reset(self, stream=None):
