@@ -6,6 +6,7 @@
 # 새 모델의 패키지는 여기에 더한다(CPU 로 되는 것이면 vision-cpu.txt 에도).
 --extra-index-url https://download.pytorch.org/whl/cu126
 accelerate==1.15.0
+addict==2.4.0             # Depth Anything 3 (external/Depth-Anything-3) 출력 사전 — 2026-11-26
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -65,6 +66,7 @@ nvidia-nccl-cu12==2.29.3
 nvidia-nvjitlink-cu12==12.9.86
 nvidia-nvshmem-cu12==3.4.5
 nvidia-nvtx-cu12==12.6.77
+omegaconf==2.4.0          # Depth Anything 3 설정 → 모델 생성 (순수 파이썬, PyYAML 만). 저장소 pyproject 는 깔지 않는다(numpy<2 · xformers)
 onnxruntime-gpu==1.24.1   # river 단서 검증(CLIP) GPU — torch cu12.6 과 맞는 CUDA 12 판. 1.25 이후는 CUDA 13 을 요구한다
 opencv-python==5.0.0.93
 opentelemetry-api==1.45.0

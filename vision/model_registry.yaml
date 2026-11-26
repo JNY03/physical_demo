@@ -160,8 +160,10 @@ cues:
 #: 여기에 없는 근거 모델(clip 등)은 고정이다 — 근거 표에 글로만 보인다
 cue_model_choices:
   ovd:   {choices: [yolo_world, grounding_dino], multi: true}
-  depth: {choices: [depth, unidepth_l], multi: false,
-          model_id: {depth: lpiccinelli/unidepth-v2-vitb14, unidepth_l: models/unidepth-v2-vitl14}}
+  # da3_metric_l: depth_track 이 model_id 의 config.json 을 보고 DA3 로 돌린다 (kind 는 yaml 의 unidepth 그대로)
+  depth: {choices: [depth, unidepth_l, da3_metric_l], multi: false,
+          model_id: {depth: lpiccinelli/unidepth-v2-vitb14, unidepth_l: models/unidepth-v2-vitl14,
+                     da3_metric_l: models/da3-metric-large}}
 
 cpu_tasks:
   cam360_slice:
@@ -1094,6 +1096,48 @@ models:
     - {path: models/unidepth-v2-vitl14, hf: lpiccinelli/unidepth-v2-vitl14, rev: 52b349b514bd8b47642f67ac78cb7b5dc5c51dd9,
        include: [config.json, model.safetensors], sha256: 2e45efad4607bd068c2c835dcc65ba64d516625d111ba446cc1aead6c4cdccc7}
     - {path: external/UniDepth, repo: https://github.com/lpiccinelli-eth/UniDepth.git, commit: 8d8cfe4c7ee15297099983607febf0d4f32eb3d6}
+  # ── Depth Anything 3 (ByteDance-Seed, 2026-11-26) ── runner: vision/runners/depth_anything_3.py
+  # DA3-Metric 은 fx 가 있어야 미터가 된다 (metric = fx·출력/300). fx 는 ① 기기 화각(fov_x_deg) ② DA3-Small 의
+  # 카메라 디코더 추정(기본) ③ 설정의 가정 화각 순서로 쓴다 — 그래서 da3_metric_l 은 da3-small 까지 함께 적재한다.
+  # p90 · GPU 는 RTX 4050 Laptop 실측 (2026-11-26, ds_gpu.lock, 버킷별 4~15장, 워밍업 3장 뒤). GPU = torch 예약 최대치 증가분.
+  # Giant(DA3-GIANT · Nested-Giant) 는 CC BY-NC 라 넣지 않는다.
+  da3_metric_l:
+    note: >-
+      Depth Anything 3 Metric-Large(0.35B) + Small(fx 추정) — 미터 depth + 내부파라미터. depth_track 의 model_id 를
+      이 폴더로 주면(cue_model_choices.depth) 거리 단계에서 UniDepth 대신 돈다. UniDepth-L 보다 2.5~3배 빠르고
+      GPU 는 절반. 상자 중앙값은 UniDepth-L 과 대체로 ±25~40% 안에서 맞지만 화각 추정이 갈리는 광각(Go1)·파노라마에서 벌어진다
+    provides: [depth_metric]
+    runs_on: [gpu]
+    runner: depth_anything_3:Runner
+    license: Apache-2.0 (가중치 · 코드 모두)
+    files: [models/da3-metric-large, models/da3-small, external/Depth-Anything-3]
+    gpu_mb: 2000
+    p90_ms: {s: 206, m: 136, l: 154, xl: 195}
+    device: gpu
+    packages: [torch, addict, omegaconf]
+    source:
+    - {path: models/da3-metric-large, hf: depth-anything/DA3METRIC-LARGE, rev: 4010e39f3634a45bc60553321fb49fb760bd594e,
+       include: [config.json, model.safetensors], sha256: 91876d29e5ce89287818c997aa24f3287e6bee52bdd91352702ecae553fb7529}
+    - {path: models/da3-small, hf: depth-anything/DA3-SMALL, rev: e08cab65ca0ec38e7826075418411ab90cab4da3,
+       include: [config.json, model.safetensors], sha256: 1a24f7094a9670f809f1359668708b63a0c4a577d430756f648649a252a7bd78}
+    - {path: external/Depth-Anything-3, repo: https://github.com/ByteDance-Seed/Depth-Anything-3.git, commit: 3d835ec1a5802d64a8b8b15f817a1ab54809bfe4}
+  da3_small:
+    note: >-
+      Depth Anything 3 Small(0.08B) 단독 — **상대** depth(축척 모름) + 카메라 내부파라미터 추정. 미터가 아니라
+      거리 단계(depth_track)는 거절한다. da3_metric_l 의 fx 출처로 쓰인다
+    provides: [depth_relative]
+    runs_on: [gpu]
+    runner: depth_anything_3:Runner
+    license: Apache-2.0 (가중치 · 코드 모두)
+    files: [models/da3-small, external/Depth-Anything-3]
+    gpu_mb: 400
+    p90_ms: {s: 98, m: 92, l: 104, xl: 118}
+    device: gpu
+    packages: [torch, addict, omegaconf]
+    source:
+    - {path: models/da3-small, hf: depth-anything/DA3-SMALL, rev: e08cab65ca0ec38e7826075418411ab90cab4da3,
+       include: [config.json, model.safetensors], sha256: 1a24f7094a9670f809f1359668708b63a0c4a577d430756f648649a252a7bd78}
+    - {path: external/Depth-Anything-3, repo: https://github.com/ByteDance-Seed/Depth-Anything-3.git, commit: 3d835ec1a5802d64a8b8b15f817a1ab54809bfe4}
   moge2_aerial:
     note: MoGe-2 ViT-L + LoRA r=96 (AerialMetric) — moge2_aerial 선택지
     files: [external/AerialMetric/weights/Moge2-Aerial.pt, external/AerialMetric/MoGe]
