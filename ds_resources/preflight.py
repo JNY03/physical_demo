@@ -179,7 +179,9 @@ def features(mach, funcs, catalog=None, dest=None):
                 why.append("기기 단계는 못 올림 — 서버 쪽만 돈다 (k3s 없음)")
             needs.append("kubectl")
         # 4) 실행체가 아직 없는 계약
-        runnable = any(s.get("image") or s.get("command") or s.get("local_command") for s in g["stages"].values())
+        # 모델 선택지(options)가 있는 기능은 GPU Executor 가 비전 프로세스로 띄운다 — image · command 가 없어도 돈다
+        runnable = bool(opts) or any(s.get("image") or s.get("command") or s.get("local_command")
+                                     for s in g["stages"].values())
         rows.append({"key": name, "shown": name, "pattern": g["pattern"], "criticality": g["criticality"],
                      "options": opts, "usable": bool(usable), "runnable": bool(runnable),
                      "why": " / ".join(why), "needs": sorted(set(needs)),

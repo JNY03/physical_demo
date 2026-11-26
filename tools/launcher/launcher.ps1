@@ -1371,6 +1371,13 @@ function Fn-Sources($fn) {
     return @(@(On-All) | Where-Object { $v -contains $_ })      # 지금 켠 소스만
 }
 function Fn-On($fn) { return (Fn-Sources $fn).Count -gt 0 }
+function Fn-Rank($fn) {
+    # 0 돌릴 수 있음 · 1 쓸 수 있으나 실행체 없음(계약만) · 2 못 씀. preflight 를 모르면 0 (모름은 막지 않는다)
+    if (-not (Fn-Usable $fn)) { return 2 }
+    $e = $script:FnWhy[$fn]
+    if ($null -ne $e -and $null -ne $e.runnable -and -not [bool]$e.runnable) { return 1 }
+    return 0
+}
 function Fn-Usable($fn) {
     # 이 기기에서 지금 되는 기능인가 (cli preflight 가 본 것 — 주로 모델 가중치가 있나)
     $e = $script:FnWhy[$fn]
@@ -2493,8 +2500,9 @@ function Load-Functions {
     $pre = Invoke-Wsl @($PyWsl, "-m", "ds_resources.cli", "preflight", "--json")
     $script:FnWhy = @{}
     $pj = From-Json $pre
-    foreach ($f in @($pj.features)) { $script:FnWhy[$f.key] = [pscustomobject]@{ usable = $f.usable; why = $f.why } }
-    $script:FnList = @($all | Sort-Object @{ Expression = { -not (Fn-Usable $_) } }, @{ Expression = { $_ } })
+    foreach ($f in @($pj.features)) { $script:FnWhy[$f.key] = [pscustomobject]@{ usable = $f.usable; runnable = $f.runnable; why = $f.why } }
+    # 순서: 지금 돌릴 수 있는 것(실행체 · 모델이 있다) → 쓸 수는 있으나 계약만 있는 것 → 못 쓰는 것. 같은 묶음 안은 이름순
+    $script:FnList = @($all | Sort-Object @{ Expression = { Fn-Rank $_ } }, @{ Expression = { $_ } })
     if ($script:FnSrc.Count -eq 0 -and @($s.models).Count -gt 0) {
         # 옛 설정(모델 체크)에서 옮겨 온다 — 고르던 모델을 물체 탐지에 얹고 켠 소스 전부에 붙인다
         # 도메인 전용(targeted · river)은 그 기능으로 (2026-11-26: 모델이 아니라 기능)
@@ -3016,6 +3024,7 @@ function Self-Test {
     $visOn.Checked = $true
     Pick-Function "object_detect" "yoloe" @(@(On-All)[0])
     Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
+    $r.fn_order = @($script:FnList | ForEach-Object { "{0}:{1}" -f (Fn-Rank $_), $_ })   # 돌릴 수 있는 기능이 위로
     $r.target_tab_enabled = $tTarget.Controls[0].Enabled
     # 사용자 설정에 기대지 않는다 — 아래 단계가 쓰는 대상을 직접 켠다 (저장된 대상이 person · chair 뿐이면 door 근거
     # 컨트롤이 없어 시험이 깨졌다, 2026-11-24)

@@ -84,6 +84,28 @@ def _redis_age(src, r):
         return None
 
 
+#: 서버로 밀어 넣는 소스의 보내는 쪽 — 그 스크립트가 이 기기에서 돌고 있으면 보낼 준비가 된 것이다.
+#: 360 카메라는 바탕화면 「360 카메라 실행」이 이 기기 WSL 에서 stream_to_server.py 를 띄운다 (2026-11-27)
+PUSH_SENDER = {"cam360": ("360camera_work/stream_to_server.py", "바탕화면 「360 카메라 실행」")}
+
+
+def _sender_running(script):
+    """그 스크립트를 돌리는 프로세스가 이 기기에 있나 — /proc 의 명령 줄을 본다. /proc 이 없으면 None(모름)"""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    for d in proc.iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            cmd = (d / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if any(a.decode("utf-8", "replace").endswith(script) for a in cmd):
+            return True
+    return False
+
+
 def probe_one(src, ports, hosts, r, timeout):
     out = {"source": src, "state": "unknown", "why": "", "port": ports.get(src)}
     h = _health(ports[src], timeout) if src in ports else None
@@ -107,7 +129,15 @@ def probe_one(src, ports, hosts, r, timeout):
             out["state"] = "down"
             out["why"] = "%s:%d 에 닿지 않음" % (host, cam)
         return out
-    # 주소가 없는 소스는 기기가 서버로 밀어 넣는다(cam360 · cam360_slice) — 데이터 서버가 꺼져 있으면 장이 올 수 없으니
+    if src in PUSH_SENDER:                              # 보내는 쪽이 이 기기에 있다 — 그것이 도는지로 가른다
+        script, how = PUSH_SENDER[src]
+        running = _sender_running(script)
+        if running is not None:
+            out["state"] = "ready" if running else "down"
+            out["why"] = ("보내는 런처 실행 중 (%s) — 데이터 서버를 켜면 들어옴" % script) if running else (
+                "보내는 런처가 꺼져 있음 — %s을 먼저 켜세요" % how)
+            return out
+        # 주소가 없는 소스는 기기가 서버로 밀어 넣는다(cam360 · cam360_slice) — 데이터 서버가 꺼져 있으면 장이 올 수 없으니
     # 오래된 장은 「안 닿음」의 증거가 아니다. down 으로 막으면 서버를 켜기 전에는 영영 못 고른다 (2026-11-26 실측)
     out["why"] = "서버로 밀어 넣는 소스 — 데이터 서버를 켜면 들어옴" + (
         " (마지막 장 %.0f초 전)" % age if age is not None else "")
