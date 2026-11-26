@@ -60,7 +60,7 @@ def test_cue_model_choices_become_targeted_slots():
     assert by["model"]["choices"] == ["targeted"]
     assert by["ovd"]["choices"] == ["yolo_world", "grounding_dino"] and by["ovd"]["multi"] is True
     assert by["ovd"]["default"] == ["yolo_world"] and by["ovd"]["optional"] is True
-    assert by["depth"]["choices"] == ["depth", "unidepth_l"] and by["depth"]["multi"] is False
+    assert by["depth"]["choices"][:2] == ["depth", "unidepth_l"] and by["depth"]["multi"] is False   # 거리 모델이 늘면 뒤에 붙는다 (da3_metric_l …)
     assert by["depth"]["origin"] == "cue_model_choices"
 
 
