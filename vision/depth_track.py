@@ -168,7 +168,70 @@ class _UniDepth:
         return depth
 
 
-KINDS = {"hf_metric": _HFMetric, "onnx_relative": _OnnxRelative, "unidepth": _UniDepth}
+def _da3_module():
+    """vision/runners/depth_anything_3.py 를 파일 경로로 불러온다 (sys.path 에 기대지 않는다).
+    그 모듈은 맨 위에서 torch 를 부르지 않는다 — 가중치 폴더가 DA3 인지 보는 데만 써도 가볍다."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+    name = "ds_runner_depth_anything_3"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).resolve().with_name("runners") / "depth_anything_3.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.modules[name] = mod
+    return sys.modules[name]
+
+
+class _DA3:
+    """Depth Anything 3 **Metric** — `runners/depth_anything_3.Runner` 를 거리 단계에 끼운다.
+
+    DA3-Metric 은 fx 가 있어야 미터가 된다. 거리 단계는 화각을 받지 않으므로 fx 는 Runner 의
+    `focal_model`(기본 models/da3-small 의 카메라 디코더) 이나 spec 의 `fov_x_deg` 에서 온다.
+    그래서 UniDepth 처럼 **내부파라미터를 함께 낸다** — 실물 mm(`real_mm`) 도 그대로 된다.
+    상대 depth 가중치(da3-small 단독)는 미터가 아니라 **거절한다**(AI-C-02).
+    """
+
+    space = METRIC
+
+    def __init__(self, spec):
+        m = _da3_module()
+        cfg = dict(spec)
+        cfg["model_path"] = str(spec["model_id"])
+        self.runner = m.Runner(cfg, str(spec.get("device") or "cuda:0"))
+        if self.runner.space != m.METRIC:
+            raise ValueError("%s 는 상대 depth 라 거리에 못 쓴다 (da3-metric-large 를 쓴다)"
+                             % self.runner.main.model_name)
+        self.name = str(spec.get("name") or self.runner.main.model_name)
+        self.intrinsics = None
+        self.last = None                         # 마지막 info (focal_source 등)
+
+    def __call__(self, bgr):
+        info, depth, K = self.runner(bgr)
+        self.last = info
+        if K[0, 0] > 0:
+            self.intrinsics = (float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2]))
+        return depth
+
+
+KINDS = {"hf_metric": _HFMetric, "onnx_relative": _OnnxRelative, "unidepth": _UniDepth,
+         "depth_anything_3": _DA3}
+
+
+def _kind(spec):
+    """spec 의 kind. **가중치가 말해 주면 그것을 따른다** — cue_model_choices.depth 는 model_id 만
+    바꿔 끼우므로(kind 는 yaml 의 unidepth 그대로) DA3 가중치 폴더가 오면 DA3 로 돌린다.
+    UniDepth 기본(허브 이름 lpiccinelli/…)은 그대로다."""
+    kind = str(spec.get("kind") or "")
+    mid = spec.get("model_id")
+    if kind == "unidepth" and mid and str(mid).startswith(("models/", "/", "~")):
+        try:
+            if _da3_module().is_da3(mid):
+                return "depth_anything_3"
+        except Exception:                        # 판별이 안 되면 적힌 대로
+            pass
+    return kind
 
 
 class DepthTracker:
@@ -181,7 +244,7 @@ class DepthTracker:
         self.iou_match = float(spec.get("iou_match") or 0.5)
         self.classes = tuple(spec.get("classes") or ())
         self.provider, self.why = None, None
-        kind = str(spec.get("kind") or "")
+        kind = _kind(spec)
         if spec.get("enabled") and kind in KINDS:
             try:
                 self.provider = KINDS[kind](spec)

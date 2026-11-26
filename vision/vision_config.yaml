@@ -342,7 +342,7 @@ models:
       #   Depth-Anything-Metric-Outdoor 266px 는 40.8 ms 지만 fx 가 없고,
       #   **Outdoor 학습이라 실내에서 틀린 미터를 냈다**(코앞 상자를 5.0 m).
       # 소스는 내부 경로에서 import 한다. `wandb` 는 학습 로깅용이라 설치하지 않고 막는다.
-      kind: unidepth              # unidepth | hf_metric | onnx_relative
+      kind: unidepth              # unidepth | hf_metric | onnx_relative | depth_anything_3 (model_id 가 DA3 가중치 폴더면 저절로)
       model_id: lpiccinelli/unidepth-v2-vitb14
       source: external/UniDepth
       device: cuda:0
