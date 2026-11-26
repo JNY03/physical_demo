@@ -1256,3 +1256,117 @@ models:
     source:
     # md5 a49af1562c3719227ad43d0ca53b4c7a · 143,024,058 B
     - {path: models/rf-detr/rf-detr-seg-medium.pt, url: https://repo.roboflow.com/rfdetr/rf-detr-seg-m-ft.pth, sha256: 3ad325094735f431aee9962a8d204d68eb5bfc393d53e7e836e70998fef5ea58}
+  # ── Ultralytics 26 세대 (2026-11-26) ──────────────────────────────────────────────────────────
+  # 새 칸: provides(무엇을 해 주나) · runs_on(gpu | cpu_x86 | cpu_arm64) · size(small = 기기 단) ·
+  #        runner(vision/runners/<모듈>:<클래스>) · license(참고용) · p90_ms(실측, 구간 s ≤640 · m ≤1280 · l ≤1920 · xl 그 위)
+  # YOLOE-26 실측: RTX 4050 6GB, imgsz 640 · half · conf 0.25, 실 프레임 36장(pi12 · robot1 · ep-001 · a2 · drone ·
+  #   realsense)을 긴 변 640/1280/1920/2560 으로 바꿔 구간별로. gpu_mb = CUDA 초기화 뒤 nvidia-smi 증가분(50 MB 단위 올림).
+  #   다른 작업과 GPU · CPU 를 나눠 쓰는 중에 쟀다 — p90 은 잡음이 크다(두 번 재 큰 쪽).
+  yoloe26_pf_l:
+    note: YOLOE-26l-seg prompt-free (내장 어휘 4585종) — yoloe_pf_l(YOLOE-11l) 의 뒤. 같은 프레임(36장, 1280) 장당 검출 10.6 (11l 8.6), 11l 과 상자 일치 F1 0.70 (11s↔11l 도 0.71 — 이름 일치는 어휘 동의어 때문에 어느 짝이든 0.25–0.33). p50 은 11l 과 잡음 안에서 같다(37–60 ms vs 42–57 ms). GPU 306 MB (11l 310)
+    files: [models/yoloe-26l-seg-pf.pt]
+    gpu_mb: 350
+    device: gpu
+    packages: [ultralytics]
+    provides: [detect, segment, open_vocab]
+    runs_on: [gpu]
+    runner: yoloe26:FreeRunner
+    license: AGPL-3.0 (Ultralytics)
+    p90_ms: {s: 150, m: 90, l: 110, xl: 170}
+    source:
+    - {path: models/yoloe-26l-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26l-seg-pf.pt, sha256: 8b0ff5ecfd5baa0ebed509efb00aacff52faae2f6770e7ffa2a223231b9653c0}
+  yoloe26_pf_s:
+    note: YOLOE-26s-seg prompt-free — yoloe_free(YOLOE-11s, 후보 넓히기 arm) 의 뒤. 장당 검출 9.7 (11s 8.6), 26l 과 상자 F1 0.70. GPU 270 MB (11s 254). 잰 p90 이 26l 보다 큰 것은 공유 GPU 잡음이다(p50 50–66 ms 대 11s 27 ms — 다시 잴 것)
+    files: [models/yoloe-26s-seg-pf.pt]
+    gpu_mb: 300
+    device: gpu
+    packages: [ultralytics]
+    provides: [detect, segment, open_vocab]
+    runs_on: [gpu]
+    runner: yoloe26:FreeRunner
+    license: AGPL-3.0 (Ultralytics)
+    p90_ms: {s: 110, m: 100, l: 100, xl: 110}
+    source:
+    - {path: models/yoloe-26s-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26s-seg-pf.pt, sha256: 01605da3f2e0e5325df45d5f5eef8e40b5b5c7d085399be3c33ac638258b150a}
+  yoloe26_text_l:
+    note: YOLOE-26l-seg 텍스트 프롬프트 + MobileCLIP2-B 텍스트 인코더(mobileclip2_b.ts, 254 MB — YOLOE-11 의 mobileclip_blt.ts 와 다르다). yoloe_text 의 뒤. 인코더는 시작할 때 한 번 CPU 에서만 쓴다. 문구 10개(person · chair · desk · office desk · door · box · stairs · fire extinguisher · backpack · robot)로 11l 텍스트와 이름+상자 F1 0.66, 장당 2.67 (11l 2.72). 26 은 box 를 안 잡고 robot 을 잡는다(11l 은 반대). GPU 248 MB (11l 250)
+    files: [models/yoloe-26l-seg.pt, models/mobileclip2_b.ts]
+    gpu_mb: 250
+    device: gpu
+    packages: [ultralytics, clip]
+    provides: [detect, segment, open_vocab]
+    runs_on: [gpu]
+    runner: yoloe26:TextRunner
+    license: AGPL-3.0 (Ultralytics) · MobileCLIP2 (Apple)
+    p90_ms: {s: 110, m: 100, l: 80, xl: 90}
+    source:
+    - {path: models/yoloe-26l-seg.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26l-seg.pt, sha256: a612d2d505f24e14d87ec82d688b823b6cb600646664f16125ce6c84ce360da9}
+    - {path: models/mobileclip2_b.ts, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/mobileclip2_b.ts, sha256: 35d7f213e4d75f38514e4656ad3cb91158bd33e3805d8ac349f23b186f66982f}
+  yoloe26_text_s:
+    note: YOLOE-26s-seg 텍스트 프롬프트 + MobileCLIP2-B — 가벼운 텍스트 arm. 같은 문구로 11l 텍스트와 F1 0.57, 장당 2.33, p50 27–38 ms, GPU 154 MB
+    files: [models/yoloe-26s-seg.pt, models/mobileclip2_b.ts]
+    gpu_mb: 200
+    device: gpu
+    packages: [ultralytics, clip]
+    provides: [detect, segment, open_vocab]
+    runs_on: [gpu]
+    runner: yoloe26:TextRunner
+    license: AGPL-3.0 (Ultralytics) · MobileCLIP2 (Apple)
+    p90_ms: {s: 60, m: 70, l: 70, xl: 70}
+    source:
+    - {path: models/yoloe-26s-seg.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26s-seg.pt, sha256: 48f24206bc8680d60cbbfa296b0140da849669b9515058b72f5a945142df0654}
+    - {path: models/mobileclip2_b.ts, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/mobileclip2_b.ts, sha256: 35d7f213e4d75f38514e4656ad3cb91158bd33e3805d8ac349f23b186f66982f}
+  yolo26n_ncnn:
+    note: >-
+      YOLO26n (COCO 80종) 기기 단 검출 — 라즈베리파이 5 CPU 용 NCNN (기본 yolo26n_ncnn_320, 정확도가 필요하면 _640).
+      ONNX end2end(NMS 없음) 도 같이 둔다(onnxruntime 만 있는 곳). 실행기는 혼자 도는 파일(ncnn · numpy · opencv, torch 없음).
+      p90_ms 는 **대리 측정**이다 — x86 i7-13700H 의 P코어 4개(taskset 0,2,4,6 · 4스레드), 320 NCNN. 파이 5(A76 4코어)는 더 느리다
+      (기기에서 `python3 yolo26n_ncnn.py --model … --images …` 로 다시 잴 것). 같은 대리 조건에서 640 NCNN p90 130–230 ms,
+      ONNX 320 · 640 p90 27–54 · 74–135 ms. int8 ONNX(정적 QDQ)는 x86 에서 빠르지 않고(320 p50 22 vs 22 ms) torch 와 일치도가
+      떨어져(F1 0.56) 두지 않았다. 내보내기 —
+      `YOLO_AUTOINSTALL=False python vision/runners/yolo26n_ncnn.py --export models/yolo26n.pt --sizes 320 640 --out models/yolo26n_ncnn`
+      (ultralytics 8.4.170 · ncnn 1.0.20261020 · pnnx 20260526 · onnx 1.23.2 · onnxslim 0.1.99). NCNN 은 같은 판이면 해시까지 같다,
+      ONNX 는 메타데이터 날짜 때문에 매번 다르다.
+    files: [models/yolo26n_ncnn/yolo26n_ncnn_320/model.ncnn.param, models/yolo26n_ncnn/yolo26n_ncnn_320/model.ncnn.bin]
+    device: cpu
+    packages: [ncnn, numpy, opencv-python-headless]
+    provides: [detect]
+    runs_on: [cpu_arm64, cpu_x86]
+    size: small
+    runner: yolo26n_ncnn:Runner
+    license: AGPL-3.0 (Ultralytics)
+    p90_ms: {s: 50, m: 55, l: 50, xl: 45}
+    source:
+    - {path: models/yolo26n.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt, sha256: 9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef}
+    - {path: models/yolo26n_ncnn/yolo26n_ncnn_320/model.ncnn.param, manual: "yolo26n.pt 에서 내보낸다 (note 의 --export 명령)", sha256: 906bfc2faab37ce4f351cd31dd3247e74e1c4c48b65fc2f133bdd477e52a9159}
+    - {path: models/yolo26n_ncnn/yolo26n_ncnn_320/model.ncnn.bin, manual: "yolo26n.pt 에서 내보낸다 (note 의 --export 명령)", sha256: 46b25571cb0d1edfba4c977927c37dde751cb9a84438cc3968ca47c96e77d9ed}
+    - {path: models/yolo26n_ncnn/yolo26n_ncnn_640/model.ncnn.param, manual: "yolo26n.pt 에서 내보낸다 (note 의 --export 명령)", sha256: 1d224cb99489e996f5b235151e7be1fd802a74950c70d7a99147cb0a3fb46217}
+    - {path: models/yolo26n_ncnn/yolo26n_ncnn_640/model.ncnn.bin, manual: "yolo26n.pt 에서 내보낸다 (note 의 --export 명령)", sha256: d4d6cf5b817d1aa7acc2e6d1709b4c7190d7dd796b1925cba27c6372770ed555}
+    - {path: models/yolo26n_ncnn/yolo26n_320.onnx, manual: "yolo26n.pt 에서 내보낸다 (end2end ONNX — 해시는 내보낼 때마다 다르다)"}
+    - {path: models/yolo26n_ncnn/yolo26n_640.onnx, manual: "yolo26n.pt 에서 내보낸다 (end2end ONNX — 해시는 내보낼 때마다 다르다)"}
+  botsort:
+    note: >-
+      BoT-SORT 트래커 (ultralytics 내장, 가중치 없음) — 스트림마다 따로, 밖에서 만든 검출에 track_id 를 붙인다. bytetrack(VendorTracker)
+      과 다른 점은 GMC(전역 움직임 보정, 기본 sparseOptFlow) — 움직이는 카메라용, 프레임을 함께 넘겨야 한다. CPU 실측(검출 7개/장,
+      a2 · cam360 연속 240장, i7 4코어): bytetrack p90 1.1 ms · BoT-SORT GMC 끔 0.9 ms · sparseOptFlow 8 / 12 / 21 ms (640/1280/1920).
+      ReID 는 선택 — with_reid + reid_model(yolo26n_reid 로컬 경로) 일 때만 켜진다. 순수 파이썬 · numpy · lap · opencv 라
+      cpu_arm64 에도 둔다(single_cam_track 기기 단계의 tracker 슬롯이 기기 쪽만 보므로) — 파이에서는 잰 적 없다
+    files: []
+    device: cpu
+    packages: [ultralytics, lap]
+    provides: [track]
+    runs_on: [gpu, cpu_x86, cpu_arm64]
+    runner: botsort:Runner
+    license: AGPL-3.0 (Ultralytics)
+    p90_ms: {s: 8, m: 12, l: 22, xl: 30}
+  yolo26n_reid:
+    note: YOLO26n ReID 외모 임베딩 (512차원 ONNX) — botsort with_reid 일 때만 쓴다. 이름만 주면 ultralytics 가 받으러 나가므로 로컬 경로로 준다. BoT-SORT 에 켜면 장당(검출 7개) p90 이 CPU 에서 ~100 ms 늘어난다. onnxruntime CUDA 로 돌려도 빠르지 않았다(검출 수마다 묶음 크기가 바뀌어 p90 110–206 ms) — CPU 에 둔다
+    files: [models/yolo26n-reid.onnx]
+    device: cpu
+    packages: [onnxruntime-gpu]
+    provides: [embed]
+    runs_on: [cpu_x86, gpu]
+    license: AGPL-3.0 (Ultralytics)
+    p90_ms: {s: 100, m: 95, l: 100, xl: 100}
+    source:
+    - {path: models/yolo26n-reid.onnx, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-reid.onnx, sha256: 8529c383197ae4c468eda535d1b165f8b4162cf17bf5fbcff49c7cb6455bc0bb}
