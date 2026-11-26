@@ -370,7 +370,41 @@ $Str = @{
     lg_over       = @{ ko = "넘침"; en = "over" }
     lg_auto       = @{ ko = "자동 예정"; en = "planned" }
     h_target_dev  = @{ ko = "기기"; en = "Devices" }
-    n_cue_off     = @{ ko = "기능 단계 근거 표에서 끈 근거입니다"; en = "Turned off in the cue table (Capabilities step)" }
+    n_cue_off     = @{ ko = "아래 근거 표에서 끈 근거입니다"; en = "Turned off in the evidence table below" }
+    # 기능 단계 오른쪽 상세 (2026-11-27 — 지정 클래스 단계를 기능 단계로 합쳤다)
+    g_detail      = @{ ko = "상세"; en = "Details" }
+    h_target_name = @{ ko = "이름"; en = "Name" }
+    h_cues_common = @{ ko = "근거 (공통)"; en = "Evidence (shared)" }
+    l_add_target  = @{ ko = "대상 추가"; en = "Add a target" }
+    b_more        = @{ ko = "계약만 / 못 씀 ({0})"; en = "Contract only / unusable ({0})" }
+    n_pick_fn     = @{ ko = "왼쪽에서 기능 이름을 누르면 여기에 자세히 나옵니다."
+                      en = "Click a capability name on the left to see its details here." }
+    n_shared_targets = @{ ko = "{0} 의 대상 · 근거를 그대로 함께 씁니다 (아래 표는 같은 것입니다)."
+                         en = "Shares the targets and evidence of {0} (the tables below are the same)." }
+    n_target_off  = @{ ko = "지정 물체 탐지 계열 기능을 기기 칸에 체크하면 대상을 고를 수 있습니다."
+                      en = "Tick a device for a target-class capability to choose targets." }
+    n_contract    = @{ ko = ("계약(vision/model_registry.yaml)에만 있고 아직 실행체가 없는 기능입니다. " +
+                             "골라 둘 수는 있지만 지금은 결과가 나오지 않습니다.")
+                      en = ("Only in the contract (vision/model_registry.yaml); nothing runs it yet. " +
+                            "You can pick it, but it produces no results for now.") }
+    n_unusable    = @{ ko = "지금 이 기기에서는 쓸 수 없습니다."; en = "Not usable on this machine right now." }
+    n_nomodel_fn  = @{ ko = "고를 모델이 없는 기능입니다."; en = "This capability has no model to choose." }
+    h_why         = @{ ko = "까닭"; en = "Reason" }
+    h_how         = @{ ko = "고치는 길"; en = "How to fix" }
+    h_stages      = @{ ko = "단계"; en = "Stages" }
+    h_p90         = @{ ko = "장당 시간"; en = "Per frame" }
+    n_p90         = @{ ko = "{0} ms (p90, 중간 해상도)"; en = "{0} ms (p90, medium resolution)" }
+    n_mb_plus     = @{ ko = "GPU +{0} MB"; en = "GPU +{0} MB" }
+    h_on_dev      = @{ ko = "켠 기기"; en = "On devices" }
+    n_domain_models = @{ ko = "근거마다 쓰는 모델 (이 기능이 정한다)"; en = "Model per piece of evidence (set by the capability)" }
+    n_gpu_targeted = @{ ko = "근거 모델 합 어림 {0} MB (대상 · 거리 측정에 따라 바뀐다)"
+                       en = "Evidence models about {0} MB (depends on targets and distance)" }
+    n_gpu_gb      = @{ ko = "예상 GPU {0} GB"; en = "Est. GPU {0} GB" }
+    n_gpu_of      = @{ ko = "예상 GPU {0} / {1} GB"; en = "Est. GPU {0} / {1} GB" }
+    v_dist_on     = @{ ko = "씀"; en = "on" }
+    v_dist_off    = @{ ko = "꺼짐"; en = "off" }
+    t_dist_col    = @{ ko = "거리를 쓰는 근거: {0} (거리 측정을 켜야 쓴다)"; en = "Evidence that needs distance: {0} (needs Distance on)" }
+    t_expand      = @{ ko = "이 대상의 근거 · 크기와 색 · 글과 사진을 펼친다"; en = "Show this target's evidence, size and colour, text and photos" }
     n_same_cues   = @{ ko = "{0} 과 같은 근거 (위 표)"; en = "same cues as {0} (above)" }
 }
 # 작업(기능) 이름 — vision/model_registry.yaml 의 functions 키 → 사람이 읽는 이름과 「무엇을 위한 것인가」.
@@ -626,23 +660,31 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = (L "d_title")
 $form.Font = $font
 $form.StartPosition = "CenterScreen"
-$form.FormBorderStyle = "FixedDialog"
-$form.MaximizeBox = $false
-$form.ClientSize = New-Object System.Drawing.Size(640, 640)
+# 창은 키울 수 있다 — 기능 단계가 왼쪽(기능 × 소스) · 오른쪽(상세) 두 칸이라 넓게 시작하고, 키우면 두 칸이 함께 커진다 (2026-11-27)
+$form.FormBorderStyle = "Sizable"
+$form.MaximizeBox = $true
+$form.ClientSize = New-Object System.Drawing.Size(1180, 640)
+$form.MinimumSize = New-Object System.Drawing.Size(900, 640)
 
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Location = New-Object System.Drawing.Point(8, 8)
-$tabs.Size = New-Object System.Drawing.Size(624, 572)
+$tabs.Size = New-Object System.Drawing.Size(1164, 572)
+$tabs.Anchor = "Top, Bottom, Left, Right"
 $form.Controls.Add($tabs)
-function New-Tab($text) { $p = New-Object System.Windows.Forms.TabPage; $p.Text = $text; $tabs.TabPages.Add($p); $p }
-# 단계 화면 — 고르는 순서 그대로다: 소스 → 기능(근거 · 모델 · 자원) → 지정 클래스 → 오버레이 → 배치.
-# 탭을 눌러 바로 갈 수도 있고 아래 「이전 · 다음」으로 한 단계씩 갈 수도 있다 (2026-11-26)
+function New-Tab($text) {
+    $p = New-Object System.Windows.Forms.TabPage; $p.Text = $text; $tabs.TabPages.Add($p)
+    # 탭 안 크기를 미리 맞춘다 — 창을 띄우기 전에는 탭 쪽이 작은 기본 크기라, 그대로 두면 Anchor 를 건 컨트롤이 창을 띄울 때 크게 부푼다
+    $p.Size = New-Object System.Drawing.Size(($tabs.Width - 8), ($tabs.Height - 28))
+    $p
+}
+# 단계 화면 — 고르는 순서 그대로다: 소스 → 기능(기능 × 소스 · 상세: 모델 · 대상 · 근거 · 자원) → 오버레이 → 배치.
+# 탭을 눌러 바로 갈 수도 있고 아래 「이전 · 다음」으로 한 단계씩 갈 수도 있다 (2026-11-26).
+# 옛 「지정 클래스」 단계는 기능 단계 오른쪽 상세로 들어갔다 (2026-11-27)
 $tSrc    = New-Tab (L "step_src")
 $tFunc   = New-Tab (L "step_func")
-$tTarget = New-Tab (L "step_target")
 $tOver   = New-Tab (L "step_over")
 $tPlace  = New-Tab (L "step_place")
-$StepKeys = @("step_src", "step_func", "step_target", "step_over", "step_place")
+$StepKeys = @("step_src", "step_func", "step_over", "step_place")
 
 function New-Group($parent, $text, $x, $y, $w, $h) {
     $g = New-Object System.Windows.Forms.GroupBox
@@ -1064,7 +1106,24 @@ function Show-Slice {
 }
 
 # ================================================================ 2단계 — 기능 (그 소스에 무엇을 시킬 것인가)
-$gVision = New-Group $tFunc "" 8 8 596 56
+# 왼쪽은 기능 × 소스 격자, 오른쪽은 고른 기능의 상세다 (2026-11-27 — 옛 「지정 클래스」 단계를 여기로 합쳤다).
+#   지정 물체 탐지 계열(재식별 · 근거 설명도 같은 파이프라인) → 대상 표 · 대상 추가 · 거리 측정 · 근거 표(공통)
+#   모델을 고르는 기능(yoloe · unidepth · moge2) → 모델 · 설명 · 장당 시간 · 예상 GPU · 탐지 시험
+#   도메인 전용(하천 부유물) → 근거마다 쓰는 모델(읽기만) · 계약만 있는 기능 → 그 뜻과 단계 · 못 쓰는 기능 → 까닭과 모델 받기
+# 창을 키우면 두 칸이 함께 커진다(가운데 막대로 나눔을 옮길 수 있다)
+$fontB = New-Object System.Drawing.Font($font, [System.Drawing.FontStyle]::Bold)
+$tFunc.Padding = New-Object System.Windows.Forms.Padding(6)
+$split = New-Object System.Windows.Forms.SplitContainer
+$split.Size = New-Object System.Drawing.Size(1140, 470)
+$split.SplitterWidth = 6
+$split.Panel1MinSize = 360
+$split.Panel2MinSize = 380
+$split.SplitterDistance = 530
+$split.Panel1.Padding = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
+$split.Panel2.Padding = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
+$split.Dock = "Fill"
+$tFunc.Controls.Add($split)                              # 채우기(Fill)를 먼저 넣어야 위 띠(Top)가 그 위에 앉는다
+$gVision = New-Group $tFunc "" 0 0 1140 56
 [void](Reg $gVision "g_vision")
 $visOn = Reg (New-Check $gVision "" 14 26 $s.vision) "l_on"
 # 기능은 아래 「기능 × 소스」 격자에서 고른다. 모델 체크는 없앴다 — 모델은 기능마다 고른다 (2026-11-26)
@@ -1099,74 +1158,115 @@ foreach ($f in @($cat.features)) {
 }
 
 $previewBtn = New-Object System.Windows.Forms.Button
-$previewBtn.Location = New-Object System.Drawing.Point(320, 18)
-$previewBtn.Width = 110
+$previewBtn.Location = New-Object System.Drawing.Point(870, 18)
+$previewBtn.Width = 120
+$previewBtn.Anchor = "Top, Right"
 [void](Reg $previewBtn "b_preview")
 $gVision.Controls.Add($previewBtn)
 $weightsBtn = New-Object System.Windows.Forms.Button
-$weightsBtn.Location = New-Object System.Drawing.Point(440, 18)
+$weightsBtn.Location = New-Object System.Drawing.Point(998, 18)
 $weightsBtn.Width = 130
+$weightsBtn.Anchor = "Top, Right"
 [void](Reg $weightsBtn "b_weights")
 $gVision.Controls.Add($weightsBtn)
+$gVision.Dock = "Top"
 
-# ---- 근거 · 모델 · 예상 자원 (고른 기능마다) — 카탈로그 options · gpu_mb_* 를 그대로 읽어 적는다
-$gCues = New-Group $tFunc "" 8 362 596 174
-[void](Reg $gCues "g_cues")
-$cueTable = New-Object System.Windows.Forms.Panel
-$cueTable.Location = New-Object System.Drawing.Point(10, 20)
-$cueTable.Size = New-Object System.Drawing.Size(576, 144)
-$cueTable.AutoScroll = $true
-$gCues.Controls.Add($cueTable)
-
-# ---- 기기별 기능 (모델 매칭) — 소스마다 올릴 기능
-$gMatch = New-Group $tFunc "" 8 70 596 286
+# ---- 왼쪽: 기능 × 소스 — 소스마다 올릴 기능 (이름을 누르면 오른쪽에 상세)
+$gMatch = New-Group $split.Panel1 "" 0 0 530 464
 [void](Reg $gMatch "g_match")
 $matchPanel = New-Object System.Windows.Forms.Panel
-$matchPanel.Location = New-Object System.Drawing.Point(10, 20)
-$matchPanel.Size = New-Object System.Drawing.Size(576, 226)
+$matchPanel.Location = New-Object System.Drawing.Point(8, 22)
+$matchPanel.Size = New-Object System.Drawing.Size(514, 376)
 $matchPanel.AutoScroll = $true
+$matchPanel.Anchor = "Top, Bottom, Left, Right"
 $gMatch.Controls.Add($matchPanel)
-$matchReset = New-Object System.Windows.Forms.Button
-$addFeat = New-Object System.Windows.Forms.Button
-$addFeat.Location = New-Object System.Drawing.Point(10, 254)
-$addFeat.Width = 100
-[void](Reg $addFeat "b_add_feat")
-$gMatch.Controls.Add($addFeat)
-$matchReset.Location = New-Object System.Drawing.Point(120, 254)
-$matchReset.Width = 130
-[void](Reg $matchReset "b_reset")
-$gMatch.Controls.Add($matchReset)
 $matchNote = New-Object System.Windows.Forms.Label
 $matchNote.AutoSize = $false
-$matchNote.Location = New-Object System.Drawing.Point(260, 258)
-$matchNote.Size = New-Object System.Drawing.Size(326, 26)
+$matchNote.Location = New-Object System.Drawing.Point(10, 402)
+$matchNote.Size = New-Object System.Drawing.Size(510, 22)
+$matchNote.Anchor = "Bottom, Left, Right"
 $gMatch.Controls.Add($matchNote)
+$matchReset = New-Object System.Windows.Forms.Button
+$addFeat = New-Object System.Windows.Forms.Button
+$addFeat.Location = New-Object System.Drawing.Point(8, 428)
+$addFeat.Width = 100
+$addFeat.Anchor = "Bottom, Left"
+[void](Reg $addFeat "b_add_feat")
+$gMatch.Controls.Add($addFeat)
+$matchReset.Location = New-Object System.Drawing.Point(114, 428)
+$matchReset.Width = 130
+$matchReset.Anchor = "Bottom, Left"
+[void](Reg $matchReset "b_reset")
+$gMatch.Controls.Add($matchReset)
+# 고른 기능의 GPU 어림 합 (프로세스 기본값 포함) / 서버 GPU 전체 — 풀이는 풍선말에
+$gpuTotal = New-Label $gMatch "" 256 433
+$gpuTotal.Anchor = "Bottom, Left"
+$gMatch.Dock = "Fill"
 
-# ================================================================ 지정 클래스 탭
-$gT = New-Group $tTarget "" 8 8 596 118
-[void](Reg $gT "g_target")
-$targetFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-$targetFlow.Location = New-Object System.Drawing.Point(10, 22)
-$targetFlow.Size = New-Object System.Drawing.Size(576, 58)
-$targetFlow.AutoScroll = $true
-$gT.Controls.Add($targetFlow)
+# ---- 오른쪽: 상세 — 고른 기능에 따라 채운다 (Build-Detail)
+$gDetail = New-Group $split.Panel2 "" 0 0 604 464
+[void](Reg $gDetail "g_detail")
+$detailTitle = New-Label $gDetail "" 12 24
+$detailTitle.Font = $fontB
+$detailWhy = New-Label $gDetail "" 12 48
+$detailWhy.AutoSize = $false
+$detailWhy.Size = New-Object System.Drawing.Size(580, 22)
+$detailWhy.AutoEllipsis = $true
+$detailWhy.Anchor = "Top, Left, Right"
+$detailBody = New-Object System.Windows.Forms.Panel
+$detailBody.Location = New-Object System.Drawing.Point(10, 72)
+$detailBody.Size = New-Object System.Drawing.Size(588, 386)
+$detailBody.AutoScroll = $true
+$detailBody.Anchor = "Top, Bottom, Left, Right"
+$gDetail.Controls.Add($detailBody)
+# 지정 물체 탐지 계열의 칸 — 대상 표($cuePanel) · 대상 추가 · 거리 측정 · 근거 표($cueTable). 자리는 Layout-Target 이 잡는다
+$tgtSection = New-Object System.Windows.Forms.Panel
+$tgtSection.Location = New-Object System.Drawing.Point(0, 0)
+$tgtSection.Size = New-Object System.Drawing.Size(570, 300)
+$tgtSection.Anchor = "Top, Left, Right"
+$detailBody.Controls.Add($tgtSection)
+$tgtNote = New-Label $tgtSection "" 0 0
+$tgtNote.AutoSize = $false
+$tgtNote.Size = New-Object System.Drawing.Size(566, 20)
+$tgtNote.Anchor = "Top, Left, Right"
+$tgtHead = Reg (New-Label $tgtSection "" 0 0) "g_target"
+$tgtHead.Font = $fontB
+$cuePanel = New-Object System.Windows.Forms.Panel        # 대상 표 — 대상마다 한 줄(줄 패널), 펼치면 근거 칸이 그 아래
+$cuePanel.Location = New-Object System.Drawing.Point(0, 24)
+$cuePanel.Size = New-Object System.Drawing.Size(566, 60)
+$cuePanel.Anchor = "Top, Left, Right"
+$tgtSection.Controls.Add($cuePanel)
+$addLbl = Reg (New-Label $tgtSection "" 0 0) "l_add_target"
 $directBox = New-Object System.Windows.Forms.TextBox
-$directBox.Location = New-Object System.Drawing.Point(12, 84)
-$directBox.Width = 200
-$gT.Controls.Add($directBox)
+$directBox.Width = 180
+$tgtSection.Controls.Add($directBox)
 $directAdd = New-Object System.Windows.Forms.Button
 [void](Reg $directAdd "b_add")
-$directAdd.Location = New-Object System.Drawing.Point(218, 82)
-$directAdd.Size = New-Object System.Drawing.Size(60, 26)
-$gT.Controls.Add($directAdd)
-$distOn = Reg (New-Check $gT "" 300 85 $s.distance) "c_distance"
+$directAdd.Size = New-Object System.Drawing.Size(64, 26)
+$tgtSection.Controls.Add($directAdd)
+$distOn = Reg (New-Check $tgtSection "" 0 0 $s.distance) "c_distance"
 if (-not $cat.distance_available) { $distOn.Checked = $false; $distOn.Enabled = $false }
-
-$cuePanel = New-Object System.Windows.Forms.Panel
-$cuePanel.Location = New-Object System.Drawing.Point(8, 132)
-$cuePanel.Size = New-Object System.Drawing.Size(600, 408)
-$cuePanel.AutoScroll = $true
-$tTarget.Controls.Add($cuePanel)
+# 근거 모델 고르기(ovd · depth …) — 역할 슬롯 줄로 (Fn-Slots · Draw-Slots, 다른 기능의 「모델」 칸과 같은 모양)
+$slotHead = Reg (New-Label $tgtSection "" 0 0) "h_model"
+$slotHead.Font = $fontB
+$slotPanel = New-Object System.Windows.Forms.Panel
+$slotPanel.Size = New-Object System.Drawing.Size(566, 40)
+$slotPanel.Anchor = "Top, Left, Right"
+$tgtSection.Controls.Add($slotPanel)
+$cueHead = Reg (New-Label $tgtSection "" 0 0) "h_cues_common"
+$cueHead.Font = $fontB
+$cueTable = New-Object System.Windows.Forms.Panel
+$cueTable.Size = New-Object System.Drawing.Size(566, 60)
+$cueTable.Anchor = "Top, Left, Right"
+$tgtSection.Controls.Add($cueTable)
+# 다른 기능의 칸 — 다시 그릴 때마다 비우고 채운다
+$infoPanel = New-Object System.Windows.Forms.Panel
+$infoPanel.Location = New-Object System.Drawing.Point(0, 0)
+$infoPanel.Size = New-Object System.Drawing.Size(570, 300)
+$infoPanel.Anchor = "Top, Left, Right"
+$infoPanel.Visible = $false
+$detailBody.Controls.Add($infoPanel)
+$gDetail.Dock = "Fill"
 
 $script:TargetChecks = @{}
 $script:PendingCheck = $null
@@ -1193,30 +1293,15 @@ function Cue-List($name) {
 }
 
 function Build-TargetChecks {
-    # 지금 체크된 것을 지키며 다시 그린다(처음에는 마지막 선택). $script:PendingCheck = 방금 추가한 직접 입력
-    $keep = if ($script:TargetChecks.Count -gt 0) { @(Checked-Targets) } else { @($script:InitialTargets) }
-    if ($script:PendingCheck) { $keep += $script:PendingCheck; $script:PendingCheck = $null }
-    $script:Building = $true
-    $targetFlow.Controls.Clear()
-    $script:TargetChecks = @{}
-    foreach ($n in (Target-Names)) {
-        $c = New-Object System.Windows.Forms.CheckBox
-        $c.Text = $n
-        $c.AutoSize = $true
-        $c.Checked = ($keep -contains $n)
-        $c.Add_CheckedChanged({ On-TargetCheck $this })
-        $targetFlow.Controls.Add($c)
-        $script:TargetChecks[$n] = $c
-    }
-    $script:Building = $false
+    # 대상 표를 다시 그린다 — 지금 체크된 것을 지킨다(처음에는 마지막 선택). 대상 체크도 표 안에 있다 (2026-11-27)
+    Build-CueBoxes
 }
 function On-TargetCheck($cb) {
     if ($script:Building) { return }
     $script:TargetsTouched = $true
-    $name = $cb.Text
+    $name = $cb.Tag.name
     if (-not $cb.Checked -and (Is-Direct $name)) {        # 직접 입력은 체크를 풀면 목록에서 사라진다
         [void]$script:Direct.Remove((Get-Direct $name))
-        Build-TargetChecks
     }
     Build-CueBoxes; Build-Overlay; Changed
 }
@@ -1246,105 +1331,234 @@ function On-TargetDev($chk) {
     $script:TargetDev[$n] = @($cur)
     Changed
 }
+function Text-W($t) { return [System.Windows.Forms.TextRenderer]::MeasureText([string]$t, $font).Width }
+function Wrap-H($t, $w) {
+    # 폭 $w 에 줄을 바꿔 쓸 때의 높이
+    if (-not $t) { return 0 }
+    $flags = [System.Windows.Forms.TextFormatFlags]::WordBreak
+    return ([System.Windows.Forms.TextRenderer]::MeasureText([string]$t, $font, (New-Object System.Drawing.Size([int]$w, 10000)), $flags).Height + 4)
+}
+function Row-Height {
+    # 한 줄 높이 = 콤보 상자의 높이(글꼴 · DPI 에 따라 다르다) — 표의 모든 칸을 이 높이에 세로 가운데로 맞춘다
+    $p = New-Object System.Windows.Forms.ComboBox
+    $p.Font = $font
+    $h = [Math]::Max(24, [int]$p.PreferredHeight)
+    $p.Dispose()
+    return $h
+}
+function All-Ctls($root, $acc = $null) {
+    # 그 안의 컨트롤 전부(몇 겹이든) — 대상 표는 표 → 줄 패널 → 펼친 칸 패널로 겹쳐 있다
+    if ($null -eq $acc) { $acc = New-Object System.Collections.ArrayList }
+    foreach ($c in $root.Controls) { [void]$acc.Add($c); [void](All-Ctls $c $acc) }
+    return $acc
+}
+function Dist-Text($name) {
+    # 「거리」 칸 — 이 대상이 거리를 쓰는 근거(크기 거부 · 높이 …)가 있나, 있으면 거리 측정이 켜져 있나. @(글, 풍선말)
+    $nd = @(Cue-List $name | Where-Object { $_.needs_distance })
+    if ($nd.Count -eq 0) { return @("-", "") }
+    $tip = (L "t_dist_col") -f (@($nd | ForEach-Object { $_.label }) -join ", ")
+    return @($(if ($distOn.Checked) { L "v_dist_on" } else { L "v_dist_off" }), $tip)
+}
+$script:CueOpen = @{}                                     # 대상 → 펼쳤나 (화면에서만, 저장하지 않는다)
 function Build-CueBoxes {
+    # 대상 표 — 대상마다 한 줄: 쓸지 | 찾을 기기(지정 물체 탐지를 켠 기기마다 한 칸) | 근거 기본값 · 직접 고르기 | 거리 | [▶].
+    # [▶] 를 누르면 그 대상의 근거 칸 · 직접 입력의 크기와 색 · 「글과 사진 보기」가 줄 아래에 펼쳐진다 (2026-11-27,
+    # 옛 지정 클래스 탭의 대상 체크 · 대상마다 묶음 · 기기 줄을 표 하나로). 접힌 줄의 근거 칸도 만들어 둔다(Cue-Selection 이 읽는다)
+    $keep = if ($script:TargetChecks.Count -gt 0) { @(Checked-Targets) } else { @($script:InitialTargets) }
+    if ($script:PendingCheck) { $keep += $script:PendingCheck; $script:PendingCheck = $null }
     $script:Building = $true
     $cuePanel.SuspendLayout()
     $cuePanel.Controls.Clear()
-    $y = 4
-    foreach ($name in (Checked-Targets)) {
-        $list = @(Cue-List $name)
-        $direct = Is-Direct $name
-        $rows = [Math]::Ceiling(($list.Count) / 4)
-        $tsrc = @(Targeted-Sources)
-        $devRow = $tsrc.Count -ge 2                     # 기기가 둘 이상일 때만 기기마다 고르는 줄을 둔다
-        $h = 54 + 26 * $rows + ($(if ($direct) { 30 } else { 0 })) + ($(if ($devRow) { 30 } else { 0 }))
-        $g = New-Object System.Windows.Forms.GroupBox
-        $g.Text = $name
-        $g.Location = New-Object System.Drawing.Point(4, $y)
-        $g.Size = New-Object System.Drawing.Size(568, $h)
-        $cuePanel.Controls.Add($g)
-        $det = New-Object System.Windows.Forms.Button
-        $det.Text = (L "b_cue_detail")
-        $det.Location = New-Object System.Drawing.Point(430, 18)
-        $det.Width = 130
-        $det.Tag = @{ name = $name }
-        $det.Add_Click({ Show-Cue-Detail $this.Tag.name })
-        $g.Controls.Add($det)
-        $mode = $script:CueMode[$name]; if (-not $mode) { $mode = "default" }
-        foreach ($rm in @(@("default", (L "r_default"), 12), @("custom", (L "r_custom"), 110))) {
-            $r = New-Object System.Windows.Forms.RadioButton
-            $r.Text = $rm[1]; $r.AutoSize = $true; $r.Location = New-Object System.Drawing.Point($rm[2], 22)
-            $r.Checked = ($mode -eq $rm[0]); $r.Tag = @{ target = $name; mode = $rm[0] }
-            $r.Add_CheckedChanged({ On-CueMode $this })
-            $g.Controls.Add($r)
-        }
-        $chosen = $script:Cues[$name]
-        $i = 0
-        foreach ($c in $list) {
-            $cx = 12 + ($i % 4) * 138
-            $cy = 50 + [Math]::Floor($i / 4) * 26
-            $on = [bool]$c.default
-            if ($mode -eq "custom" -and $null -ne $chosen) { $on = ($chosen -contains $c.key) }
-            $cb = New-Check $g $c.label $cx $cy $on
-            $cb.Tag = @{ target = $name; key = $c.key; cue = $true }
-            if ($mode -eq "custom" -and ($on -ne [bool]$c.default)) { $cb.Font = New-Object System.Drawing.Font($font, [System.Drawing.FontStyle]::Bold) }
-            $cb.Enabled = ($mode -eq "custom") -and -not ($c.needs_distance -and -not $distOn.Checked)
-            if ($c.key -eq "class") { $cb.Enabled = $false; $cb.Checked = $true }      # 후보를 내는 근거 — 끌 수 없다
-            if (@($script:CueOff) -contains $c.key) {                                   # 근거 표에서 끈 근거 — 모든 대상에서 빠진다
-                $cb.Enabled = $false; $cb.Checked = $false
-                $modelTip.SetToolTip($cb, (L "n_cue_off"))
-            }
-            $cb.Add_CheckedChanged({ On-CueCheck $this })
-            $i++
-        }
-        if ($direct) {
-            $d = Get-Direct $name
-            $ly = 50 + 26 * $rows + 2
-            [void](New-Label $g (L "h_size") 12 ($ly + 3))
-            $sz = New-Object System.Windows.Forms.TextBox
-            $sz.Location = New-Object System.Drawing.Point(52, $ly); $sz.Width = 110; $sz.Text = $d.size; $sz.Tag = $name
-            $sz.Add_Leave({ On-DirectSize $this })
-            $g.Controls.Add($sz)
-            [void](New-Label $g (L "h_colour") 176 ($ly + 3))
-            $col = New-Object System.Windows.Forms.ComboBox
-            $col.DropDownStyle = "DropDownList"; $col.Location = New-Object System.Drawing.Point(200, $ly); $col.Width = 100
-            [void]$col.Items.Add("")
-            foreach ($cn in $cat.colours) { [void]$col.Items.Add($cn) }
-            $col.SelectedItem = $d.colour; $col.Tag = $name
-            $col.Add_SelectedIndexChanged({ On-DirectColour $this })
-            $g.Controls.Add($col)
-            $reg = New-Object System.Windows.Forms.Button
-            $reg.Text = (L "b_register"); $reg.Location = New-Object System.Drawing.Point(420, ($ly - 2)); $reg.Size = New-Object System.Drawing.Size(130, 26)
-            $reg.Tag = $name
-            $reg.Add_Click({ On-Register $this })
-            $g.Controls.Add($reg)
-        }
-        if ($devRow) {
-            # 이 대상을 어느 기기에서 찾을지 (2026-11-27, 예: chair → pi12 만 · person → robot1 만)
-            $dy = $h - 32
-            [void](New-Label $g (L "h_target_dev") 12 ($dy + 3))
-            $dx = 60
+    $script:TargetChecks = @{}
+    $names = @(Target-Names)
+    $tsrc = @(Targeted-Sources)
+    $rowH = Row-Height
+    $w = [Math]::Max(440, $cuePanel.ClientSize.Width)
+    # 칸 자리 — 모든 줄이 같은 자리를 쓴다(글 길이 · 언어에 맞춰 잰다)
+    $nameW = 110
+    foreach ($n in $names) { $nameW = [Math]::Max($nameW, (Text-W $n) + 30) }
+    $nameW = [Math]::Min($nameW, 190)
+    $devW = 44
+    foreach ($dv in $tsrc) { $devW = [Math]::Max($devW, (Text-W $dv) + 10) }
+    $xDev = 4 + $nameW
+    $xMode = $xDev + $tsrc.Count * $devW + 6
+    $m1 = (Text-W (L "r_default")) + 28
+    $m2 = (Text-W (L "r_custom")) + 28
+    $xDist = $xMode + $m1 + $m2 + 4
+    $distW = [Math]::Max((Text-W (L "lbl_dist")), [Math]::Max((Text-W (L "v_dist_on")), (Text-W (L "v_dist_off")))) + 14
+    $xBtn = $xDist + $distW
+    [void](New-Label $cuePanel (L "h_target_name") 4 4)
+    for ($i = 0; $i -lt $tsrc.Count; $i++) { [void](New-Label $cuePanel $tsrc[$i] ($xDev + $i * $devW) 4) }
+    [void](New-Label $cuePanel (L "h_cue") $xMode 4)
+    [void](New-Label $cuePanel (L "lbl_dist") $xDist 4)
+    $y = 26
+    foreach ($name in $names) {
+        $on = $keep -contains $name
+        $open = $on -and [bool]$script:CueOpen[$name]
+        $row = New-Object System.Windows.Forms.Panel
+        $row.Location = New-Object System.Drawing.Point(0, $y)
+        $row.Size = New-Object System.Drawing.Size($w, $rowH)
+        $row.Tag = @{ row = $name }
+        $cuePanel.Controls.Add($row)
+        $c = New-Check $row $name 4 0 $on
+        $c.AutoSize = $false
+        $c.AutoEllipsis = $true
+        $c.Size = New-Object System.Drawing.Size(($nameW - 4), $rowH)
+        $c.Tag = @{ name = $name }
+        $c.Add_CheckedChanged({ On-TargetCheck $this })
+        $script:TargetChecks[$name] = $c
+        if ($on) {
+            # 이 대상을 어느 기기에서 찾을지 (2026-11-27, 예: chair → pi12 만 · person → robot1 만). 기본은 전부
             $mine = @(Target-Devices $name)
-            foreach ($dv in $tsrc) {
-                $dc = New-Check $g $dv $dx $dy ($mine -contains $dv)
+            for ($i = 0; $i -lt $tsrc.Count; $i++) {
+                $dv = $tsrc[$i]
+                $dc = New-Check $row "" ($xDev + $i * $devW + 4) 0 ($mine -contains $dv)
+                $dc.AutoSize = $false
+                $dc.Size = New-Object System.Drawing.Size(20, $rowH)
                 $dc.Tag = @{ target = $name; dev = $dv }
+                $modelTip.SetToolTip($dc, ("{0} — {1}" -f $name, $dv))
                 $dc.Add_CheckedChanged({ On-TargetDev $this })
-                $dx += 110
             }
+            $mode = $script:CueMode[$name]; if (-not $mode) { $mode = "default" }
+            $mx = $xMode
+            foreach ($rm in @(@("default", (L "r_default"), $m1), @("custom", (L "r_custom"), $m2))) {
+                $r = New-Object System.Windows.Forms.RadioButton
+                $r.Text = $rm[1]; $r.AutoSize = $false
+                $r.Size = New-Object System.Drawing.Size($rm[2], $rowH)
+                $r.Location = New-Object System.Drawing.Point($mx, 0)
+                $r.Checked = ($mode -eq $rm[0]); $r.Tag = @{ target = $name; mode = $rm[0] }
+                $r.Add_CheckedChanged({ On-CueMode $this })
+                $row.Controls.Add($r)
+                $mx += $rm[2]
+            }
+            $dt = @(Dist-Text $name)
+            $dl = New-Label $row $dt[0] $xDist 0
+            $dl.AutoSize = $false
+            $dl.Size = New-Object System.Drawing.Size($distW, $rowH)
+            $dl.TextAlign = "MiddleLeft"
+            if ($dt[1]) { $modelTip.SetToolTip($dl, $dt[1]) }
+            $ex = New-Object System.Windows.Forms.Button
+            $ex.Text = $(if ($open) { "▼" } else { "▶" })
+            $ex.Location = New-Object System.Drawing.Point($xBtn, 0)
+            $ex.Size = New-Object System.Drawing.Size(30, $rowH)
+            $ex.Tag = @{ open = $name }
+            $ex.Add_Click({ $script:CueOpen[$this.Tag.open] = -not [bool]$script:CueOpen[$this.Tag.open]; Build-CueBoxes })
+            $modelTip.SetToolTip($ex, (L "t_expand"))
+            $row.Controls.Add($ex)
+            # 펼친 칸 — 근거 · 크기와 색 · 글과 사진
+            $exp = New-Object System.Windows.Forms.Panel
+            $exp.Location = New-Object System.Drawing.Point(24, ($rowH + 2))
+            $exp.Width = $w - 28
+            $exp.Visible = $open
+            $row.Controls.Add($exp)
+            $eh = Build-CueDetail $exp $name $mode
+            $exp.Height = $eh
+            if ($open) { $row.Height = $rowH + 2 + $eh + 4 }
         }
-        $y += $h + 6
+        $y += $row.Height + 2
     }
+    $cuePanel.Height = $y + 4
     $cuePanel.ResumeLayout()
     $script:Building = $false
+    Update-GpuTotal
+    Layout-Target
+}
+function Build-CueDetail($exp, $name, $mode) {
+    # 한 대상의 펼친 칸 — 근거 체크(직접 고르기일 때만 바꾼다), 직접 입력이면 크기 · 색 · 등록, 「글과 사진 보기」. 높이를 돌려준다
+    $list = @(Cue-List $name)
+    $direct = Is-Direct $name
+    $chosen = $script:Cues[$name]
+    $cols = [Math]::Max(2, [Math]::Floor(($exp.Width - 8) / 138))
+    $i = 0
+    foreach ($c in $list) {
+        $cx = 4 + ($i % $cols) * 138
+        $cy = 4 + [Math]::Floor($i / $cols) * 26
+        $on = [bool]$c.default
+        if ($mode -eq "custom" -and $null -ne $chosen) { $on = ($chosen -contains $c.key) }
+        $cb = New-Check $exp $c.label $cx $cy $on
+        $cb.Tag = @{ target = $name; key = $c.key; cue = $true }
+        if ($mode -eq "custom" -and ($on -ne [bool]$c.default)) { $cb.Font = $fontB }
+        $cb.Enabled = ($mode -eq "custom") -and -not ($c.needs_distance -and -not $distOn.Checked)
+        if ($c.key -eq "class") { $cb.Enabled = $false; $cb.Checked = $true }      # 후보를 내는 근거 — 끌 수 없다
+        if (@($script:CueOff) -contains $c.key) {                                   # 근거 표에서 끈 근거 — 모든 대상에서 빠진다
+            $cb.Enabled = $false; $cb.Checked = $false
+            $modelTip.SetToolTip($cb, (L "n_cue_off"))
+        }
+        $cb.Add_CheckedChanged({ On-CueCheck $this })
+        $i++
+    }
+    $yy = 4 + [Math]::Ceiling($list.Count / $cols) * 26 + 4
+    if ($direct) {
+        $d = Get-Direct $name
+        [void](New-Label $exp (L "h_size") 4 ($yy + 3))
+        $sz = New-Object System.Windows.Forms.TextBox
+        $sz.Location = New-Object System.Drawing.Point(52, $yy); $sz.Width = 110; $sz.Text = $d.size; $sz.Tag = $name
+        $sz.Add_Leave({ On-DirectSize $this })
+        $exp.Controls.Add($sz)
+        [void](New-Label $exp (L "h_colour") 176 ($yy + 3))
+        $col = New-Object System.Windows.Forms.ComboBox
+        $col.DropDownStyle = "DropDownList"; $col.Location = New-Object System.Drawing.Point(230, $yy); $col.Width = 100
+        [void]$col.Items.Add("")
+        foreach ($cn in $cat.colours) { [void]$col.Items.Add($cn) }
+        $col.SelectedItem = $d.colour; $col.Tag = $name
+        $col.Add_SelectedIndexChanged({ On-DirectColour $this })
+        $exp.Controls.Add($col)
+        $reg = New-Object System.Windows.Forms.Button
+        $reg.Text = (L "b_register"); $reg.Location = New-Object System.Drawing.Point(344, ($yy - 2)); $reg.Size = New-Object System.Drawing.Size(110, 26)
+        $reg.Tag = $name
+        $reg.Add_Click({ On-Register $this })
+        $exp.Controls.Add($reg)
+        $yy += 32
+    }
+    $det = New-Object System.Windows.Forms.Button
+    $det.Text = (L "b_cue_detail")
+    $det.Location = New-Object System.Drawing.Point(4, $yy)
+    $det.Width = 150
+    $det.Tag = @{ name = $name }
+    $det.Add_Click({ Show-Cue-Detail $this.Tag.name })
+    $exp.Controls.Add($det)
+    return ($yy + 32)
 }
 function Cue-Selection($target) {
     $sel = @()
-    foreach ($g in $cuePanel.Controls) {
-        foreach ($c in $g.Controls) {
-            if ($c -is [System.Windows.Forms.CheckBox] -and $c.Tag -and $c.Tag.cue -and $c.Tag.target -eq $target -and $c.Checked) { $sel += $c.Tag.key }
-        }
+    foreach ($c in @(All-Ctls $cuePanel)) {
+        if ($c -is [System.Windows.Forms.CheckBox] -and $c.Tag -and $c.Tag.cue -and $c.Tag.target -eq $target -and $c.Checked) { $sel += $c.Tag.key }
     }
     return $sel
+}
+function Set-TargetNote {
+    # 대상 칸 위의 한두 줄 — 같은 파이프라인을 쓰는 기능(재식별 · 근거 설명)인지, 아직 켜지 않아 고를 수 없는지
+    $lines = @()
+    $fn = $script:SelFn
+    if ($fn -and $fn -ne "targeted_detect" -and @($script:FnList) -contains "targeted_detect") {
+        $lines += ((L "n_shared_targets") -f (Fn-Text2 "targeted_detect"))
+    }
+    if (-not ($visOn.Checked -and ((Chosen-Models) -contains "targeted"))) { $lines += (L "n_target_off") }
+    $t = ($lines -join "`n")
+    if ($tgtNote.Text -ne $t) { $tgtNote.Text = $t; Layout-Target }
+}
+function Layout-Target {
+    # 지정 물체 탐지 칸을 위에서 아래로 쌓는다: 알림 · 대상 표 · 대상 추가 · 근거 모델(슬롯) · 근거 표
+    $y = 0
+    $tgtNote.Visible = [bool]$tgtNote.Text
+    if ($tgtNote.Visible) {
+        $tgtNote.Location = New-Object System.Drawing.Point(0, 0)
+        $tgtNote.Height = Wrap-H $tgtNote.Text $tgtNote.Width
+        $y = $tgtNote.Height + 6
+    }
+    $tgtHead.Location = New-Object System.Drawing.Point(0, $y); $y += 24
+    $cuePanel.Location = New-Object System.Drawing.Point(0, $y); $y += $cuePanel.Height + 4
+    $addLbl.Location = New-Object System.Drawing.Point(2, ($y + 5))
+    $ax = $addLbl.Left + (Text-W $addLbl.Text) + 8
+    $directBox.Location = New-Object System.Drawing.Point($ax, ($y + 2))
+    $directAdd.Location = New-Object System.Drawing.Point(($ax + $directBox.Width + 6), $y)
+    $distOn.Location = New-Object System.Drawing.Point(($directAdd.Right + 24), ($y + 4))
+    $y += 38
+    $slotHead.Location = New-Object System.Drawing.Point(0, $y); $y += 24
+    $slotPanel.Location = New-Object System.Drawing.Point(0, $y); $y += $slotPanel.Height + 6
+    $cueHead.Location = New-Object System.Drawing.Point(0, $y); $y += 24
+    $cueTable.Location = New-Object System.Drawing.Point(0, $y); $y += $cueTable.Height
+    $tgtSection.Height = $y + 8
 }
 function On-CueCheck($cb) {
     if ($script:Building) { return }
@@ -1357,6 +1571,7 @@ function On-CueMode($r) {
     $t = $r.Tag.target
     if ($r.Tag.mode -eq "custom" -and $null -eq $script:Cues[$t]) { $script:Cues[$t] = @(Cue-Selection $t) }
     $script:CueMode[$t] = $r.Tag.mode
+    if ($r.Tag.mode -eq "custom") { $script:CueOpen[$t] = $true }      # 직접 고르면 근거 칸을 펼쳐 보인다
     $script:TargetsTouched = $true
     Build-CueBoxes; Changed
 }
@@ -1394,6 +1609,7 @@ function Add-Direct($text) {
     if ((Target-Names) -contains $n) { $script:TargetChecks[$n].Checked = $true; return }
     [void]$script:Direct.Add(@{ name = $n; size = ""; colour = "" })
     $script:PendingCheck = $n
+    $script:CueOpen[$n] = $true                          # 크기 · 색을 바로 적게 펼친다
     $script:TargetsTouched = $true
     Build-TargetChecks; Build-CueBoxes; Build-Overlay; Changed
 }
@@ -1405,11 +1621,13 @@ $overPanel = New-Object System.Windows.Forms.Panel
 $overPanel.Location = New-Object System.Drawing.Point(4, 4)
 $overPanel.Size = New-Object System.Drawing.Size(606, 286)
 $overPanel.AutoScroll = $true
+$overPanel.Anchor = "Top, Left, Right"
 $tOver.Controls.Add($overPanel)
 $overPreview = New-Object System.Windows.Forms.Button
 $overPreview.Location = New-Object System.Drawing.Point(4, 512)
 $overPreview.Width = 150
 [void](Reg $overPreview "b_preview_overlay")
+$overPreview.Anchor = "Bottom, Left"
 $tOver.Controls.Add($overPreview)
 # 고른 오버레이가 실제로 어떻게 보이는지 — 저장된 장에 그려 바로 아래에 둔다 (고칠 때마다 다시 그린다)
 $overPic = New-Object System.Windows.Forms.PictureBox
@@ -1417,11 +1635,13 @@ $overPic.Location = New-Object System.Drawing.Point(4, 296)
 $overPic.Size = New-Object System.Drawing.Size(606, 188)
 $overPic.SizeMode = "Zoom"
 $overPic.BorderStyle = "FixedSingle"
+$overPic.Anchor = "Top, Bottom, Left, Right"
 $tOver.Controls.Add($overPic)
 $overCap = New-Object System.Windows.Forms.Label
 $overCap.AutoSize = $false
 $overCap.Location = New-Object System.Drawing.Point(4, 488)
 $overCap.Size = New-Object System.Drawing.Size(606, 20)
+$overCap.Anchor = "Bottom, Left, Right"
 $tOver.Controls.Add($overCap)
 # 라벨 · 깃발 글은 번역표에서 (키는 그대로 — 프로필에 들어가는 것은 키다)
 function Label-Items { return @(@("name", (L "lbl_name")), @("conf", (L "lbl_conf")), @("id", (L "lbl_id")),
@@ -1692,183 +1912,342 @@ function On-CueOff($chk) {
     Changed
 }
 function On-CuePick($cb) {
+    # 옛 길(근거 표 안의 콤보) — 지금은 슬롯 줄(On-SlotPick)이 같은 자리에 쓴다
     if ($script:Building) { return }
     $script:CuePick[$cb.Tag.need] = @($cb.Tag.items)[$cb.SelectedIndex].v
     Build-CueTable
     Changed
 }
+
+# ---- 역할 슬롯 (2026-11-27) — 상세 칸의 「모델」 영역은 슬롯 줄의 목록이다: 역할 이름 | 모델 고르기 | 설명 · GPU.
+# 기능 하나가 여러 모델(탐지기 + 추적기, 탐지기 + OVD + 거리 + CLIP …)을 쓰게 되면 Fn-Slots 만 바꾸면 된다
+function Model-Note($opt) {
+    # 그 선택지가 쓰는 모델의 설명 (cli places 의 model_info.notes)
+    if ($null -eq $script:ModelInfo -or $null -eq $script:ModelInfo.$opt) { return "" }
+    $ns = $script:ModelInfo.$opt.notes
+    if ($null -eq $ns) { return "" }
+    return (@($ns.PSObject.Properties | ForEach-Object { [string]$_.Value.note } | Where-Object { $_ }) -join "`n")
+}
+function Fn-Slots($fn) {
+    # 그 기능의 모델 슬롯 — [{role, label, choices=@([{v, t}]), current, required, store, key, note, mb}]
+    #   store = "fnModel" → $script:FnModel[key] (기능의 모델), "cuePick" → $script:CuePick[key] (근거 모델, "auto" = 지금 규칙)
+    # 지금 데이터는 기능당 모델 하나(Fn-Options · Fn-Model)라 슬롯 하나(role = "model")를 만든다.
+    # 지정 물체 탐지 파이프라인(targeted)은 모델이 아니라 근거 모델 고르기(cat.cue_choices: ovd · depth …)를 슬롯으로 둔다.
+    # 레지스트리가 기능마다 역할 슬롯을 주게 되면 이 함수만 그것을 읽게 바꾸면 된다 (그리는 쪽은 Draw-Slots · 저장은 On-SlotPick)
+    $opts = @(Fn-Options $fn)
+    if ($opts.Count -eq 0) { return @() }
+    $cur = Fn-Model $fn
+    $out = @()
+    if ($cur -ne "targeted") {
+        $ch = @($opts | ForEach-Object { [pscustomobject]@{ v = $_; t = [string]$ModelShown[$_] } })
+        $note = $(if (Option-Domain $cur) { (L "n_domain_models") + ": " + (Option-ModelsText $cur) } else { Model-Note $cur })
+        $out += [pscustomobject]@{ role = "model"; label = (L "h_model"); choices = $ch; current = $cur; required = $true
+                                   store = "fnModel"; key = $fn; note = $note; mb = [int]$cat.gpu_mb_option.$cur }
+        return $out
+    }
+    $seen = @{}
+    foreach ($r in @($cat.options.$cur)) {
+        foreach ($need in @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })) {
+            if ($seen.ContainsKey($need)) { continue }
+            $seen[$need] = $true
+            $v = [string]$script:CuePick[$need]
+            if (-not $v) { $v = "auto" }
+            $note = (@($cat.cue_choices.$need.choices | ForEach-Object { "{0}: {1}" -f $_.key, $_.note }) -join "`n")
+            $out += [pscustomobject]@{ role = $need; label = ("{0} ({1})" -f $need, $r.label); choices = @(Cue-PickItems $need)
+                                       current = $v; required = $false; store = "cuePick"; key = $need; note = $note
+                                       mb = (Cue-MB $r); off = (@($script:CueOff) -contains $r.key) }
+        }
+    }
+    return $out
+}
+function Draw-Slots($panel, $slots, $y, $edit = $true) {
+    # 슬롯마다 한 줄: 역할 이름 | 고르기(고를 것이 하나뿐이면 글) | 설명 · GPU(길면 줄을 바꾼다). 다음 줄의 y 를 돌려준다
+    $rowH = Row-Height
+    $noteX = 150 + 176
+    $noteW = [Math]::Max(120, $panel.ClientSize.Width - $noteX - 8)
+    foreach ($sl in @($slots)) {
+        $lab = New-Label $panel ([string]$sl.label) 4 ($y + 4)
+        $lab.AutoSize = $false
+        $lab.AutoEllipsis = $true
+        $lab.Size = New-Object System.Drawing.Size(142, 20)
+        $lab.ForeColor = [System.Drawing.SystemColors]::GrayText
+        $modelTip.SetToolTip($lab, [string]$sl.label)
+        $items = @($sl.choices)
+        if ($items.Count -gt 1 -and $edit) {
+            $cb = New-Object System.Windows.Forms.ComboBox
+            $cb.DropDownStyle = "DropDownList"
+            $cb.Location = New-Object System.Drawing.Point(150, $y)
+            $cb.Width = 168
+            foreach ($it in $items) { [void]$cb.Items.Add([string]$it.t) }
+            $idx = 0
+            for ($j = 0; $j -lt $items.Count; $j++) { if ($items[$j].v -eq $sl.current) { $idx = $j } }
+            $cb.SelectedIndex = $idx
+            $cb.Tag = @{ slot = $sl; items = $items }
+            $cb.Enabled = -not [bool]$sl.off
+            $cb.Add_SelectionChangeCommitted({ On-SlotPick $this })
+            if ($sl.note) { $modelTip.SetToolTip($cb, [string]$sl.note) }
+            $panel.Controls.Add($cb)
+        } else {
+            $t = $(if ($items.Count) { [string](@($items | Where-Object { $_.v -eq $sl.current } | Select-Object -First 1).t) } else { "" })
+            if (-not $t -and $items.Count) { $t = [string]$items[0].t }
+            $vl = New-Label $panel $t 150 ($y + 4)
+            $vl.AutoSize = $false; $vl.AutoEllipsis = $true
+            $vl.Size = New-Object System.Drawing.Size(168, 20)
+        }
+        $parts = @()
+        if ($null -ne $sl.mb -and [int]$sl.mb -gt 0) { $parts += ((L "n_mb_plus") -f [int]$sl.mb) }
+        if ($sl.note -and $sl.store -eq "fnModel") { $parts += [string]$sl.note }
+        $txt = ($parts -join "  ·  ")
+        $h = [Math]::Max($rowH, (Wrap-H $txt $noteW))
+        if ($txt) {
+            $nl = New-Label $panel $txt $noteX ($y + 4)
+            $nl.AutoSize = $false
+            $nl.Size = New-Object System.Drawing.Size($noteW, $h)
+            if ($sl.note) { $modelTip.SetToolTip($nl, [string]$sl.note) }
+        }
+        $y += $h + 6
+    }
+    return $y
+}
+function On-SlotPick($cb) {
+    # 슬롯 고름 → 그 슬롯이 가리키는 저장 자리에 그대로 (FnModel · CuePick — settings.json 과 프로필은 예전 그대로다)
+    if ($script:Building) { return }
+    $sl = $cb.Tag.slot
+    $v = @($cb.Tag.items)[$cb.SelectedIndex].v
+    if ($sl.store -eq "fnModel") {
+        $script:FnModel[$sl.key] = $v
+        $script:SelFn = $sl.key
+        Build-Match
+        Build-CueTable
+        Build-CueBoxes
+        Build-Overlay
+    } else {
+        $script:CuePick[$sl.key] = $v
+        Build-CueTable
+    }
+    Changed
+}
+
+function Cell($panel, $text, $x, $y, $w) {
+    # 표의 한 칸 — 폭을 넘으면 … 로 줄이고 풍선말에 전부
+    $l = New-Label $panel ([string]$text) $x $y
+    $l.AutoSize = $false
+    $l.AutoEllipsis = $true
+    $l.Size = New-Object System.Drawing.Size($w, 20)
+    if ($text) { $modelTip.SetToolTip($l, [string]$text) }
+    return $l
+}
+function Draw-CueRows($panel, $opt, $edit, $y) {
+    # 그 선택지(targeted · yoloe · river …)가 쓰는 근거마다 한 줄: 근거 | 역할(하는 일) | 모델 | 예상 GPU. 다음 줄의 y 를 돌려준다.
+    # $edit 이면(지정 물체 탐지 파이프라인) 근거를 켜고 끈다 — 끄면 모든 대상에서 빠진다(대상 표의 그 칸도 흐려진다). 탐지기는 끌 수 없다.
+    # 근거 모델 고르기는 위 슬롯 줄(Fn-Slots)에서 한다 — 여기 「모델」 칸은 지금 고른 것을 적는다
+    $cols = @(4, 152, 300, 466)
+    $ws = @(146, 144, 162, 80)
+    $hdr = @("h_cue", "h_role2", "h_model", "h_gpu")
+    for ($i = 0; $i -lt $hdr.Count; $i++) { [void](Cell $panel (L $hdr[$i]) $cols[$i] $y $ws[$i]) }
+    $y += 22
+    $rows = @($cat.options.$opt)
+    if ($rows.Count -eq 0) { [void](New-Label $panel (L "v_rule") $cols[0] $y); return ($y + 22) }
+    $first = $true
+    foreach ($r in $rows) {
+        $off = $edit -and (@($script:CueOff) -contains $r.key)
+        if ($edit) {
+            $cb = New-Check $panel $r.label $cols[0] ($y - 3) (-not $off)
+            $cb.AutoSize = $false
+            $cb.AutoEllipsis = $true
+            $cb.Size = New-Object System.Drawing.Size($ws[0], 24)
+            $cb.Tag = @{ key = $r.key }
+            if ($r.key -eq "class") { $cb.Enabled = $false; $cb.Checked = $true }
+            $cb.Add_CheckedChanged({ On-CueOff $this })
+        } else {
+            [void](Cell $panel $r.label $cols[0] $y $ws[0])
+        }
+        [void](Cell $panel (Cue-Role $r.key) $cols[1] $y $ws[1])
+        $need = @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })[0]
+        if ($edit -and $need) {
+            $cur = [string]$script:CuePick[$need]
+            if (-not $cur) { $cur = "auto" }
+            $hit = @(Cue-PickItems $need | Where-Object { $_.v -eq $cur } | Select-Object -First 1)
+            $mt = $(if ($hit.Count) { [string]$hit[0].t } else { $cur })
+            [void](Cell $panel ("{0}: {1}" -f $need, $mt) $cols[2] $y $ws[2])
+        } else {
+            $ms = @(Cue-Models $r)
+            [void](Cell $panel $(if ($ms.Count) { $ms -join ", " } else { L "v_rule" }) $cols[2] $y $ws[2])
+        }
+        $mb = Cue-MB $r
+        if ($null -eq $mb -and $first -and $opt -ne "targeted") { $mb = [int]$cat.gpu_mb_option.$opt }
+        [void](Cell $panel $(if ($off) { "-" } elseif ($null -ne $mb) { "{0} MB" -f $mb } else { "-" }) $cols[3] $y $ws[3])
+        $y += 26
+        $first = $false
+    }
+    return $y
+}
 function Build-CueTable {
-    # 고른 **기능**마다 그 기능이 쓰는 근거를 펼친다. 첫 칸은 기능 이름(지정 물체 탐지 …)이고,
-    # 「역할」은 그 근거가 하는 일(형태 비교 …), 「모델」은 그 일에 쓰이는 가중치다 (2026-11-26)
-    # 지정 물체 탐지 파이프라인(targeted)은 여기서 근거를 켜고 끄고, 바꿀 수 있는 근거 모델을 고른다 (2026-11-27).
-    # 대상(클래스)마다의 세부는 지정 클래스 탭 그대로다. 같은 파이프라인을 쓰는 기능(재식별 · 근거 설명)은 표를 한 번만 그린다
+    # 지정 물체 탐지 파이프라인(targeted)의 근거 표와 근거 모델 슬롯 — 재식별 · 근거 설명도 같은 파이프라인이라 함께 쓴다.
+    # 다른 기능의 근거는 그 기능의 상세에 읽기 전용으로 나온다 (2026-11-27)
     $script:Building = $true
+    $slotPanel.SuspendLayout()
+    $slotPanel.Controls.Clear()
+    $tfn = @(@($script:FnList) | Where-Object { (Fn-Model $_) -eq "targeted" } | Select-Object -First 1)
+    $sy = 2
+    if ($tfn.Count) { $sy = Draw-Slots $slotPanel @(Fn-Slots $tfn[0]) 2 }
+    $slotPanel.Height = $sy + 2
+    $slotPanel.ResumeLayout()
+    $cueTable.SuspendLayout()
     $cueTable.Controls.Clear()
-    $fns = @(Chosen-Functions | Where-Object { @(Fn-Options $_).Count -gt 0 })
-    if (-not $visOn.Checked -or $fns.Count -eq 0) {
-        [void](New-Label $cueTable $(if ($visOn.Checked) { L "n_nomodel" } else { L "n_novision" }) 4 6)
-        $script:Building = $false
-        return
-    }
-    $cols = @(4, 150, 280, 400, 560)
-    $hdr = @("h_capability", "h_cue", "h_role2", "h_model", "h_gpu")
-    for ($i = 0; $i -lt $hdr.Count; $i++) { [void](New-Label $cueTable (L $hdr[$i]) $cols[$i] 4) }
-    $y = 26
-    $drawn = @{}
-    foreach ($fn in $fns) {
-        $opt = Fn-Model $fn
-        $rows = @($cat.options.$opt)
-        if ($drawn.ContainsKey($opt)) {
-            [void](New-Label $cueTable (Fn-Text2 $fn) $cols[0] $y)
-            [void](New-Label $cueTable ((L "n_same_cues") -f (Fn-Text2 $drawn[$opt])) $cols[1] $y)
-            $y += 22
-            continue
-        }
-        $drawn[$opt] = $fn
-        $first = $true
-        if ($rows.Count -eq 0) {
-            [void](New-Label $cueTable (Fn-Text2 $fn) $cols[0] $y)
-            [void](New-Label $cueTable (L "v_rule") $cols[1] $y)
-            $y += 22
-            continue
-        }
-        foreach ($r in $rows) {
-            [void](New-Label $cueTable $(if ($first) { Fn-Text2 $fn } else { "" }) $cols[0] $y)
-            $off = ($opt -eq "targeted") -and (@($script:CueOff) -contains $r.key)
-            if ($opt -eq "targeted") {
-                # 근거를 켜고 끈다 — 끄면 모든 대상에서 빠진다(지정 클래스 탭의 그 칸도 흐려진다). 탐지기는 끌 수 없다
-                $cb = New-Check $cueTable $r.label $cols[1] ($y - 3) (-not $off)
-                $cb.Tag = @{ key = $r.key }
-                if ($r.key -eq "class") { $cb.Enabled = $false; $cb.Checked = $true }
-                $cb.Add_CheckedChanged({ On-CueOff $this })
-            } else {
-                [void](New-Label $cueTable $r.label $cols[1] $y)
-            }
-            [void](New-Label $cueTable (Cue-Role $r.key) $cols[2] $y)
-            $need = @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })[0]
-            if ($opt -eq "targeted" -and $need) {
-                $items = @(Cue-PickItems $need)
-                $mc = New-Object System.Windows.Forms.ComboBox
-                $mc.DropDownStyle = "DropDownList"
-                $mc.Location = New-Object System.Drawing.Point($cols[3], ($y - 3))
-                $mc.Width = 150
-                foreach ($it in $items) { [void]$mc.Items.Add($it.t) }
-                $cur = [string]$script:CuePick[$need]
-                $idx = 0
-                for ($j = 0; $j -lt $items.Count; $j++) { if ($items[$j].v -eq $cur) { $idx = $j } }
-                $mc.SelectedIndex = $idx
-                $mc.Tag = @{ need = $need; items = $items }
-                $mc.Enabled = -not $off
-                $mc.Add_SelectionChangeCommitted({ On-CuePick $this })
-                $modelTip.SetToolTip($mc, (@($cat.cue_choices.$need.choices | ForEach-Object { "{0}: {1}" -f $_.key, $_.note }) -join "`n"))
-                $cueTable.Controls.Add($mc)
-            } else {
-                $ms = @(Cue-Models $r)
-                [void](New-Label $cueTable $(if ($ms.Count) { $ms -join ", " } else { L "v_rule" }) $cols[3] $y)
-            }
-            $mb = Cue-MB $r
-            if ($null -eq $mb -and $first -and $opt -ne "targeted") { $mb = [int]$cat.gpu_mb_option.$opt }
-            [void](New-Label $cueTable $(if ($off) { "-" } elseif ($null -ne $mb) { "{0} MB" -f $mb } else { "-" }) $cols[4] $y)
-            $y += 26
-            $first = $false
-        }
-    }
+    $y = Draw-CueRows $cueTable "targeted" $true 2
+    [void](New-Label $cueTable ((L "n_gpu_targeted") -f (Targeted-MB)) 4 ($y + 6))
+    $cueTable.Height = $y + 34
+    $cueTable.ResumeLayout()
+    $script:Building = $false
+    Update-GpuTotal
+    Layout-Target
+}
+function Update-GpuTotal {
+    # 왼쪽 아래 「예상 GPU a / b GB」 — a = 프로세스 기본 + 고른 기능(Start-Vision 의 셈), b = 서버 GPU 전체(cli places). 풀이는 풍선말
+    if ($null -eq $gpuTotal) { return }
     $base = [int]$cat.gpu_mb_base
     $add = Chosen-MB
-    [void](New-Label $cueTable ((L "n_total") -f $base, $add, ($base + $add)) $cols[0] ($y + 8))
-    $script:Building = $false
+    $mb = $(if ((Chosen-Models).Count) { $base + $add } else { 0 })
+    $a = "{0:0.0}" -f ($mb / 1024.0)
+    if ($script:GpuTotalMB) { $gpuTotal.Text = (L "n_gpu_of") -f $a, ("{0:0.0}" -f ($script:GpuTotalMB / 1024.0)) }
+    else { $gpuTotal.Text = (L "n_gpu_gb") -f $a }
+    $modelTip.SetToolTip($gpuTotal, ((L "n_total") -f $base, $add, ($base + $add)))
 }
+$script:MoreOpen = $null                                   # 「계약만 / 못 씀」 묶음을 펼쳤나 (처음: 그 안에 고른 것이 있으면 펼침)
+$script:SelFn = $null                                      # 오른쪽 상세에 보이는 기능
 function Build-Match {
     # 기능 × 소스 격자 — 세로는 기능(물체 탐지 · 추적 …), 가로는 1단계에서 켠 소스. 기능마다 쓸 모델을 고른다.
-    # 여기서 고른 것이 그대로 오케스트레이터의 --functions(소스별) 와 비전의 모델이 된다 (2026-11-26)
+    # 여기서 고른 것이 그대로 오케스트레이터의 --functions(소스별) 와 비전의 모델이 된다 (2026-11-26).
+    # 기능 이름을 누르면 오른쪽 상세가 그 기능으로 바뀐다. 계약만 있거나 못 쓰는 기능은 아래 접힌 묶음에 (2026-11-27)
     $script:Building = $true
+    $matchPanel.SuspendLayout()
     $matchPanel.Controls.Clear()
     $srcs = @(On-All)
     if (-not $visOn.Checked) { $matchNote.Text = (L "n_novision") }
     elseif ($srcs.Count -eq 0) { $matchNote.Text = (L "n_nosource") }
     else { $matchNote.Text = (L "n_match") }
     if ($visOn.Checked -and $srcs.Count -gt 0 -and $null -ne $script:FnList) {
-        $x0 = 170                                    # 모델 콤보
+        $rowH = Row-Height
+        $x0 = 190                                    # 모델 콤보
         $x1 = $x0 + 118                              # 소스 칸들
-        # 한 줄 높이 = 모델 고르는 칸의 높이(글꼴 · DPI 에 따라 다르다) — 모든 칸을 이 높이로 맞춘다
-        $probeCb = New-Object System.Windows.Forms.ComboBox
-        $probeCb.Font = $matchPanel.Font
-        $rowH = [Math]::Max(24, [int]$probeCb.PreferredHeight)
-        $probeCb.Dispose()
-        [void](New-Label $matchPanel (L "h_capability") 4 6)
+        $sw = 48
+        foreach ($s2 in $srcs) { $sw = [Math]::Max($sw, (Text-W $s2) + 10) }
+        [void](New-Label $matchPanel (L "h_capability") 26 6)
         [void](New-Label $matchPanel (L "h_model") $x0 6)
-        $i = 0
-        foreach ($s2 in $srcs) {
-            [void](New-Label $matchPanel $s2 ($x1 + $i * 62) 6)
-            $i++
-        }
+        for ($i = 0; $i -lt $srcs.Count; $i++) { [void](New-Label $matchPanel $srcs[$i] ($x1 + $i * $sw) 6) }
         $y = 30
-        foreach ($fn in $script:FnList) {
-            $usable = Fn-Usable $fn
-            # 기능을 쓸지 고르는 상자 — 켜면 켠 소스 전부에 붙이고, 끄면 전부 뗀다
-            # 한 줄의 칸들(기능 · 모델 · 기기)을 같은 높이($rowH)에 세로 가운데로 맞춘다 — 글 없는 체크 상자는
-            # 위에 붙어 그려져 모델 칸보다 높아 보였다 (2026-11-27)
-            $pick = New-Check $matchPanel (Fn-Text2 $fn) 4 $y (Fn-On $fn)
-            $pick.AutoSize = $false; $pick.Size = New-Object System.Drawing.Size(($x0 - 8), $rowH)
-            $pick.Enabled = $usable
-            $pick.Tag = @{ fn = $fn }
-            $pick.Add_CheckedChanged({ On-FnPick $this })
-            $modelTip.SetToolTip($pick, (Fn-Tip $fn))
-            $opts = @(Fn-Options $fn)
-            $dom = @($opts | Where-Object { Option-Domain $_ })
-            if ($opts.Count -gt 0 -and $dom.Count -eq $opts.Count) {
-                # 도메인 전용 기능(지정 물체 탐지 · 하천 부유물 탐지 …) — 고를 모델이 아니다. 실제로 쓰는 모델을 적는다
-                $lb = New-Label $matchPanel (Option-ModelsText $opts[0]) $x0 $y
-                $lb.AutoSize = $false
-                $lb.Size = New-Object System.Drawing.Size(112, $rowH)
-                $lb.TextAlign = "MiddleLeft"
-                $lb.AutoEllipsis = $true
-                $modelTip.SetToolTip($lb, (Option-Tip $opts[0]))
-            } elseif ($opts.Count -gt 0) {
-                $cb = New-Object System.Windows.Forms.ComboBox
-                $cb.DropDownStyle = "DropDownList"
-                $cb.Location = New-Object System.Drawing.Point($x0, $y)
-                $cb.Width = 112
-                foreach ($o in $opts) { [void]$cb.Items.Add($ModelShown[$o]) }
-                $cur = Fn-Model $fn
-                $cb.SelectedIndex = [Math]::Max(0, [Array]::IndexOf($opts, $cur))
-                $cb.Tag = @{ fn = $fn; opts = $opts }
-                $cb.Add_SelectionChangeCommitted({ On-FnModel $this })
-                $modelTip.SetToolTip($cb, (Option-Tip (Fn-Model $fn)))
-                $cb.Enabled = $usable
-                $matchPanel.Controls.Add($cb)
-            } else {
-                $lb = New-Label $matchPanel "-" $x0 $y
-                $lb.AutoSize = $false; $lb.Size = New-Object System.Drawing.Size(112, $rowH); $lb.TextAlign = "MiddleLeft"
-            }
-            $i = 0
-            foreach ($s2 in $srcs) {
-                $on = (Fn-Sources $fn) -contains $s2
-                $chk = New-Check $matchPanel "" ($x1 + $i * 62) $y $on
-                $chk.AutoSize = $false; $chk.Size = New-Object System.Drawing.Size(22, $rowH)
-                $chk.Tag = @{ fn = $fn; src = $s2 }
-                $chk.Enabled = $usable
-                $chk.Add_CheckedChanged({ On-FnSource $this })
-                if (-not $usable) { $modelTip.SetToolTip($chk, (Fn-Why $fn)) }
-                $i++
-            }
-            if (-not $usable) {
-                $modelTip.SetToolTip($pick, ((Fn-Tip $fn) + "`n" + (Fn-Why $fn)))
-                # 왜 안 되는지 + 바로 고치는 길 (모델 받기)
-                $fx2 = $x1 + $srcs.Count * 62 + 6
-                $gb = New-Object System.Windows.Forms.Button
-                $gb.Location = New-Object System.Drawing.Point($fx2, $y)
-                $gb.Size = New-Object System.Drawing.Size(96, $rowH)
-                $gb.Text = (L "b_get")
-                $gb.Tag = @{ opt = (Fn-Model $fn) }
-                $gb.Add_Click({ Get-Model $this.Tag.opt })
-                $modelTip.SetToolTip($gb, (Fn-Why $fn))
-                $matchPanel.Controls.Add($gb)
-            }
-            $y += $rowH + 6
+        $main = @($script:FnList | Where-Object { (Fn-Rank $_) -eq 0 })
+        $more = @($script:FnList | Where-Object { (Fn-Rank $_) -gt 0 })
+        if ($null -eq $script:MoreOpen) { $script:MoreOpen = (@($more | Where-Object { Fn-On $_ }).Count -gt 0) }
+        foreach ($fn in $main) { $y = Add-FnRow $fn $y $srcs $rowH $x0 $x1 $sw }
+        if ($more.Count -gt 0) {
+            $line = New-Label $matchPanel "" 4 ($y + 2)
+            $line.AutoSize = $false
+            $line.BorderStyle = "Fixed3D"
+            $line.Size = New-Object System.Drawing.Size(($x1 + $srcs.Count * $sw - 8), 2)
+            $tg = New-Label $matchPanel ($(if ($script:MoreOpen) { "▼ " } else { "▶ " }) + ((L "b_more") -f $more.Count)) 4 ($y + 10)
+            $tg.Cursor = [System.Windows.Forms.Cursors]::Hand
+            $tg.ForeColor = [System.Drawing.SystemColors]::HotTrack
+            $tg.Tag = @{ more = $true }
+            $tg.Add_Click({ $script:MoreOpen = -not $script:MoreOpen; Build-Match })
+            $y += 36
+            if ($script:MoreOpen) { foreach ($fn in $more) { $y = Add-FnRow $fn $y $srcs $rowH $x0 $x1 $sw } }
         }
     }
+    $matchPanel.ResumeLayout()
     $script:Building = $false
+    Update-GpuTotal
+    Build-Detail
+}
+function Add-FnRow($fn, $y, $srcs, $rowH, $x0, $x1, $sw) {
+    # 격자 한 줄: [쓸지] 기능 이름(누르면 상세) | 모델 | 소스마다 칸 | (못 쓰면) 모델 받기. 다음 줄의 y 를 돌려준다.
+    # 한 줄의 칸들을 같은 높이($rowH)에 세로 가운데로 맞춘다 (2026-11-27)
+    $usable = Fn-Usable $fn
+    # 기능을 쓸지 고르는 상자 — 켜면 켠 소스 전부에 붙이고, 끄면 전부 뗀다
+    $pick = New-Check $matchPanel "" 4 $y (Fn-On $fn)
+    $pick.AutoSize = $false; $pick.Size = New-Object System.Drawing.Size(20, $rowH)
+    $pick.Enabled = $usable
+    $pick.Tag = @{ fn = $fn }
+    $pick.Add_CheckedChanged({ On-FnPick $this })
+    $nm = New-Label $matchPanel (Fn-Text2 $fn) 26 $y
+    $nm.AutoSize = $false
+    $nm.AutoEllipsis = $true
+    $nm.Size = New-Object System.Drawing.Size(($x0 - 30), $rowH)
+    $nm.TextAlign = "MiddleLeft"
+    $nm.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $nm.Tag = @{ fn = $fn; name = $true }
+    $nm.Add_Click({ Select-Fn $this.Tag.fn })
+    Paint-FnName $nm
+    $tip = $(if ($usable) { Fn-Tip $fn } else { (Fn-Tip $fn) + "`n" + (Fn-Why $fn) })
+    $modelTip.SetToolTip($pick, $tip)
+    $modelTip.SetToolTip($nm, $tip)
+    $opts = @(Fn-Options $fn)
+    $dom = @($opts | Where-Object { Option-Domain $_ })
+    if ($opts.Count -gt 0 -and $dom.Count -eq $opts.Count) {
+        # 도메인 전용 기능(지정 물체 탐지 · 하천 부유물 탐지 …) — 고를 모델이 아니다. 실제로 쓰는 모델을 적는다
+        $lb = New-Label $matchPanel (Option-ModelsText $opts[0]) $x0 $y
+        $lb.AutoSize = $false
+        $lb.Size = New-Object System.Drawing.Size(112, $rowH)
+        $lb.TextAlign = "MiddleLeft"
+        $lb.AutoEllipsis = $true
+        $modelTip.SetToolTip($lb, (Option-Tip $opts[0]))
+    } elseif ($opts.Count -gt 0) {
+        $cb = New-Object System.Windows.Forms.ComboBox
+        $cb.DropDownStyle = "DropDownList"
+        $cb.Location = New-Object System.Drawing.Point($x0, $y)
+        $cb.Width = 112
+        foreach ($o in $opts) { [void]$cb.Items.Add($ModelShown[$o]) }
+        $cur = Fn-Model $fn
+        $cb.SelectedIndex = [Math]::Max(0, [Array]::IndexOf($opts, $cur))
+        $cb.Tag = @{ fn = $fn; opts = $opts }
+        $cb.Add_SelectionChangeCommitted({ On-FnModel $this })
+        $modelTip.SetToolTip($cb, (Option-Tip (Fn-Model $fn)))
+        $cb.Enabled = $usable
+        $matchPanel.Controls.Add($cb)
+    } else {
+        $lb = New-Label $matchPanel "-" $x0 $y
+        $lb.AutoSize = $false; $lb.Size = New-Object System.Drawing.Size(112, $rowH); $lb.TextAlign = "MiddleLeft"
+    }
+    $i = 0
+    foreach ($s2 in $srcs) {
+        $on = (Fn-Sources $fn) -contains $s2
+        $chk = New-Check $matchPanel "" ($x1 + $i * $sw) $y $on
+        $chk.AutoSize = $false; $chk.Size = New-Object System.Drawing.Size(22, $rowH)
+        $chk.Tag = @{ fn = $fn; src = $s2 }
+        $chk.Enabled = $usable
+        $chk.Add_CheckedChanged({ On-FnSource $this })
+        if (-not $usable) { $modelTip.SetToolTip($chk, (Fn-Why $fn)) }
+        $i++
+    }
+    if (-not $usable -and (Fn-Model $fn)) {
+        # 왜 안 되는지 + 바로 고치는 길 (모델 받기) — 받을 모델이 있을 때만
+        $gb = New-Object System.Windows.Forms.Button
+        $gb.Location = New-Object System.Drawing.Point(($x1 + $srcs.Count * $sw + 6), $y)
+        $gb.Size = New-Object System.Drawing.Size(96, $rowH)
+        $gb.Text = (L "b_get")
+        $gb.Tag = @{ opt = (Fn-Model $fn) }
+        $gb.Add_Click({ Get-Model $this.Tag.opt })
+        $modelTip.SetToolTip($gb, (Fn-Why $fn))
+        $matchPanel.Controls.Add($gb)
+    }
+    return ($y + $rowH + 6)
+}
+function Paint-FnName($nm) {
+    # 고른 줄은 강조색, 못 쓰는 기능은 흐리게
+    if ($nm.Tag.fn -eq $script:SelFn) {
+        $nm.BackColor = [System.Drawing.SystemColors]::Highlight
+        $nm.ForeColor = [System.Drawing.SystemColors]::HighlightText
+    } else {
+        $nm.BackColor = [System.Drawing.Color]::Transparent
+        $nm.ForeColor = $(if (Fn-Usable $nm.Tag.fn) { [System.Drawing.SystemColors]::ControlText } else { [System.Drawing.SystemColors]::GrayText })
+    }
+}
+function Select-Fn($fn) {
+    # 왼쪽 줄을 눌렀다 — 강조만 옮기고 오른쪽을 다시 채운다(격자는 그대로)
+    $script:SelFn = $fn
+    foreach ($c in $matchPanel.Controls) { if ($c.Tag -and $c.Tag.name) { Paint-FnName $c } }
+    Build-Detail
 }
 function Fn-Text2($fn) {
     $e = $FnName[$fn]
@@ -1885,10 +2264,146 @@ function Fn-Tip($fn) {
     if ($opts.Count) { $lines += ((L "h_model") + ": " + ($opts -join ", ")) }
     return ($lines -join "`n")
 }
+function Fn-Kind($fn) {
+    # 상세 칸의 모양 — unusable · contract · targeted · domain · model · plain
+    if (-not (Fn-Usable $fn)) { return "unusable" }
+    if ((Fn-Rank $fn) -eq 1) { return "contract" }
+    $m = Fn-Model $fn
+    if ($m -eq "targeted") { return "targeted" }
+    if (-not $m) { return "plain" }
+    if (Option-Domain $m) { return "domain" }
+    return "model"
+}
+function Default-SelFn {
+    $on = @(Chosen-Functions)
+    if ($on.Count) { return $on[0] }
+    if (@($script:FnList) -contains "targeted_detect") { return "targeted_detect" }
+    return @($script:FnList)[0]
+}
+function Fn-Stages($fn) {
+    # 그 기능의 작업 조각 — 「기기 1차 거르기 — 서버, 온디바이스」 (cli places 의 units)
+    $out = @()
+    foreach ($u in @($script:FnUnits)) {
+        if ($u.function -ne $fn) { continue }
+        $where = @(@($u.roles) | ForEach-Object {
+            switch ([string]$_) { "gpu" { L "w_server" } "robot" { L "w_ondevice" } "sensor" { L "w_sensor" } "small" { L "w_small" } default { [string]$_ } }
+        })
+        $out += ("{0} — {1}" -f (Unit-Role $u), ($where -join ", "))
+    }
+    return @($out)
+}
+function Info-Row($label, $text, $y) {
+    # 상세의 한 줄 — 왼쪽 이름(흐리게) · 오른쪽 값(길면 줄을 바꾼다). 다음 줄의 y 를 돌려준다
+    if (-not $text) { return $y }
+    $w = [Math]::Max(200, $infoPanel.ClientSize.Width - 158)
+    $k = New-Label $infoPanel $label 4 $y
+    $k.ForeColor = [System.Drawing.SystemColors]::GrayText
+    $h = Wrap-H $text $w
+    $v = New-Label $infoPanel $text 150 $y
+    $v.AutoSize = $false
+    $v.Size = New-Object System.Drawing.Size($w, $h)
+    return ($y + [Math]::Max(22, $h) + 4)
+}
+function Info-Para($text, $y) {
+    $w = [Math]::Max(200, $infoPanel.ClientSize.Width - 12)
+    $h = Wrap-H $text $w
+    $l = New-Label $infoPanel $text 4 $y
+    $l.AutoSize = $false
+    $l.Size = New-Object System.Drawing.Size($w, $h)
+    return ($y + $h + 8)
+}
+function Info-Head($text, $y) {
+    $l = New-Label $infoPanel $text 4 $y
+    $l.Font = $fontB
+    return ($y + 24)
+}
+function Build-Detail {
+    # 오른쪽 상세 — 고른 기능의 모양(Fn-Kind)에 따라 채운다. 지정 물체 탐지 계열은 늘 있는 칸($tgtSection)을 보이고,
+    # 나머지는 $infoPanel 을 비우고 다시 채운다
+    if ($null -eq $infoPanel) { return }
+    $fn = $script:SelFn
+    if (-not $fn -or @($script:FnList) -notcontains $fn) { $fn = Default-SelFn; $script:SelFn = $fn }
+    $wasB = $script:Building
+    $script:Building = $true
+    if ($script:DetailFn -ne $fn) { $detailBody.AutoScrollPosition = New-Object System.Drawing.Point(0, 0); $script:DetailFn = $fn }
+    $infoPanel.SuspendLayout()
+    $infoPanel.Controls.Clear()
+    $kind = $(if ($fn) { Fn-Kind $fn } else { "none" })
+    $detailTitle.Text = $(if ($fn) { Fn-Text2 $fn } else { "" })
+    $detailWhy.Text = $(if ($fn) { Fn-Text $fn "why" } else { L "n_pick_fn" })
+    $modelTip.SetToolTip($detailTitle, $(if ($fn) { $fn } else { "" }))
+    $tgtSection.Visible = ($kind -eq "targeted")
+    $infoPanel.Visible = ($kind -ne "targeted")
+    $tgtSection.Location = New-Object System.Drawing.Point(0, $detailBody.AutoScrollPosition.Y)
+    $infoPanel.Location = New-Object System.Drawing.Point(0, $detailBody.AutoScrollPosition.Y)
+    $y = 4
+    $devs = $(if ($fn) { @(Fn-Sources $fn) } else { @() })
+    $devTxt = $(if ($devs.Count) { $devs -join ", " } else { "-" })
+    $stages = $(if ($fn) { (@(Fn-Stages $fn) -join "`n") } else { "" })
+    if ($kind -eq "model" -or $kind -eq "domain") {
+        $m = Fn-Model $fn
+        $info = $(if ($null -ne $script:ModelInfo) { $script:ModelInfo.$m } else { $null })
+        $y = Info-Head (L "h_model") $y
+        $y = Draw-Slots $infoPanel @(Fn-Slots $fn) $y
+        if ($null -ne $info) { $y = Info-Row (L "h_p90") ((L "n_p90") -f [int]$info.p90_ms.m) $y }
+        $y = Info-Row (L "h_on_dev") $devTxt $y
+        $y = Info-Row (L "h_stages") $stages $y
+        $y += 6
+        $y = Info-Head (L "h_cue") $y
+        $y = Draw-CueRows $infoPanel $m $false $y
+        $y += 8
+        $pb = New-Object System.Windows.Forms.Button
+        $pb.Location = New-Object System.Drawing.Point(4, $y)
+        $pb.Width = 130
+        $pb.Text = (L "b_preview")
+        $pb.Add_Click({ Show-Preview })
+        $infoPanel.Controls.Add($pb)
+        $y += 34
+    } elseif ($kind -eq "plain") {
+        $y = Info-Para (L "n_nomodel_fn") $y
+        $y = Info-Row (L "h_on_dev") $devTxt $y
+        $y = Info-Row (L "h_stages") $stages $y
+    } elseif ($kind -eq "contract") {
+        $y = Info-Para (L "n_contract") $y
+        $y = Info-Row (L "h_on_dev") $devTxt $y
+        $y = Info-Row (L "h_stages") $stages $y
+    } elseif ($kind -eq "unusable") {
+        $y = Info-Para (L "n_unusable") $y
+        $y = Info-Row (L "h_why") (Fn-Why $fn) $y
+        $e = $script:FnWhy[$fn]
+        if ($null -ne $e -and $e.how) { $y = Info-Row (L "h_how") ([string]$e.how) $y }
+        $y = Info-Row (L "h_stages") $stages $y
+        $opt = Fn-Model $fn
+        if ($opt) {
+            $gb = New-Object System.Windows.Forms.Button
+            $gb.Location = New-Object System.Drawing.Point(4, ($y + 4))
+            $gb.Width = 130
+            $gb.Text = (L "b_get")
+            $gb.Tag = @{ opt = $opt }
+            $gb.Add_Click({ Get-Model $this.Tag.opt })
+            $modelTip.SetToolTip($gb, (L "t_get"))
+            $infoPanel.Controls.Add($gb)
+            $y += 38
+        }
+    }
+    $infoPanel.Height = $y + 8
+    $infoPanel.ResumeLayout()
+    $script:Building = $wasB
+    if ($kind -eq "targeted") { Set-TargetNote; Layout-Target }
+}
+function Get-Model($opt) {
+    # 모델 받기 — tools/fetch_models.py 를 창 하나로 띄워 진행을 보인다 (끝나면 「모델 추가」를 다시 열어 확인)
+    if (-not $opt) { return }
+    Start-WslWindow "ds_fetch" (L "b_get") ("{0} tools/fetch_models.py --models {1}" -f $PyWsl, $opt)
+    [void][System.Windows.Forms.MessageBox]::Show(((L "m_get_started") -f $opt), (L "d_title"))
+}
 function On-FnModel($cb) {
     if ($script:Building) { return }
     $script:FnModel[$cb.Tag.fn] = @($cb.Tag.opts)[$cb.SelectedIndex]
+    $script:SelFn = $cb.Tag.fn
+    Build-Match
     Build-CueTable
+    Build-CueBoxes
     Build-Overlay
     Changed
 }
@@ -1897,9 +2412,10 @@ function On-FnPick($chk) {
     if ($script:Building) { return }
     $fn = $chk.Tag.fn
     $script:FnSrc[$fn] = $(if ($chk.Checked) { @(On-All) } else { @() })
+    $script:SelFn = $fn
     Build-Match
     Build-CueTable
-    Build-CueBoxes                                    # 지정 클래스 탭의 「기기」 줄이 켠 기기를 따라가게
+    Build-CueBoxes                                    # 대상 표의 기기 칸이 켠 기기를 따라가게
     Build-Overlay
     Sync-Enabled
     Update-Nav
@@ -1916,6 +2432,7 @@ function On-FnSource($chk) {
         $now = @($now | Where-Object { $_ -ne $src })
     }
     $script:FnSrc[$fn] = @($now)
+    $script:SelFn = $fn
     Build-Match
     Build-CueTable
     Build-CueBoxes
@@ -1963,6 +2480,7 @@ $manualPanel = New-Object System.Windows.Forms.Panel
 $manualPanel.Location = New-Object System.Drawing.Point(8, 146)
 $manualPanel.Size = New-Object System.Drawing.Size(596, 390)
 $manualPanel.AutoScroll = $true
+$manualPanel.Anchor = "Top, Bottom, Left, Right"
 $tPlace.Controls.Add($manualPanel)
 
 function Node-Shown($n) {
@@ -2325,6 +2843,7 @@ function Reload-Catalog {
     Build-CueTable
     Build-CueBoxes
     Build-Overlay
+    Build-Detail
     Sync-Enabled
 }
 function Weight-Rows {
@@ -2482,7 +3001,7 @@ function New-SourceCheck($n) {
     if ($srcChecks.ContainsKey($n)) { return }
     $c = New-Check $gStream $n $script:SrcX $script:SrcY ($s.sources -contains $n)
     $srcChecks[$n] = $c
-    $c.Add_CheckedChanged({ Build-Match; Build-CueTable; Build-Manual; Update-Nav; Changed })
+    $c.Add_CheckedChanged({ Build-Match; Build-CueTable; Build-CueBoxes; Build-Manual; Update-Nav; Changed })
     $script:SrcX += $c.Width + 10
     if ($script:SrcX -gt 470) { $script:SrcX = 80; $script:SrcY += 26 }
     $script:Sources = @($script:Sources) + $n
@@ -2641,11 +3160,14 @@ function Load-Functions {
     if ($null -eq $r -or $null -eq $r.function_options) { return }
     $script:FnOpts = $r.function_options
     $script:ModelInfo = $r.model_info
+    $script:FnUnits = @($r.units)                         # 상세 칸 「단계」 — 기능마다 작업 조각
+    $g = @(@($r.nodes) | Where-Object { $_.role -eq "gpu" -and $null -ne $_.gpu } | Select-Object -First 1)
+    if ($g.Count) { $script:GpuTotalMB = [int]$g[0].gpu.total_mb }   # 「예상 GPU a / b GB」 의 b
     $all = @($r.function_options.PSObject.Properties.Name)
     $pre = Invoke-Wsl @($PyWsl, "-m", "ds_resources.cli", "preflight", "--json")
     $script:FnWhy = @{}
     $pj = From-Json $pre
-    foreach ($f in @($pj.features)) { $script:FnWhy[$f.key] = [pscustomobject]@{ usable = $f.usable; runnable = $f.runnable; why = $f.why } }
+    foreach ($f in @($pj.features)) { $script:FnWhy[$f.key] = [pscustomobject]@{ usable = $f.usable; runnable = $f.runnable; why = $f.why; how = $f.how } }
     # 순서: 지금 돌릴 수 있는 것(실행체 · 모델이 있다) → 쓸 수는 있으나 계약만 있는 것 → 못 쓰는 것. 같은 묶음 안은 이름순
     # 가장 자주 쓰는 기능(FnPinned)은 쓸 수 있으면 맨 위에 고정한다 (2026-11-27)
     $script:FnList = @($all | Sort-Object @{ Expression = { Fn-Pin $_ } }, @{ Expression = { Fn-Rank $_ } }, @{ Expression = { $_ } })
@@ -2675,13 +3197,15 @@ function Load-Places {
 $status = New-Object System.Windows.Forms.Label
 $status.AutoSize = $false
 $status.Location = New-Object System.Drawing.Point(12, 592)
-$status.Size = New-Object System.Drawing.Size(288, 40)
+$status.Size = New-Object System.Drawing.Size(600, 40)
+$status.Anchor = "Bottom, Left, Right"
 $form.Controls.Add($status)
 $script:Busy = $false
 # 언어 — 화면 글만 바꾼다 (모델 · 근거 · 대상 이름은 카탈로그가 주는 그대로)
 $langBox = New-Object System.Windows.Forms.ComboBox
 $langBox.DropDownStyle = "DropDownList"
-$langBox.Location = New-Object System.Drawing.Point(304, 598)
+$langBox.Location = New-Object System.Drawing.Point(844, 598)
+$langBox.Anchor = "Bottom, Right"
 $langBox.Width = 92
 [void]$langBox.Items.Add("한국어")
 [void]$langBox.Items.Add("English")
@@ -2690,32 +3214,36 @@ $form.Controls.Add($langBox)
 # 단계 이동 — 탭을 눌러 바로 가도 되고 여기로 한 단계씩 가도 된다
 $prevBtn = New-Object System.Windows.Forms.Button
 $prevBtn.Size = New-Object System.Drawing.Size(70, 34)
-$prevBtn.Location = New-Object System.Drawing.Point(402, 592)
+$prevBtn.Location = New-Object System.Drawing.Point(942, 592)
+$prevBtn.Anchor = "Bottom, Right"
 [void](Reg $prevBtn "b_prev")
 $form.Controls.Add($prevBtn)
 $nextBtn = New-Object System.Windows.Forms.Button
 $nextBtn.Size = New-Object System.Drawing.Size(70, 34)
-$nextBtn.Location = New-Object System.Drawing.Point(476, 592)
+$nextBtn.Location = New-Object System.Drawing.Point(1016, 592)
+$nextBtn.Anchor = "Bottom, Right"
 [void](Reg $nextBtn "b_next")
 $form.Controls.Add($nextBtn)
 $run = New-Object System.Windows.Forms.Button
 [void](Reg $run "b_run")
 $run.Size = New-Object System.Drawing.Size(80, 34)
-$run.Location = New-Object System.Drawing.Point(550, 592)
+$run.Location = New-Object System.Drawing.Point(1090, 592)
+$run.Anchor = "Bottom, Right"
 $form.Controls.Add($run)
 $form.AcceptButton = $run
 
 function Step-Usable($i) {
-    # 3단계(지정 클래스)는 그 기능을 골랐을 때만 — 「다음」이 건너뛴다
-    if ($i -eq 2) { return ($visOn.Checked -and ((Chosen-Models) -contains "targeted")) }
+    # 지금은 건너뛸 단계가 없다 — 옛 지정 클래스 단계(고르지 않으면 건너뛰던 것)는 기능 단계 상세로 들어갔다 (2026-11-27).
+    # 단계를 다시 건너뛰게 되면 여기서 고른다(「이전 · 다음」과 Update-Nav 가 이것을 본다)
     return $true
 }
+function Place-Step { return $tabs.TabPages.IndexOf($tPlace) }   # 배치 단계의 자리 (단계 수가 바뀌어도)
 function Go-Step($i) {
     if ($i -lt 0 -or $i -ge $tabs.TabPages.Count) { return }
     $tabs.SelectedIndex = $i
     Update-Nav
     # 배치 탭은 「고른 기능」을 보여 준다 — 기능이 바뀐 채로 들어오면 다시 읽는다 (몇 초 걸린다)
-    if ($i -eq 4 -and $visOn.Checked -and (Functions-Args) -ne $script:PlacesKey) { Load-Places }
+    if ($i -eq (Place-Step) -and $visOn.Checked -and (Functions-Args) -ne $script:PlacesKey) { Load-Places }
 }
 function Step-Move($d) {
     $i = $tabs.SelectedIndex + $d
@@ -2749,20 +3277,21 @@ function Apply-Language {
 }
 
 function Sync-Enabled {
+    # 대상 칸(대상 표 · 대상 추가 · 거리 · 근거 표)은 지정 물체 탐지 파이프라인을 골랐을 때만 (옛 지정 클래스 탭과 같은 뜻)
     $tOn = $visOn.Checked -and ((Chosen-Models) -contains "targeted")
-    foreach ($c in $tTarget.Controls) { $c.Enabled = $tOn }
+    $tgtSection.Enabled = $tOn
     foreach ($k in $featChecks.Keys) { $featChecks[$k].Enabled = $visOn.Checked -and [bool](@($cat.features) | Where-Object { $_.key -eq $k -and $_.available }) }
     $overPanel.Enabled = $visOn.Checked
     $orchOn.Enabled = $visOn.Checked
     $planBtn.Enabled = $visOn.Checked
-    $gCues.Enabled = $visOn.Checked
     $gMatch.Enabled = $visOn.Checked
+    $gDetail.Enabled = $visOn.Checked
     $autoRadio.Enabled = $visOn.Checked -and $orchOn.Checked
     $manualOn.Enabled = $visOn.Checked -and $orchOn.Checked
     $manualLoad.Enabled = $visOn.Checked -and $orchOn.Checked
     $manualPanel.Enabled = $visOn.Checked -and $orchOn.Checked -and $manualOn.Checked
     $sliceU.Enabled = $sliceOn.Checked
-    $tabs.TabPages[2].Enabled = (Step-Usable 2)        # 지정 클래스는 그 기능을 골랐을 때만
+    if ($tgtSection.Visible) { Set-TargetNote }
 }
 
 # ---- 구성 · 프로필
@@ -3091,10 +3620,10 @@ $poll.Add_Tick({
 $poll.Start()
 
 # ---- 연결
-foreach ($c in $srcChecks.Values) { $c.Add_CheckedChanged({ Build-Match; Build-CueTable; Build-Manual; Update-Nav; Changed }) }
+foreach ($c in $srcChecks.Values) { $c.Add_CheckedChanged({ Build-Match; Build-CueTable; Build-CueBoxes; Build-Manual; Update-Nav; Changed }) }
 $tabs.Add_SelectedIndexChanged({
     Update-Nav
-    if ($tabs.SelectedIndex -eq 4 -and $visOn.Checked -and (Functions-Args) -ne $script:PlacesKey) { Load-Places }
+    if ($tabs.SelectedIndex -eq (Place-Step) -and $visOn.Checked -and (Functions-Args) -ne $script:PlacesKey) { Load-Places }
 })
 $srcCheck.Add_Click({ Load-Sources })
 $srcAdd.Add_Click({ Show-SourceAdd })
@@ -3108,7 +3637,7 @@ $langBox.Add_SelectionChangeCommitted({ Apply-Language; Changed })
 $cam.Add_SelectedIndexChanged({ Changed })
 $sliceOn.Add_CheckedChanged({ Build-Match; Changed })
 $sliceU.Add_Leave({ Changed })
-$visOn.Add_CheckedChanged({ Build-Overlay; Build-CueTable; Build-Match; Update-Nav; Changed })
+$visOn.Add_CheckedChanged({ Build-Overlay; Build-CueTable; Build-CueBoxes; Build-Match; Update-Nav; Changed })
 foreach ($c in $featChecks.Values) { $c.Add_CheckedChanged({ Changed }) }
 $run.Add_Click({ Start-All })
 $orchOn.Add_CheckedChanged({ Build-Manual; Sync-Enabled; Changed })
@@ -3120,7 +3649,7 @@ $manualTip.SetToolTip($planBtn, (L "t_plan"))
 $manualTip.SetToolTip($weightsBtn, (L "t_weights"))
 $weightsBtn.Add_Click({ Show-Weights })
 $planBtn.Add_Click({ Show-Plan })
-$matchReset.Add_Click({ $script:FnSrc = @{}; $script:FnModel = @{}; Build-Match; Build-CueTable; Build-Overlay; Sync-Enabled; Changed })
+$matchReset.Add_Click({ $script:FnSrc = @{}; $script:FnModel = @{}; Build-Match; Build-CueTable; Build-CueBoxes; Build-Overlay; Sync-Enabled; Changed })
 $manualLoad.Add_Click({ Load-Places })
 $manualOn.Add_CheckedChanged({
     if ($manualOn.Checked -and $null -eq $script:Places) { Load-Places } else { Build-Manual }
@@ -3164,7 +3693,8 @@ if ($alive.Count -gt 0) {
 
 # ---- 자체 시험 (창을 띄우지 않는다): $env:DS_LAUNCHER_SELFTEST 가 있으면 선택을 코드로 바꿔 보고 프로필을 찍는다
 function Find-Ctl($panel, $pred) {
-    foreach ($g in $panel.Controls) { foreach ($c in $g.Controls) { if (& $pred $c) { return $c } } }
+    # 몇 겹이든 찾는다 — 대상 표는 표 → 줄 패널 → 펼친 칸으로 겹쳐 있다 (2026-11-27)
+    foreach ($c in @(All-Ctls $panel)) { if (& $pred $c) { return $c } }
     return $null
 }
 function Pick-Function($fn, $model, $sources) {
@@ -3173,8 +3703,17 @@ function Pick-Function($fn, $model, $sources) {
     $script:FnSrc[$fn] = @($sources)
     Build-Match
     Build-CueTable
+    Build-CueBoxes
     Build-Overlay
     Sync-Enabled
+}
+function Save-Shot($name) {
+    # 확인용 그림 — 지금 창을 파일로 ($env:DS_LAUNCHER_TESTSHOT 폴더)
+    [System.Windows.Forms.Application]::DoEvents()
+    $bmp = New-Object System.Drawing.Bitmap $form.Width, $form.Height
+    $form.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $form.Width, $form.Height))
+    $bmp.Save((Join-Path $env:DS_LAUNCHER_TESTSHOT $name), [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
 }
 function Self-Test {
     $r = [ordered]@{}
@@ -3197,15 +3736,18 @@ function Self-Test {
     Pick-Function "object_detect" "yoloe" @(@(On-All)[0])
     Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
     $r.fn_order = @($script:FnList | ForEach-Object { "{0}:{1}" -f (Fn-Rank $_), $_ })   # 돌릴 수 있는 기능이 위로
-    # 근거 표 — 근거 하나를 끄고 근거 모델을 고르면 프로필 cue_setup 으로 가고, 지정 클래스 탭의 그 칸은 흐려진다 (2026-11-27)
+    # 근거 표 — 근거 하나를 끄고 근거 모델을 고르면 프로필 cue_setup 으로 가고, 대상 표의 그 칸은 흐려진다 (2026-11-27)
     foreach ($n in @("person", "chair")) { if ($script:TargetChecks[$n]) { $script:TargetChecks[$n].Checked = $true } }
     $script:CueOff = @("semantic"); $script:CuePick = @{ ovd = "yolo_world"; depth = "unidepth_l" }
     Build-CueTable; Build-CueBoxes
     $r.cue_setup = (Build-Profile).models.targeted.cue_setup
-    $r.cue_table_combos = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] } | ForEach-Object { $_.Text })
+    # 근거 모델 고르기는 근거 표 위 슬롯 줄(Fn-Slots)로 옮겼다
+    $r.cue_table_combos = @($slotPanel.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] } | ForEach-Object { $_.Text })
+    $r.targeted_slots = @(Fn-Slots "targeted_detect" | ForEach-Object { "{0}={1}" -f $_.role, $_.current })
+    $r.object_slots = @(Fn-Slots "object_detect" | ForEach-Object { "{0}={1}" -f $_.role, $_.current })
     $r.cue_table_off_box = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Tag.key -eq "semantic" } | ForEach-Object { $_.Checked })
     $pc = Find-Ctl $cuePanel { param($c) $c -is [System.Windows.Forms.CheckBox] -and $c.Tag.target -eq "person" -and $c.Tag.key -eq "semantic" }
-    $r.class_tab_semantic_enabled = $(if ($pc) { $pc.Enabled } else { "none" })
+    $r.target_row_semantic_enabled = $(if ($pc) { $pc.Enabled } else { "none" })
     $script:CueOff = @(); $script:CuePick = @{}
     Build-CueTable; Build-CueBoxes
     # 기기마다 다른 대상 (2026-11-27) — 두 기기에 지정 물체 탐지를 켜고 chair 는 첫 기기에서만
@@ -3216,22 +3758,45 @@ function Self-Test {
     Build-CueBoxes
     $script:TargetDev["chair"] = @($two[0])
     $r.device_targets = (Build-Profile).devices
-    $r.device_rows = @(Find-Ctl $cuePanel { param($c) $c -is [System.Windows.Forms.CheckBox] -and $c.Tag.dev } | ForEach-Object { $_.Text })
+    $r.device_rows = @(All-Ctls $cuePanel | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Tag -and $_.Tag.dev -and $_.Tag.target -eq "chair" } |
+                       ForEach-Object { "{0}:{1}" -f $_.Tag.dev, $_.Checked })
+    # 상세 칸 — 기능마다 모양 · 「계약만 / 못 씀」 묶음 · GPU 합
+    $r.detail_kinds = @($script:FnList | ForEach-Object { "{0}:{1}" -f $_, (Fn-Kind $_) }) -join " "
+    $r.more_group = @($script:FnList | Where-Object { (Fn-Rank $_) -gt 0 }).Count
+    $r.gpu_total = $gpuTotal.Text
+    Select-Fn "targeted_detect"
+    $r.detail_selected = "{0}:{1}" -f $script:SelFn, (Fn-Kind $script:SelFn)
+    $r.target_rows = @($cuePanel.Controls | Where-Object { $_.Tag -and $_.Tag.row } | ForEach-Object { $_.Tag.row })
     if ($env:DS_LAUNCHER_TESTSHOT) {
-        # 확인용 그림 — 자체 시험 상태(기기별 대상 등)의 기능 · 지정 클래스 단계를 파일로 (사람 화면은 건드리지 않는다)
+        # 확인용 그림 — 기능 단계(지정 물체 탐지 · chair 펼침)와 다른 기능의 상세를 파일로.
+        # 창은 화면 밖에 띄운다(사람이 쓰는 화면을 가리지 않게)
+        $form.StartPosition = "Manual"
+        $form.Location = New-Object System.Drawing.Point(-20000, -20000)
         $form.Show()
-        foreach ($ti in 1, 2) {
-            $tabs.SelectedIndex = $ti
-            [System.Windows.Forms.Application]::DoEvents()
-            $bmp = New-Object System.Drawing.Bitmap $form.Width, $form.Height
-            $form.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $form.Width, $form.Height))
-            $bmp.Save((Join-Path $env:DS_LAUNCHER_TESTSHOT ("test_step{0}.png" -f $ti)), [System.Drawing.Imaging.ImageFormat]::Png)
-            $bmp.Dispose()
-        }
+        $tabs.SelectedIndex = 1
+        $script:CueOpen["chair"] = $true; Build-CueBoxes
+        Save-Shot "test_step1.png"
+        $script:CueOpen["chair"] = $false; Build-CueBoxes
+        Select-Fn "object_detect"
+        Save-Shot "test_step2.png"
+        $script:MoreOpen = $true; Build-Match
+        Select-Fn "slam"
+        Save-Shot "test_step2_contract.png"
+        Select-Fn "video_preprocess"
+        Save-Shot "test_step2_unusable.png"
+        Select-Fn "reid"
+        Save-Shot "test_step2_reid.png"
+        Select-Fn "river_detect"
+        Save-Shot "test_step2_river.png"
+        $script:MoreOpen = $false; Build-Match
+        Select-Fn "targeted_detect"
         $form.Hide()
     }
+    Select-Fn "reid"
+    $r.detail_reid_note = $tgtNote.Text
+    Select-Fn "targeted_detect"
     $script:TargetDev = @{}
-    $r.target_tab_enabled = $tTarget.Controls[0].Enabled
+    $r.target_panel_enabled = $tgtSection.Enabled
     # 사용자 설정에 기대지 않는다 — 아래 단계가 쓰는 대상을 직접 켠다 (저장된 대상이 person · chair 뿐이면 door 근거
     # 컨트롤이 없어 시험이 깨졌다, 2026-11-24)
     foreach ($n in @("person", "door", "chair", "desk")) { if ($script:TargetChecks[$n]) { $script:TargetChecks[$n].Checked = $true } }
@@ -3267,7 +3832,7 @@ function Self-Test {
     $r.config = Current-Config
     $r.profile = Build-Profile
     Pick-Function "targeted_detect" "targeted" @()
-    $r.target_tab_enabled_after_off = $tTarget.Controls[0].Enabled
+    $r.target_panel_enabled_after_off = $tgtSection.Enabled
     # 「배치 보기」 는 profile.json · 프로필 버전에 손대지 않는다 (M11 R4)
     $snap = { if (Test-Path $ProfileFile) { [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ProfileFile)) } else { "missing" } }
     $before, $verBefore = (& $snap), $script:ProfileVer
@@ -3319,14 +3884,13 @@ function Self-Test {
     $srcChecks["pi14"].Checked = $false
     # ---- 단계 이동 · 한/영 (2026-11-26)
     $r.steps_ko = @(0..($tabs.TabPages.Count - 1) | ForEach-Object { $tabs.TabPages[$_].Text })
-    Pick-Function "targeted_detect" "targeted" @()
-    Go-Step 1
-    Step-Move 1
-    $r.next_skips_targets = $tabs.SelectedIndex            # 지정 클래스를 안 골랐으면 3단계를 건너뛴다 (2 → 3)
+    # 지정 클래스 단계는 기능 단계로 합쳤다 — 기능에서 「다음」은 늘 오버레이(인덱스 2), 오버레이에서 「이전」은 기능(1)
     Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
     Go-Step 1
     Step-Move 1
-    $r.next_into_targets = $tabs.SelectedIndex             # 골랐으면 3단계(인덱스 2)로
+    $r.next_from_func = $tabs.SelectedIndex
+    Step-Move -1
+    $r.prev_from_over = $tabs.SelectedIndex
     $r.cue_rows_ko = @($cueTable.Controls | ForEach-Object { $_.Text }) -join " | "
     $langBox.SelectedIndex = 1
     Apply-Language
@@ -3336,6 +3900,16 @@ function Self-Test {
     $r.form_en = $form.Text
     $r.place_en = @($autoRadio.Text, $manualOn.Text)
     $r.cue_rows_en = @($cueTable.Controls | ForEach-Object { $_.Text }) -join " | "
+    $r.detail_en = @($detailTitle.Text, $tgtHead.Text, $addLbl.Text, $cueHead.Text, $gpuTotal.Text) -join " | "
+    if ($env:DS_LAUNCHER_TESTSHOT) {
+        $form.Show()
+        $tabs.SelectedIndex = 1
+        Save-Shot "test_step1_en.png"
+        Select-Fn "object_detect"
+        Save-Shot "test_step2_en.png"
+        Select-Fn "targeted_detect"
+        $form.Hide()
+    }
     $r.check_inputs_en = (Check-Inputs ([pscustomobject]@{ on = @(); onAll = @() }))
     $langBox.SelectedIndex = 0
     Apply-Language
