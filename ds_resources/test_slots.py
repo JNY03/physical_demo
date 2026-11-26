@@ -237,7 +237,7 @@ def test_places_json_has_function_slots(tmp_path):
     row = fs["object_detect"]["server"][0]
     assert set(row) >= {"role", "label", "label_en", "needs", "optional", "multi", "choices", "default"}
     assert row["role"] == "model" and row["default"] == "yoloe" and row["choices"][0]["key"] == "yoloe"
-    assert {r["role"] for r in fs["targeted_detect"]["server"]} == {"model", "ovd", "depth"}
+    assert {r["role"] for r in fs["targeted_detect"]["server"]} == {"model", "detector", "free_arm", "embed", "ovd", "depth"}
     json.dumps(pl, ensure_ascii=False)                                     # 그대로 JSON 이 된다
     assert pl["slot_selection"]["depth_estimate"]["server"]["model"] == "unidepth"
 

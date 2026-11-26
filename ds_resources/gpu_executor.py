@@ -85,7 +85,7 @@ def estimate_mb(models, profile=None, cfg=None):
         if (resolved.get("features") or {}).get("reid"):
             need.add("reid")
         if (resolved.get("targeted") or {}).get("distance"):
-            need.add("depth")
+            need.add(cc.depth_key((resolved.get("targeted") or {}).get("cue_models")))   # 근거 표에서 고른 거리 모델
     elif (profile or {}).get("features", {}).get("reid"):
         need.add("reid")
     mb = cc.gpu_mb(list(models), sorted(need))
