@@ -718,15 +718,27 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     devs = profile.get("devices") or {}
     if not isinstance(devs, dict):
         raise ProfileError("프로필 devices 는 기기 → 설정 사전")
+    result["targets_dev"] = {}
     for dv, part in devs.items():
         dm = (part or {}).get("models") or {}
         for m, mp in dm.items():
             if m not in MODELS:
                 raise ProfileError("devices.%s 에 모르는 모델 %r" % (dv, m))
-            if set(mp) - {"overlay"}:
-                raise ProfileError("devices.%s.%s 에는 overlay 만 줄 수 있음" % (dv, m))
-            if m in models:
+            allowed = {"overlay", "targets"} if m == "targeted" else {"overlay"}
+            if set(mp) - allowed:
+                raise ProfileError("devices.%s.%s 에는 %s 만 줄 수 있음" % (dv, m, " · ".join(sorted(allowed))))
+            if m in models and "overlay" in mp:
                 result["devices"].setdefault(dv, {})[m] = check_overlay(m, mp["overlay"], opts[m])
+            if m == "targeted" and "targets" in mp and "targeted" in models:
+                # 기기마다 맡을 대상 (2026-11-27) — 전체 대상 중 일부. 비전은 전체로 찾고 그 기기에는 이것만 남긴다
+                tl = mp["targets"]
+                if not isinstance(tl, list) or not all(isinstance(x, str) for x in tl):
+                    raise ProfileError("devices.%s.targeted.targets 는 대상 이름 목록" % dv)
+                bad = [x for x in tl if x not in names]
+                if bad:
+                    raise ProfileError("devices.%s.targeted.targets 에 고르지 않은 대상: %s (고른 대상: %s)"
+                                       % (dv, ", ".join(bad), ", ".join(names)))
+                result["targets_dev"][dv] = list(dict.fromkeys(tl))
     return result
 
 

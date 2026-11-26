@@ -580,3 +580,19 @@ def test_depth_choice_resolves_local_weights_and_needs_that_model():
     need = cc.needed_models(r, {})
     assert "depth" not in need and ("unidepth_l" in need or not any("depth" in cc.CUES[k]["needs"]
                                                                    for t in r["targets"] for k in t["cues"]))
+
+
+def test_device_targets_subset_of_chosen_targets():
+    # 2026-11-27 사용자: pi12 는 의자, Go1(robot1) 은 사람 — 같은 프로세스에서 기기마다 다른 대상
+    prof = {"models": {"targeted": {"targets": [{"name": "person"}, {"name": "chair"}]}},
+            "devices": {"pi12": {"models": {"targeted": {"targets": ["chair"]}}},
+                        "robot1": {"models": {"targeted": {"targets": ["person"]}}}}}
+    r = _resolve(prof)
+    assert r["targets_dev"] == {"pi12": ["chair"], "robot1": ["person"]}
+    bad = copy.deepcopy(prof)
+    bad["devices"]["pi12"]["models"]["targeted"]["targets"] = ["desk"]
+    with pytest.raises(cc.ProfileError, match="고르지 않은 대상"):
+        _resolve(bad)
+    bad["devices"]["pi12"]["models"]["targeted"] = {"cues": []}
+    with pytest.raises(cc.ProfileError, match="만 줄 수 있음"):
+        _resolve(bad)

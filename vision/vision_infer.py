@@ -3819,6 +3819,12 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
             dets = roi_offset(dets, crop[0], crop[1])
         else:
             info, dets = runner(bgr)
+    if det_model == "targeted":
+        # 기기마다 다른 대상 (2026-11-27, 예: pi12 의자 · robot1 사람) — 한 번 찾고 그 기기의 대상만 남긴다
+        allow = (cfg.get("_targets_dev") or {}).get(device)
+        if allow is not None:
+            dets = [d for d in dets if d.get("name") in allow]
+            info = dict(info, targets_device=list(allow))
     if rects:
         before = len(dets)
         dets = [d for d in dets if roi_keep(d, rects, W, H)]
@@ -4072,6 +4078,7 @@ def apply_profile(cfg, resolved):
     """확정된 프로필을 cfg 에 건다 — 오버레이는 그대로, targeted 는 _resolved 로."""
     cfg["_overlay"] = resolved.get("overlay") or {}
     cfg["_overlay_dev"] = resolved.get("devices") or {}
+    cfg["_targets_dev"] = resolved.get("targets_dev") or {}    # 기기 → 그 기기가 맡을 대상 (없으면 전부)
     cfg["_features"] = resolved.get("features") or {}
     cfg["_profile_label"] = resolved.get("label")
     cfg["_profile_version"] = resolved.get("version")

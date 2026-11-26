@@ -369,6 +369,7 @@ $Str = @{
     lg_none       = @{ ko = "올린 작업 없음"; en = "nothing placed" }
     lg_over       = @{ ko = "넘침"; en = "over" }
     lg_auto       = @{ ko = "자동 예정"; en = "planned" }
+    h_target_dev  = @{ ko = "기기"; en = "Devices" }
     n_cue_off     = @{ ko = "기능 단계 근거 표에서 끈 근거입니다"; en = "Turned off in the cue table (Capabilities step)" }
     n_same_cues   = @{ ko = "{0} 과 같은 근거 (위 표)"; en = "same cues as {0} (above)" }
 }
@@ -538,12 +539,12 @@ $s = [pscustomobject]@{ sources = $Sources; robotCam = 1; vision = $false; model
                         slice = $false; sliceU = ""; targets = $null; direct = @(); distance = $cat.distance_default;
                         cueMode = $null; cues = $null; overlay = $null; features = $null;
                         assign = $null; manual = $false; manualPlace = $null; lang = "ko"; nodeLimit = $null;
-                        fnModel = $null; fnSrc = $null; cueOff = $null; cuePick = $null }
+                        fnModel = $null; fnSrc = $null; cueOff = $null; cuePick = $null; targetDev = $null }
 if (Test-Path $SettingsFile) {
     try {
         $saved = Get-Content $SettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
         foreach ($k in "sources", "robotCam", "vision", "orchestrate", "models", "slice", "sliceU", "targets", "direct", "distance",
-                       "cueMode", "cues", "overlay", "features", "assign", "manual", "manualPlace", "lang", "nodeLimit", "fnModel", "fnSrc", "cueOff", "cuePick") {
+                       "cueMode", "cues", "overlay", "features", "assign", "manual", "manualPlace", "lang", "nodeLimit", "fnModel", "fnSrc", "cueOff", "cuePick", "targetDev") {
             if ($null -ne $saved.$k) { $s.$k = $saved.$k }
         }
     } catch { }
@@ -569,6 +570,9 @@ $script:FnOpts   = $null
 # 근거 표 (2026-11-27) — 지정 물체 탐지 파이프라인 전체에서 끈 근거 · 근거 모델 고름 (need → "auto" | "a+b")
 $script:CueOff   = @(@($s.cueOff) | Where-Object { $_ })
 $script:CuePick  = To-Hash $s.cuePick
+# 대상 → 그 대상을 찾을 기기 목록 (없으면 지정 물체 탐지를 켠 기기 전부). 예: chair → pi12, person → robot1
+$script:TargetDev = @{}
+foreach ($kv in (To-Hash $s.targetDev).GetEnumerator()) { $script:TargetDev[$kv.Key] = @($kv.Value) }
 $script:NodeLimit = To-Hash $s.nodeLimit        # 노드 → @{headroom, cores} (런처에서 조절하는 한도)
 $script:PlacesKey = $null                                # 노드 · 작업을 어떤 기능 묶음으로 읽었나
 $script:PreviewCompare = $false                          # 미리보기에서 적용 전과 견줄까
@@ -1207,6 +1211,29 @@ function On-TargetCheck($cb) {
 
 function Checked-Targets { return @(Target-Names | Where-Object { $script:TargetChecks[$_] -and $script:TargetChecks[$_].Checked }) }
 
+function Targeted-Sources {
+    # 지정 물체 탐지 파이프라인(targeted)을 켠 기기들 — 기능마다 켠 소스의 합
+    $out = @()
+    foreach ($fn in (Chosen-Functions)) {
+        if ((Fn-Model $fn) -eq "targeted") { $out += @(Fn-Sources $fn) }
+    }
+    return @($out | Select-Object -Unique)
+}
+function Target-Devices($name) {
+    # 그 대상을 찾을 기기 — 고른 적 없으면 지정 물체 탐지를 켠 기기 전부
+    $all = @(Targeted-Sources)
+    $v = $script:TargetDev[$name]
+    if ($null -eq $v) { return $all }
+    return @($all | Where-Object { @($v) -contains $_ })
+}
+function On-TargetDev($chk) {
+    if ($script:Building) { return }
+    $n = $chk.Tag.target
+    $cur = @(Target-Devices $n | Where-Object { $_ -ne $chk.Tag.dev })
+    if ($chk.Checked) { $cur += $chk.Tag.dev }
+    $script:TargetDev[$n] = @($cur)
+    Changed
+}
 function Build-CueBoxes {
     $script:Building = $true
     $cuePanel.SuspendLayout()
@@ -1216,7 +1243,9 @@ function Build-CueBoxes {
         $list = @(Cue-List $name)
         $direct = Is-Direct $name
         $rows = [Math]::Ceiling(($list.Count) / 4)
-        $h = 54 + 26 * $rows + ($(if ($direct) { 30 } else { 0 }))
+        $tsrc = @(Targeted-Sources)
+        $devRow = $tsrc.Count -ge 2                     # 기기가 둘 이상일 때만 기기마다 고르는 줄을 둔다
+        $h = 54 + 26 * $rows + ($(if ($direct) { 30 } else { 0 })) + ($(if ($devRow) { 30 } else { 0 }))
         $g = New-Object System.Windows.Forms.GroupBox
         $g.Text = $name
         $g.Location = New-Object System.Drawing.Point(4, $y)
@@ -1277,6 +1306,19 @@ function Build-CueBoxes {
             $reg.Tag = $name
             $reg.Add_Click({ On-Register $this })
             $g.Controls.Add($reg)
+        }
+        if ($devRow) {
+            # 이 대상을 어느 기기에서 찾을지 (2026-11-27, 예: chair → pi12 만 · person → robot1 만)
+            $dy = $h - 32
+            [void](New-Label $g (L "h_target_dev") 12 ($dy + 3))
+            $dx = 60
+            $mine = @(Target-Devices $name)
+            foreach ($dv in $tsrc) {
+                $dc = New-Check $g $dv $dx $dy ($mine -contains $dv)
+                $dc.Tag = @{ target = $name; dev = $dv }
+                $dc.Add_CheckedChanged({ On-TargetDev $this })
+                $dx += 110
+            }
         }
         $y += $h + 6
     }
@@ -1380,6 +1422,13 @@ function Fn-Sources($fn) {
     return @(@(On-All) | Where-Object { $v -contains $_ })      # 지금 켠 소스만
 }
 function Fn-On($fn) { return (Fn-Sources $fn).Count -gt 0 }
+#: 맨 위에 고정할 기능 — 이 순서대로 (쓸 수 없으면 고정하지 않는다)
+$FnPinned = @("targeted_detect", "zeroshot_detect")
+function Fn-Pin($fn) {
+    $i = [Array]::IndexOf($FnPinned, $fn)
+    if ($i -lt 0 -or -not (Fn-Usable $fn)) { return 99 }
+    return $i
+}
 function Fn-Rank($fn) {
     # 0 돌릴 수 있음 · 1 쓸 수 있으나 실행체 없음(계약만) · 2 못 씀. preflight 를 모르면 0 (모름은 막지 않는다)
     if (-not (Fn-Usable $fn)) { return 2 }
@@ -1729,6 +1778,11 @@ function Build-Match {
     if ($visOn.Checked -and $srcs.Count -gt 0 -and $null -ne $script:FnList) {
         $x0 = 170                                    # 모델 콤보
         $x1 = $x0 + 118                              # 소스 칸들
+        # 한 줄 높이 = 모델 고르는 칸의 높이(글꼴 · DPI 에 따라 다르다) — 모든 칸을 이 높이로 맞춘다
+        $probeCb = New-Object System.Windows.Forms.ComboBox
+        $probeCb.Font = $matchPanel.Font
+        $rowH = [Math]::Max(24, [int]$probeCb.PreferredHeight)
+        $probeCb.Dispose()
         [void](New-Label $matchPanel (L "h_capability") 4 6)
         [void](New-Label $matchPanel (L "h_model") $x0 6)
         $i = 0
@@ -1740,7 +1794,10 @@ function Build-Match {
         foreach ($fn in $script:FnList) {
             $usable = Fn-Usable $fn
             # 기능을 쓸지 고르는 상자 — 켜면 켠 소스 전부에 붙이고, 끄면 전부 뗀다
+            # 한 줄의 칸들(기능 · 모델 · 기기)을 같은 높이($rowH)에 세로 가운데로 맞춘다 — 글 없는 체크 상자는
+            # 위에 붙어 그려져 모델 칸보다 높아 보였다 (2026-11-27)
             $pick = New-Check $matchPanel (Fn-Text2 $fn) 4 $y (Fn-On $fn)
+            $pick.AutoSize = $false; $pick.Size = New-Object System.Drawing.Size(($x0 - 8), $rowH)
             $pick.Enabled = $usable
             $pick.Tag = @{ fn = $fn }
             $pick.Add_CheckedChanged({ On-FnPick $this })
@@ -1749,9 +1806,10 @@ function Build-Match {
             $dom = @($opts | Where-Object { Option-Domain $_ })
             if ($opts.Count -gt 0 -and $dom.Count -eq $opts.Count) {
                 # 도메인 전용 기능(지정 물체 탐지 · 하천 부유물 탐지 …) — 고를 모델이 아니다. 실제로 쓰는 모델을 적는다
-                $lb = New-Label $matchPanel (Option-ModelsText $opts[0]) $x0 ($y + 3)
+                $lb = New-Label $matchPanel (Option-ModelsText $opts[0]) $x0 $y
                 $lb.AutoSize = $false
-                $lb.Width = 112
+                $lb.Size = New-Object System.Drawing.Size(112, $rowH)
+                $lb.TextAlign = "MiddleLeft"
                 $lb.AutoEllipsis = $true
                 $modelTip.SetToolTip($lb, (Option-Tip $opts[0]))
             } elseif ($opts.Count -gt 0) {
@@ -1768,12 +1826,14 @@ function Build-Match {
                 $cb.Enabled = $usable
                 $matchPanel.Controls.Add($cb)
             } else {
-                [void](New-Label $matchPanel "-" $x0 ($y + 3))
+                $lb = New-Label $matchPanel "-" $x0 $y
+                $lb.AutoSize = $false; $lb.Size = New-Object System.Drawing.Size(112, $rowH); $lb.TextAlign = "MiddleLeft"
             }
             $i = 0
             foreach ($s2 in $srcs) {
                 $on = (Fn-Sources $fn) -contains $s2
                 $chk = New-Check $matchPanel "" ($x1 + $i * 62) $y $on
+                $chk.AutoSize = $false; $chk.Size = New-Object System.Drawing.Size(22, $rowH)
                 $chk.Tag = @{ fn = $fn; src = $s2 }
                 $chk.Enabled = $usable
                 $chk.Add_CheckedChanged({ On-FnSource $this })
@@ -1786,14 +1846,14 @@ function Build-Match {
                 $fx2 = $x1 + $srcs.Count * 62 + 6
                 $gb = New-Object System.Windows.Forms.Button
                 $gb.Location = New-Object System.Drawing.Point($fx2, $y)
-                $gb.Width = 70
+                $gb.Size = New-Object System.Drawing.Size(96, $rowH)
                 $gb.Text = (L "b_get")
                 $gb.Tag = @{ opt = (Fn-Model $fn) }
                 $gb.Add_Click({ Get-Model $this.Tag.opt })
                 $modelTip.SetToolTip($gb, (Fn-Why $fn))
                 $matchPanel.Controls.Add($gb)
             }
-            $y += 26
+            $y += $rowH + 6
         }
     }
     $script:Building = $false
@@ -1827,6 +1887,7 @@ function On-FnPick($chk) {
     $script:FnSrc[$fn] = $(if ($chk.Checked) { @(On-All) } else { @() })
     Build-Match
     Build-CueTable
+    Build-CueBoxes                                    # 지정 클래스 탭의 「기기」 줄이 켠 기기를 따라가게
     Build-Overlay
     Sync-Enabled
     Update-Nav
@@ -1845,6 +1906,7 @@ function On-FnSource($chk) {
     $script:FnSrc[$fn] = @($now)
     Build-Match
     Build-CueTable
+    Build-CueBoxes
     Build-Overlay
     Update-Nav
     Changed
@@ -2573,7 +2635,8 @@ function Load-Functions {
     $pj = From-Json $pre
     foreach ($f in @($pj.features)) { $script:FnWhy[$f.key] = [pscustomobject]@{ usable = $f.usable; runnable = $f.runnable; why = $f.why } }
     # 순서: 지금 돌릴 수 있는 것(실행체 · 모델이 있다) → 쓸 수는 있으나 계약만 있는 것 → 못 쓰는 것. 같은 묶음 안은 이름순
-    $script:FnList = @($all | Sort-Object @{ Expression = { Fn-Rank $_ } }, @{ Expression = { $_ } })
+    # 가장 자주 쓰는 기능(FnPinned)은 쓸 수 있으면 맨 위에 고정한다 (2026-11-27)
+    $script:FnList = @($all | Sort-Object @{ Expression = { Fn-Pin $_ } }, @{ Expression = { Fn-Rank $_ } }, @{ Expression = { $_ } })
     if ($script:FnSrc.Count -eq 0 -and @($s.models).Count -gt 0) {
         # 옛 설정(모델 체크)에서 옮겨 온다 — 고르던 모델을 물체 탐지에 얹고 켠 소스 전부에 붙인다
         # 도메인 전용(targeted · river)은 그 기능으로 (2026-11-26: 모델이 아니라 기능)
@@ -2765,6 +2828,16 @@ function Build-Profile {
     }
     if ($tm.Count -gt 0) { $pm["targeted"] = $tm }
     $prof = @{ profile_version = [int]$script:ProfileVer; models = $pm }   # 버전은 Write-Profile 이 올린다
+    if ((Chosen-Models) -contains "targeted") {
+        # 기기마다 다른 대상 — 전부를 찾는 기기는 적지 않는다(비전은 적힌 기기만 거른다)
+        $all = @(Checked-Targets)
+        $devs = @{}
+        foreach ($dv in @(Targeted-Sources)) {
+            $mine = @($all | Where-Object { @(Target-Devices $_) -contains $dv })
+            if ($mine.Count -lt $all.Count) { $devs[$dv] = @{ models = @{ targeted = @{ targets = @($mine) } } } }
+        }
+        if ($devs.Count) { $prof.devices = $devs }
+    }
     $feat = @{}
     foreach ($k in $featChecks.Keys) { if ($featChecks[$k].Checked) { $feat[$k] = $true } }
     if ($feat.Count -gt 0) { $prof.features = $feat }
@@ -2795,7 +2868,7 @@ function Save-Settings {
                        overlay = $script:Overlay;
                        assign = $script:Assign; manual = $manualOn.Checked; manualPlace = $script:ManualPlace;
                        nodeLimit = $script:NodeLimit; fnModel = $script:FnModel; fnSrc = $script:FnSrc;
-                       cueOff = @($script:CueOff); cuePick = $script:CuePick;
+                       cueOff = @($script:CueOff); cuePick = $script:CuePick; targetDev = $script:TargetDev;
                        features = $(if ($featChecks.Count) { $h = @{}; foreach ($k in $featChecks.Keys) { $h[$k] = $featChecks[$k].Checked }; $h } else { $null }) } |
         ConvertTo-Json -Depth 8 | Set-Content $SettingsFile -Encoding UTF8
 }
@@ -3123,6 +3196,29 @@ function Self-Test {
     $r.class_tab_semantic_enabled = $(if ($pc) { $pc.Enabled } else { "none" })
     $script:CueOff = @(); $script:CuePick = @{}
     Build-CueTable; Build-CueBoxes
+    # 기기마다 다른 대상 (2026-11-27) — 두 기기에 지정 물체 탐지를 켜고 chair 는 첫 기기에서만
+    $two = @(@($Sources | Where-Object { $srcChecks[$_].Enabled }) | Select-Object -First 2)
+    if ($two.Count -lt 2) { $two = @("pi12", "robot1") }
+    foreach ($dv in $two) { $srcChecks[$dv].Checked = $true }
+    Pick-Function "targeted_detect" "targeted" $two
+    Build-CueBoxes
+    $script:TargetDev["chair"] = @($two[0])
+    $r.device_targets = (Build-Profile).devices
+    $r.device_rows = @(Find-Ctl $cuePanel { param($c) $c -is [System.Windows.Forms.CheckBox] -and $c.Tag.dev } | ForEach-Object { $_.Text })
+    if ($env:DS_LAUNCHER_TESTSHOT) {
+        # 확인용 그림 — 자체 시험 상태(기기별 대상 등)의 기능 · 지정 클래스 단계를 파일로 (사람 화면은 건드리지 않는다)
+        $form.Show()
+        foreach ($ti in 1, 2) {
+            $tabs.SelectedIndex = $ti
+            [System.Windows.Forms.Application]::DoEvents()
+            $bmp = New-Object System.Drawing.Bitmap $form.Width, $form.Height
+            $form.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $form.Width, $form.Height))
+            $bmp.Save((Join-Path $env:DS_LAUNCHER_TESTSHOT ("test_step{0}.png" -f $ti)), [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+        }
+        $form.Hide()
+    }
+    $script:TargetDev = @{}
     $r.target_tab_enabled = $tTarget.Controls[0].Enabled
     # 사용자 설정에 기대지 않는다 — 아래 단계가 쓰는 대상을 직접 켠다 (저장된 대상이 person · chair 뿐이면 door 근거
     # 컨트롤이 없어 시험이 깨졌다, 2026-11-24)
