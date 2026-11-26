@@ -311,3 +311,47 @@ explorer.exe "$(wslpath -w $R/frames)"                     # Windows 탐색기�
 
 - 비전 결과 목록: `python vision/vision_infer.py --list` (루트에서, venv 상태)
 - Redis 최근 항목 수: `redis-cli -p 6380 XLEN camera_stream:drone`
+
+## 4. 파이 없이 끝까지 시험 — `tools/replay_source.py` (2026-11-26)
+
+파이가 꺼져 있어도 녹화(`stream_data/<소스>/<실행>/`)를 **지금 시각 · 늘어나는 번호**로 다시 흘려 살아 있는 소스처럼 만든다.
+해상도는 원본 그대로(`--resize 640x360` 또는 `0.5` 로만 줄임), `--loop` 면 끝없이, `--seconds N` 이면 N초 뒤 끝, Ctrl+C · SIGTERM 으로 깨끗이 멈춘다.
+`--run` 은 `latest`(기본) · 실행 이름 · 폴더 경로. 소스 여럿은 `--source` 를 여러 번 (소스마다 스레드).
+진짜 소스 키를 더럽히지 않으려면 `--as replay-test-pi12` 처럼 시험 이름을 주고 `--trim` 으로 끝에 지운다(진짜 이름은 지우지 않는다).
+
+```bash
+cd ~/data_stream && source venv/bin/activate
+# 0) 흘리기만 — Redis camera_stream:<이름> 에 서버와 같은 칸(image · header · sender 칸)으로. 10초 뒤 끝내고 지움
+python tools/replay_source.py --source pi12 --as replay-test-pi12 --fps 5 --loop --seconds 10 --trim
+python tools/source_probe.py --sources replay-test-pi12           # (도는 동안) live — Redis 최근 장 나이
+```
+
+끝까지 도는 세 가지 길 (아래로 갈수록 진짜 길에 가깝다). **서버를 띄울 때는 `--save` 를 임시 폴더로** — 아니면 녹화를 다시 녹화해 `stream_data` 가 불어난다.
+
+```bash
+# A) Redis 로만 (데이터 서버 없음) — 비전 · 오케스트레이터가 진짜 소스 이름의 스트림을 읽는다
+python tools/replay_source.py --source pi12 --source robot1 --fps 5 --loop --health   # 터미널 1 (--health: :10009 · :10003 에 /health)
+python vision/vision_infer.py -d pi12 robot1 -m yoloe                                  # 터미널 2 (live)
+python vision/device_stage.py --source pi12 --model yolo26n_ncnn --camera-url none     # 또는 기기 단계를 Redis 로
+python -m ds_resources.cli run --sources pi12 robot1 --models yoloe                    # 또는 오케스트레이터로 띄우기
+
+# B) 진짜 데이터 서버를 지나서 (서버 무수정) — 서버는 가져오지 않고 받기만, replay 가 POST /upload · /state
+python server_stream_multi_source.py --on pi12 robot1 --no-pull --save /tmp/ds_replay --no-resource-record   # 터미널 1
+python tools/replay_source.py --mode upload --source pi12 --source robot1 --fps 5 --loop                    # 터미널 2
+python tools/source_probe.py --sources pi12 robot1                                    # live (서버 /health)
+
+# C) 카메라 파이처럼 MJPEG 을 내고 서버가 끌어오게 (서버의 pull 길 그대로)
+python tools/replay_source.py --mode mjpeg --source pi12 --source robot1 --port 18090 --loop   # :18090 pi12 · :18091 robot1
+python tools/server_port_override.py --on pi12 robot1 --pi12 127.0.0.1:18090 --robot1 127.0.0.1:18091 \
+       --save /tmp/ds_replay --no-resource-record
+curl -s -o /tmp/one.jpg http://127.0.0.1:18090/snapshot/1                     # 한 장 · /health · /stream/1
+python vision/device_stage.py --source pi12 --model yolo26n_ncnn --camera-url http://127.0.0.1:18090/stream/1
+```
+
+- 서버는 카메라 영상 포트를 8090 으로 고정해 둔다. `tools/server_port_override.py` 는 서버를 고치지 않고 서버 모듈을 불러
+  `robot_video_loop` 만 감싸 소스마다 포트를 바꾼다: `--video-port pi12=18090` > 주소 칸의 `:포트` > `PD_VIDEO_PORT_PI12` > 8090.
+  나머지 인자는 서버에 그대로 넘긴다. (8090 을 그대로 쓰려면 `--mode mjpeg --port 8090 --bind 127.0.0.12` + 서버 `--pi12 127.0.0.12` 도 된다.)
+- ep-001(H.264 웹소켓) · drone(롱폴)은 MJPEG 으로 흉내 내지 않는다 — A) 또는 B) 로.
+- robot1 · a2 처럼 `states.jsonl` 이 있으면 A) 는 `state_stream:<이름>` 에, B) 는 `POST /state` 로 원래 순서대로 끼워 보낸다
+  (payload 의 timestamp 는 지금으로). C) 는 상태를 내지 않는다(MQTT 는 흉내 내지 않음).
+- 배경(`&`)으로 띄워 스크립트로 끝낼 때는 SIGTERM(`timeout`, `kill`)을 쓴다 — 비대화 셸의 배경 프로세스는 SIGINT 를 무시한다.
