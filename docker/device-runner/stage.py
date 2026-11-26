@@ -47,7 +47,7 @@ def _paths_in(v):
     elif isinstance(v, list):
         for x in v:
             yield from _paths_in(x)
-    elif isinstance(v, str) and v.replace("\\", "/").split("/", 1)[0] in PATH_ROOTS and "/" in v:
+    elif isinstance(v, str) and v.replace("\\", "/").split("/", 1)[0] in PATH_ROOTS and "/" in v and "{" not in v:   # {imgsz} 같은 틀은 files 가 맡는다
         yield v.replace("\\", "/")
 
 
