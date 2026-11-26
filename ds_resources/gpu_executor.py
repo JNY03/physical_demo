@@ -86,6 +86,10 @@ def estimate_mb(models, profile=None, cfg=None):
             need.add("reid")
         if (resolved.get("targeted") or {}).get("distance"):
             need.add(cc.depth_key((resolved.get("targeted") or {}).get("cue_models")))   # 근거 표에서 고른 거리 모델
+        # 같은 묶음의 선택지 · 새 모델이 이미 적재하는 정체는 근거 쪽에서 빼고 센다 (work/1 — 같은 일은 한 번).
+        # 겹치지 않으면 아무것도 빠지지 않는다 — 옛 어림 그대로
+        from ds_resources import workgraph as wg
+        need -= wg.shared_need(cc._REG, list(models), need)
     elif (profile or {}).get("features", {}).get("reid"):
         need.add("reid")
     mb = cc.gpu_mb(list(models), sorted(need))
@@ -240,6 +244,8 @@ class GpuExecutor:
                "--models", *unit["models"]]
         if unit.get("profile_path"):
             cmd += ["--profile", unit["profile_path"]]
+        if unit.get("function_params"):                     # 추적 입력 · 재식별 범위 (work/1) — 프로필 칸을 덮는다
+            cmd += ["--function-params", json.dumps(unit["function_params"], ensure_ascii=False, sort_keys=True)]
         if unit.get("fps_cap"):                             # 배치표의 기기별 fps 상한을 실제로 건다
             cmd += ["--max-fps", *["%s=%g" % (d, f) for d, f in sorted(unit["fps_cap"].items())]]
         return cmd

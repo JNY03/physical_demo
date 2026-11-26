@@ -24,6 +24,7 @@ TABLE = {
     "segmentation": ("cascade", "best_effort"),
     "depth_estimate": ("cascade", "mission"),
     "single_cam_track": ("device_only", "mission"),
+    "object_track": ("cascade", "mission"),               # 2026-11-27 물체 추적 — 서버 비전 프로세스 안에서 실제로 돈다
     "multi_cam_track": ("split", "mission"),
     "reid": ("split", "mission"),
     "anomaly_detect": ("cascade", "mission"),
@@ -176,7 +177,7 @@ def test_bad_function_name():
 def test_registry_carries_the_whole_table():
     f = F.load()
     assert set(TABLE) <= set(f)
-    assert len([k for k, v in f.items() if not v["legacy"]]) == len(TABLE) == 26   # 표 23줄, 경로 계획만 둘, 도메인 전용 기능 둘
+    assert len([k for k, v in f.items() if not v["legacy"]]) == len(TABLE) == 27   # 표 23줄, 경로 계획만 둘, 도메인 전용 기능 둘, 물체 추적(object_track)
     for name, (pattern, crit) in TABLE.items():
         assert (f[name]["pattern"], f[name]["criticality"]) == (pattern, crit), name
         assert f[name]["note"] and f[name]["stages"], name

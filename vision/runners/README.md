@@ -84,12 +84,13 @@ numpy · cv2 · onnxruntime(· ncnn)만 쓰고 저장소 모듈을 import 하지
 | `yolo_seg_cpu.py` | `yolo26n_seg_cpu` · `yoloe26n_vocab_cpu` | detect · segment (· open_vocab — 어휘를 굳힌 ONNX) |
 | `depth_anything_cpu.py` | `da3_small_cpu` · `dav2_small_cpu` | depth_relative |
 | `clip_embed_cpu.py` | `mobileclip_s0_cpu` | embed |
+| `botsort.py` · `bytetrack.py` | `botsort` · `bytetrack` | track (bytetrack 은 botsort 어댑터를 같이 쓴다 — 두 파일을 함께 복사) |
 
 ONNX 는 `tools/export_cpu_models.py` 로 굳힌다(서버에서 — ultralytics 가 있는 venv).
 
 ### track · vlm · embed
 
-지금 비전 루프는 부르지 않는다 — 고른 것은 오케스트레이터 계획(plan.slots)에만 실린다. 약속만 정해 둔다.
+track · embed 는 물체 추적(object_track)과 재식별 범위가 부른다(2026-11-27 — vision/object_track.py: `__call__(bgr, dets=, stream=, ts=)` 로 track, `__call__(bgr, boxes)` 로 embed). vlm 은 아직 계획(plan.slots)에만 실린다.
 
 - track: `update(dets: list[dict], ts: float, bgr: np.ndarray | None = None) -> list[dict]` — `track_id` 를 붙여 돌려준다
 - vlm: `__call__(bgr, prompt: str) -> (info, text: str)`

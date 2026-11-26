@@ -2585,6 +2585,39 @@ def _auto_free_vocab(name, vocab):
     return out
 
 
+_DEPTH_TRACK_MOD = []
+#: 프로세스의 작업 나눔 장부 (main 이 단다) — 실행기 cfg 는 모델 몫만 받아서 여기로 닿는다
+WORK_SHARE = {}
+
+
+def _depth_track_module():
+    """vision/depth_track.py 를 파일 경로로 한 번만 읽는다"""
+    if not _DEPTH_TRACK_MOD:
+        import importlib.util as _ilu
+        _sp = _ilu.spec_from_file_location("depth_track", HERE / "depth_track.py")
+        _m = _ilu.module_from_spec(_sp)
+        _sp.loader.exec_module(_m)
+        _DEPTH_TRACK_MOD.append(_m)
+    return _DEPTH_TRACK_MOD[0]
+
+
+def _depth_tracker(dspec, share=None):
+    """거리 근거 DepthTracker — 같은 프로세스에 **같은 가중치**의 독립 depth 모델이 있으면 모델을 따로 올리지 않고
+    그 지도를 받는다(work/1, vision/work_share.py). 없으면 예전처럼 제 모델을 올린다"""
+    _m = _depth_track_module()
+    if share is not None and dspec.get("enabled"):
+        import work_share as ws
+        ident = ws.tracker_identity(_m, dspec)
+        if ident is not None and ident in share.depth:
+            dt = _m.DepthTracker(dict(dspec, enabled=False), log=None)
+            dt.provider = ws.SharedDepthProvider(share, ident, "targeted")
+            dt.space, dt.ready, dt.why = dt.provider.space, True, None
+            log("  depth 거리 근거 — %s 의 지도를 나눠 쓴다 (따로 적재하지 않음) · 주기 %d장 · 그 모델이 도는 장은 매 장"
+                % (share.model_of(ident), dt.period))
+            return dt
+    return _m.DepthTracker(dspec, log=log)
+
+
 class TargetedRunner:
     """**지정 클래스 탐지** — 대상 · 근거를 프로필에서 받는다(탐지대상_런처_계획_261123.md).
 
@@ -2748,12 +2781,8 @@ class TargetedRunner:
             if mid:                                       # 근거 표에서 고른 거리 모델 (같은 UniDepth 코드, 가중치만)
                 dspec["model_id"] = mid
             key = ("depth", json.dumps({k: v for k, v in dspec.items() if k != "classes"}, sort_keys=True))
-            import importlib.util as _ilu
             if key not in _MODEL_CACHE:
-                _sp = _ilu.spec_from_file_location("depth_track", HERE / "depth_track.py")
-                _m = _ilu.module_from_spec(_sp)
-                _sp.loader.exec_module(_m)
-                _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
+                _MODEL_CACHE[key] = _depth_tracker(dspec, WORK_SHARE.get("share"))
             self.depth = _MODEL_CACHE[key]
             self.depth.classes = tuple(dist_names)
         tw = role_files["detector"]
@@ -2813,11 +2842,7 @@ class TargetedRunner:
                 dspec["model_id"] = mid
             key = ("depth", json.dumps({k: v for k, v in dspec.items() if k != "classes"}, sort_keys=True))
             if key not in _MODEL_CACHE:
-                import importlib.util as _ilu
-                _sp = _ilu.spec_from_file_location("depth_track", HERE / "depth_track.py")
-                _m = _ilu.module_from_spec(_sp)
-                _sp.loader.exec_module(_m)
-                _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
+                _MODEL_CACHE[key] = _depth_tracker(dspec, WORK_SHARE.get("share"))
 
     def forget_device(self, device):
         """그 기기의 거리 기억을 비운다(스캔 각도 표시, 2026-11-24) — 앞 각도의 거리가 carried 로 실려 오지 않게."""
@@ -3600,6 +3625,11 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
     stab = None
     fuse_model = active_detector(runners)
     roi = ((cfg.get("_roi") or {}).get(device)) or None
+    # 작업 나눔 (work/1) — 이 장의 결과를 담아 같은 일을 바라는 다른 기능에 준다 (vision/work_share.py)
+    share = cfg.get("_work")
+    track = cfg.get("_track")
+    if share is not None:
+        share.begin(device, base.get("n"), fov_hint(dev_cfg, header), depth_models)
     # **고른 검출 모델을 모두 돌린다**(2026-11-23). 예전에는 첫 하나만 돌았다 — 로그는 "둘 다 저장"
     # 이라 했지만 infer_frame 은 active_detector 하나만 불렀다. depth 결합·GPS 는 지금처럼 첫 하나에만.
     for det_model in [m for m in DETECT_MODELS if m in runners]:
@@ -3608,17 +3638,26 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
         else:
             wanted = bool(save_detect)
         fusing = det_model == fuse_model and depth_models and fusion.get("enabled", True)
-        if not (wanted or fusing):
+        tracking = track is not None and track.model == det_model     # 물체 추적의 입력 — 저장하지 않아도 돌린다
+        if not (wanted or fusing or tracking):
             continue
         d_out, d_stab = _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, wanted)
+        if share is not None:
+            share.put(("detections", det_model), d_out[4], det_model)
         if d_out[0] is not None:
             out.append(d_out[:4])
         if det_model == fuse_model:
             dets, stab = d_out[4], d_stab
     fov = fov_hint(dev_cfg, header)
     pose = []                                           # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
-    return _infer_depth(out, dets, stab, bgr, base, header, device, depth_models, runners, cfg, pose_fn,
-                        fusion, vis, ocfg, locator, fov, pose, w)
+    out = _infer_depth(out, dets, stab, bgr, base, header, device, depth_models, runners, cfg, pose_fn,
+                       fusion, vis, ocfg, locator, fov, pose, w)
+    if track is not None:                               # 물체 추적 — 입력 탐지 결과를 이 장의 담기에서 받는다
+        import object_track as ot
+        rec = track.step(share, device, base, bgr, frame_ts(header))
+        if rec is not None:
+            out.append(("track", rec, ot.overlay(bgr, rec), None))
+    return out
 
 
 # ---------------------------------------------------------------- 구역(ROI, 웹 화면에서 끌어 지정, 2026-11-23)
@@ -3963,8 +4002,17 @@ def _infer_depth(out, dets, stab, bgr, base, header, device, depth_models, runne
         rec["pose"] = p
         rec["geo_status"] = "stale_state" if stale else st
 
+    share = cfg.get("_work")
     for m in depth_models:
-        info, depth, K = runners[m](bgr, fov_x=fov)
+        ident = (cfg.get("_depth_ident") or {}).get(m)
+        if share is not None and ident is not None:
+            # 같은 장에 거리 근거(targeted)가 이미 같은 모델로 쟀으면 받는다 — 아니면 재서 담는다 (한 장에 한 번)
+            reused = ("depth", ident) in share.frame.items
+            info, depth, K = share.depth_for(ident, bgr, m)
+            st = share.stats.get((device, ("depth", ident))) or {}
+            info = dict(info, work={"node": m, "reused": reused, "consumers": list(st.get("consumers") or [])})
+        else:
+            info, depth, K = runners[m](bgr, fov_x=fov)
         rec = dict(base, model=m, **info)
         add_depth_fields(rec, depth, K, w)
         fused = None
@@ -4061,16 +4109,27 @@ def _process_run(device, run, own, runners, cfg, args, frames):
         results = infer_frame(bgr, base, header, device, save_detect, need_depth, runners, cfg, pose_fn)
         emitted_at = iso_ms()                               # 저장본도 결과가 나온 순간을 적는다 (live 는 done_ms 자리)
         for m, rec, overlay, depth in results:
-            mcfg = cfg["models"][m]
+            mcfg = cfg["models"].get(m) or {}
             rec["_emitted_at"] = emitted_at
+            if m not in outs:                               # 물체 추적(track) 처럼 기능이 낸 기록 — 처음 나올 때 연다
+                outs[m] = ModelOutput(run, dirname, m, args.overwrite and m not in args._overwritten.get(run, set()),
+                                      cfg["output"].get("jpeg_quality", 90))
+                args._overwritten.setdefault(run, set()).add(m)
             outs[m].write(rec, overlay, depth if mcfg.get("save_depth", True) else None,
                           mcfg.get("depth_dtype", "float16"), header=header)
+        if cfg.get("_track") is not None and cfg["_track"].reid is not None:
+            cfg["_track"].reid.flush(None)              # 저장된 이미지 처리 — Redis 로는 내지 않는다(결과 파일에 global_id)
         done += 1
         if done % 20 == 0 or i == len(todo) - 1:
             el = time.time() - t_start
             log("  %s/%s %d/%d  (%.2f장/s)" % (device, run.name, done, len(todo), done / max(el, 1e-6)))
     for o in outs.values():
         o.close()
+    if cfg.get("_work") is not None:                    # 작업 나눔 — 일마다 돈 횟수 · 받은 횟수 (work/1)
+        work = cfg["_work"].summary()
+        for dv, ks in work.items():
+            for k, v in ks.items():
+                log("  work %s %s — 돎 %d · 받음 %d (쓴 쪽: %s)" % (dv, k, v["runs"], v["reused"], "+".join(v["consumers"])))
     return done
 
 
@@ -4380,7 +4439,7 @@ class LiveRunner:
             rec["_emitted_at"] = emitted_at
             infer_ms += rec.get("infer_ms") or 0
             jpg = cv2.imencode(".jpg", overlay, self.jpeg)[1].tobytes()
-            mcfg = self.cfg["models"][m]
+            mcfg = self.cfg["models"].get(m) or {}
             dtype = mcfg.get("depth_dtype", "float16")
             o = outs.get(m)
             if o is not None and rel is not None and rel not in o.done:
@@ -4402,6 +4461,12 @@ class LiveRunner:
             pipe.execute()
         except self.redis_mod.RedisError as e:
             self.warn_once(("xadd", str(e)[:60]), "Redis 에 결과를 못 넣음 (%s) — 디스크 저장은 계속" % e)
+        trk = self.cfg.get("_track")
+        if trk is not None and trk.reid is not None:   # 재식별 임베딩 · 전역 번호 (reid_embed:<소스> · reid_identity:<묶음>)
+            try:
+                trk.reid.flush(self.r)
+            except self.redis_mod.RedisError as e:
+                self.warn_once(("reid", str(e)[:60]), "재식별 결과를 Redis 에 못 넣음 (%s)" % e)
         st = self.stat[dv]
         st[0] += 1
         st[1] += done_ms - recv_ms
@@ -4676,6 +4741,12 @@ class LiveRunner:
         doc = {"schema": "vtel/1", "proc": self.tel_key.split(":", 1)[1], "seq": self.tel_seq, "window_s": round(dt, 2),
                "models": sorted(self.models), "cfg_hash": self.tel_hash, "device_class": telemetry_device_class(),
                "gpu": telemetry_gpu(os.getpid()), "streams": streams, "ts": iso_ms(time.time())}
+        if self.cfg.get("_work") is not None:           # 작업 나눔 (work/1) — 일마다 돈 횟수 · 받은 횟수 (칸 추가만)
+            doc["work"] = self.cfg["_work"].summary()
+            if doc["work"]:
+                log("work  " + " · ".join("%s %s 돎 %d · 받음 %d (%s)" % (dv, k, v["runs"], v["reused"],
+                                                                      "+".join(v["consumers"]))
+                                          for dv, ks in doc["work"].items() for k, v in ks.items()))
         try:
             self.r.set(self.tel_key, json.dumps(doc, ensure_ascii=False), ex=TELEMETRY_TTL_S)
         except self.redis_mod.RedisError as e:
@@ -4824,6 +4895,8 @@ def main():
     g.add_argument("--reid", action="append", metavar="기기:장:x1,y1,x2,y2",
                    help="[저장된 이미지] 그 장에서 그 상자의 물체를 재식별 대상으로 (여러 번). live 는 가시화에서 고른다")
     g.add_argument("--reid-on", action="store_true", help="객체 재식별 기능 켜기 (런처는 프로필 features.reid)")
+    g.add_argument("--function-params", metavar="JSON",
+                   help="기능 매개변수 (프로필 function_params 를 덮는다 — 물체 추적 입력 · 재식별 범위). 오케스트레이터가 넘긴다")
     args = ap.parse_args()
 
     if args.catalog:
@@ -4908,6 +4981,12 @@ def main():
     try:
         base = load_profile_file(args.profile) if args.profile and Path(args.profile).exists() else {}
         raw = cli_profile(args, models, base)
+        if args.function_params:                          # 기능마다 프로필 칸을 덮는다 (work/1)
+            fp = json.loads(args.function_params)
+            merged = {k: dict(v or {}) for k, v in (raw.get("function_params") or {}).items()}
+            for fn, vals in (fp or {}).items():
+                merged.setdefault(fn, {}).update(vals or {})
+            raw["function_params"] = merged
         resolved = cc.resolve_profile(raw, cfg, models)
         resolved["_raw"] = raw
     except (cc.ProfileError, ValueError, OSError) as exc:
@@ -4939,11 +5018,52 @@ def main():
         log("depth 결합용으로 %s 도 적재 (%s 결과는 저장하지 않음 — 저장하려면 --models 에 추가)"
             % (helper, helper))
     runners = {}
+    # 작업 나눔 (work/1) — 독립 depth 모델을 먼저 올려 두면 지정 물체 탐지의 거리 근거가 같은 가중치일 때
+    # 따로 적재하지 않고 그 지도를 받는다(_depth_tracker). 그래서 depth 를 앞에 올린다
+    import work_share as ws
+    share = cfg["_work"] = WORK_SHARE["share"] = ws.WorkShare(log)
+    cfg["_depth_ident"] = {}
+    load = [m for m in load if m in DEPTH_MODELS] + [m for m in load if m not in DEPTH_MODELS]
     for m in load:
         t0 = time.time()
         log("모델 적재: %s" % m)
         runners[m] = make_runner(m, cfg, gpu)
         log("  %s 준비 (%.1fs)" % (m, time.time() - t0))
+        if m in DEPTH_MODELS:
+            ident = ws.standalone_identity(m, RUNNER_SPECS.get(m), (cfg.get("models") or {}).get(m)
+                                           or (RUNNER_SPECS.get(m) or {}).get("config"))
+            if ident is not None:
+                share.register_depth(m, runners[m], ident)
+                cfg["_depth_ident"][m] = ident
+    # 물체 추적 (object_track) — 프로필에서 켰으면 트래커를 올린다
+    import object_track as ot
+    tsel = ot.resolve(raw, [m for m in models if m in DETECT_MODELS] + [m for m in load if m in DETECT_MODELS])
+    if tsel is not None:
+        if tsel["model"] is None:
+            log("물체 추적: 입력 탐지가 이 프로세스에 없어 끕니다 (입력 %s)" % tsel["function"])
+        else:
+            spec = runner_models().get(tsel["tracker"])
+            if spec is None:
+                raise SystemExit("물체 추적 트래커 %r 를 모릅니다 (레지스트리 models — provides: track)" % tsel["tracker"])
+            tr = load_runner(tsel["tracker"], spec, "cpu", (cfg.get("models") or {}).get(tsel["tracker"]))
+            cfg["_track"] = ot.ObjectTrackStep(tsel["tracker"], tr, tsel["function"], tsel["model"],
+                                               (cfg.get("overlay") or {}).get("min_conf"))
+            log("물체 추적: %s ← %s (%s) — 결과 vision_stream:<기기>:track" % (tsel["tracker"], tsel["function"],
+                                                                         tsel["model"]))
+            # 재식별 범위 (reid · multi_cam_track — scope source | group). 트랙마다 임베딩 → 갤러리
+            rconf = ot.resolve_reid(raw, devices)
+            if rconf is not None:
+                espec = runner_models().get(rconf["embedder"])
+                if espec is None:
+                    raise SystemExit("재식별 임베딩 모델 %r 을 모릅니다 (provides: embed, runner 가 있는 것)" % rconf["embedder"])
+                emb = load_runner(rconf["embedder"], espec, "cpu", (cfg.get("models") or {}).get(rconf["embedder"]))
+                cfg["_track"].reid = ot.ReidStep(rconf, emb)
+                log("재식별: %s scope=%s%s · 임베딩 %s · 갤러리 %s" % (
+                    rconf["function"], rconf["scope"],
+                    (" 묶음 " + "+".join(rconf["group_sources"])) if rconf["group_sources"] else "",
+                    rconf["embedder"], "이 프로세스 안" if rconf["in_process"] else
+                    "따로 (python vision/reid_gallery.py --group %s --sources %s)" % (
+                        "+".join(rconf["group_sources"]), " ".join(rconf["group_sources"]))))
 
     if live:
         watch = ProfileWatch(args.profile, args, models, devices, cfg) if args.profile else None

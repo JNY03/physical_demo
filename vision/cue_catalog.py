@@ -712,7 +712,8 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     profile = copy.deepcopy(profile or {})
     if not isinstance(profile, dict):
         raise ProfileError("프로필은 JSON 사전이어야 한다")
-    bad = set(profile) - {"profile_version", "label", "models", "devices", "features", "functions", "_doc", "saved_at"}
+    bad = set(profile) - {"profile_version", "label", "models", "devices", "features", "functions", "function_params",
+                        "_doc", "saved_at"}
     if bad:
         raise ProfileError("프로필에 모르는 칸: %s" % ", ".join(sorted(bad)))
     pm = profile.get("models") or {}
