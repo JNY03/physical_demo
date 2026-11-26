@@ -93,9 +93,11 @@ def test_new_model_appears_where_its_capabilities_fit():
     fs = slt.function_slots(reg, have=lambda k: True)
     keys = lambda fn, side, role: [c["key"] for r in fs[fn][side] if r["role"] == role for c in r["choices"]]
     assert keys("object_detect", "server", "model") == ["yoloe", "big_det"]          # 기본 먼저, gpu 만
-    assert keys("object_detect", "device", "detector") == ["pi_det"]                 # 파이 · small
+    # 기기 슬롯은 실제 레지스트리의 CPU 모델(yolo26n_seg_cpu …)도 뜬다 — 여기서 더한 것만 본다
+    added = lambda ks: [k for k in ks if k in ("big_det", "pi_det", "vlm_x", "comp_only")]
+    assert added(keys("object_detect", "device", "detector")) == ["pi_det"]          # 파이 · small
     assert keys("zeroshot_detect", "server", "model") == ["yoloe", "big_det"]
-    assert keys("zeroshot_detect", "device", "detector") == []                       # open_vocab 이 없다
+    assert added(keys("zeroshot_detect", "device", "detector")) == []                # open_vocab 이 없다
     assert keys("segmentation", "server", "model") == ["yoloe", "big_det"]
     assert keys("vlm", "server", "model") == ["vlm_x"]
     assert "comp_only" not in keys("object_detect", "server", "model")              # 혼자 못 도는 것은 안 뜬다
