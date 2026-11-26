@@ -27,6 +27,23 @@
 #   4. 매개변수는 vision_config.yaml models.<선택지> 에 둔다. 새 선택지는 vision/vision_infer.py 에 실행 코드가 있어야 한다
 #   5. 확인: python vision/cue_catalog.py --json   (런처가 읽는 것과 같다)
 #
+# ── 기능 → 단계 → 역할 슬롯 → 모델 (slots/1, 2026-11-27) ─────────────────────────────────
+#   기능은 단계(device · server)마다 **역할 슬롯**을 선언한다 — 「이런 능력의 모델이 들어갈 자리」:
+#     functions.<기능>.stages.<단계>.slots.<역할>:
+#       {label, label_en, needs: [능력], optional, multi, size: small|any, default: <모델 · 선택지 키>,
+#        choices: [명시 선택지] (선택), auto: 능력으로 저절로 채우나 (기본: needs 가 있으면 참)}
+#   모델(models.<키>)과 선택지(options.<키>)는 능력을 선언한다:
+#       provides: [능력…]   runs_on: [gpu | cpu_x86 | cpu_arm64]   size: small (선택)
+#       runner: <모듈>:<클래스> (vision/runners/<모듈>.py — 프로토콜은 vision/runners/README.md)
+#       license (안내만 — 모델은 바꿔 끼우는 부품이라 라이선스로 막지 않는다) · gpu_mb · p90_ms
+#   모델을 **한 번 등록하면** needs 를 다 갖추고 그 단계에서 돌 수 있는 모든 슬롯에 저절로 뜬다
+#   (기기 단계 → runs_on 에 cpu_arm64, size: small 슬롯이면 size: small 인 것 · 서버 단계 → gpu.
+#    서버 단계가 needs.accel: gpu 가 아니면 cpu_x86 도). 저절로 뜨는 것은 「혼자 돌 수 있는 것」 —
+#   선택지(options)와 runner 가 있는 모델 — 뿐이다. 계산은 ds_resources/slots.py, 확인:
+#       venv/bin/python -m ds_resources.slots          (기능마다 슬롯과 선택지)
+#   옛 칸은 그대로 읽힌다: functions.<기능>.options → 서버 `model` 슬롯, cue_model_choices → targeted_detect
+#   서버 단계의 `ovd` · `depth` 슬롯. 프로필은 functions: {<기능>: {<단계>: {<역할>: 모델 | [모델]}}} 로 고른다.
+#
 # gpu_mb 는 **측정값이 아니라 배치 계산용 어림값**이다. 실측은 실행 중에 기록되어 이 값을 대신한다.
 
 #: 비전 프로세스 하나의 기본 GPU 메모리 (torch · CUDA 컨텍스트)
@@ -45,6 +62,9 @@ options:
   yoloe:
     shown: yoloe
     kind: detect
+    provides: [detect, segment, open_vocab]
+    runs_on: [gpu]
+    license: AGPL-3.0 (ultralytics)
     gpu_mb: 900
     p90_ms: {s: 110, m: 135, l: 140, xl: 510}
     cue_models:
@@ -73,6 +93,9 @@ options:
   unidepth:
     shown: unidepth
     kind: depth
+    provides: [depth_metric]
+    runs_on: [gpu]
+    license: CC-BY-NC-4.0 (UniDepth)
     gpu_mb: 1500
     p90_ms: {s: 370, m: 400, l: 390, xl: 650}
     cue_models:
@@ -80,6 +103,8 @@ options:
   moge2_aerial:
     shown: moge2_aerial
     kind: depth
+    provides: [depth_metric]
+    runs_on: [gpu]
     gpu_mb: 1500
     p90_ms: {s: 490, m: 480, l: 500, xl: 500}       # l 은 잰 적 없음
     cue_models:
@@ -331,7 +356,7 @@ functions:
         note: 보조 재인코딩 — 저장 · 가시화용
 
   object_detect:
-    options: [yoloe]                    # 모델 선택지 — 모델이 늘면 여기에 더한다. 도메인 전용은 따로 기능으로
+    options: [yoloe]                    # 옛 칸 (런처 function_options) — 슬롯 model 의 명시 선택지가 된다
     note: 객체 탐지 — 기기에서 int8 320px 로 거르고 서버 고성능 모델이 확인한다
     pattern: cascade
     criticality: mission
@@ -352,6 +377,8 @@ functions:
         image: null
         command: null
         note: 1~5 fps · 1~2 스레드. 파이마다 성능이 달라 placement 는 measured — 비교 측정 전에는 옮기지 않는다. 실행체 없음 — 계약만
+        slots:
+          detector: {label: 기기 탐지기, label_en: on-device detector, needs: [detect], size: small, optional: true}
       server:
         needs: {accel: gpu}
         deadline_ms: 500
@@ -363,6 +390,8 @@ functions:
         image: null
         command: null
         note: options.yoloe 가 맡는다 (GPU Executor 가 띄운다 — image · command 로 올리는 작업이 아니다)
+        slots:
+          model: {label: 탐지 모델, label_en: detector, needs: [detect], default: yoloe}
 
   zeroshot_detect:
     options: [yoloe]
@@ -386,6 +415,8 @@ functions:
         image: null
         command: null
         note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체 없음 — 계약만
+        slots:
+          detector: {label: 기기 탐지기, label_en: on-device detector, needs: [detect, open_vocab], size: small, optional: true}
       server:
         needs: {accel: gpu}
         deadline_ms: 2000
@@ -397,6 +428,8 @@ functions:
         image: null
         command: null
         note: options.yoloe 가 맡는다 (GPU Executor 가 띄운다)
+        slots:
+          model: {label: 탐지 모델, label_en: detector, needs: [detect, open_vocab], default: yoloe}
 
   targeted_detect:
     options: [targeted]                 # 도메인 전용 기능 — 모델은 근거(cues)마다 고른다(yoloe_text · yoloe_free · clip · depth …)
@@ -487,6 +520,8 @@ functions:
         placement: measured
         image: null
         command: null
+        slots:
+          segmenter: {label: 기기 분할 모델, label_en: on-device segmenter, needs: [segment], size: small, optional: true}
       server:
         needs: {accel: gpu}
         deadline_ms: 3000
@@ -497,6 +532,8 @@ functions:
         roles: [gpu]
         image: null
         command: null
+        slots:
+          model: {label: 분할 모델, label_en: segmenter, needs: [segment], default: yoloe}
 
   depth_estimate:
     options: [unidepth, moge2_aerial]
@@ -520,6 +557,8 @@ functions:
         image: null
         command: null
         note: 상대 깊이 · 근거리 판단만 — 거리값으로 쓰지 않는다. 실행체 없음 — 계약만
+        slots:
+          depth: {label: 기기 깊이 모델, label_en: on-device depth, needs: [depth_relative], size: small, optional: true}
       server:
         needs: {accel: gpu}
         deadline_ms: 1000
@@ -531,6 +570,8 @@ functions:
         image: null
         command: null
         note: options.unidepth · moge2_aerial 가 맡는다
+        slots:
+          model: {label: 거리 모델, label_en: metric depth, needs: [depth_metric], default: unidepth}
 
   single_cam_track:
     note: 단일 카메라 Tracking — 그 카메라 노드에서 돈다. 궤적은 노드를 옮기면 잃는다(sticky). 실행체 없음 — 계약만
@@ -551,6 +592,9 @@ functions:
         roles: [robot, sensor, small, gpu]
         image: null
         command: null
+        slots:
+          # 비어 있으면 탐지기 안의 트래커(ultralytics)를 쓴다 — 그래서 optional
+          tracker: {label: 추적기, label_en: tracker, needs: [track], optional: true}
       server:
         optional: true
         deadline_ms: 500
@@ -714,6 +758,8 @@ functions:
         roles: [gpu]
         image: null
         command: null
+        slots:
+          model: {label: VLM, label_en: VLM, needs: [vlm]}
 
   grounding_explain:
     options: [targeted]
@@ -931,6 +977,9 @@ cue_type_labels: {match: 기준 사진 유사도, material: 재질 규칙, struc
 card_rows_en: {distance: distance, axes: axes, track: track}
 
 #: 구성 모델. 키는 단서의 needs · 선택지의 cue_models 가 가리킨다
+#:   (slots/1) provides · runs_on · size · runner · license · kind · p90_ms 는 위 「기능 → 단계 → 역할 슬롯」 참고.
+#:   runs_on 을 적지 않으면 device 에서: gpu → [gpu] · cpu → [cpu_x86]. runner 가 있는 모델은 혼자 도는 부품이라
+#:   needs 가 맞는 슬롯에 저절로 뜬다 — 없으면 다른 선택지의 구성품이라 명시 선택지(choices)로만 뜬다
 #:   files     있어야 쓸 수 있는 파일 (저장소 기준 상대 경로 · ~ 허용). 비어 있으면 늘 쓸 수 있음
 #:   files_key 사용 가능 판정에 쓰는 이름이 키와 다를 때 (vision_config models.targeted.files 와 같은 이름)
 #:   gpu_mb    더해지는 GPU 어림값 (MB)       device  gpu | cpu
@@ -948,12 +997,14 @@ models:
     note: YOLOE-11l-seg prompt-free (내장 어휘 4585종) — yoloe 선택지
     files: [models/yoloe-11l-seg-pf.pt]
     device: gpu
+    license: AGPL-3.0 (ultralytics)
     packages: [ultralytics]
     source:
     - {path: models/yoloe-11l-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt, sha256: bf39e17c356f4b73977aa978bbdf6d19d0830e6bff46727d2d1f260414e41e0f}
   yoloe_text:
     note: YOLOE-11l-seg 텍스트 프롬프트 + MobileCLIP 텍스트 인코더
     files: [models/yoloe-11l-seg.pt, models/mobileclip_blt.ts]
+    license: AGPL-3.0 (ultralytics)
     gpu_mb: 900
     device: gpu
     packages: [ultralytics]
@@ -996,6 +1047,8 @@ models:
   yolo_world:
     note: YOLOv8s-worldv2 + CLIP — OVD 동의
     files: [models/yolov8s-worldv2.pt, models/clip/ViT-B-32.pt]
+    provides: [detect, open_vocab, ovd]
+    license: AGPL-3.0 (ultralytics)
     gpu_mb: 500
     device: gpu
     packages: [ultralytics, clip]
@@ -1008,6 +1061,8 @@ models:
     files_key: gdino
     gpu_mb_alias: [gdino]
     files: [models/grounding-dino-tiny/config.json, models/grounding-dino-tiny/model.safetensors]
+    provides: [detect, open_vocab, ovd]
+    license: Apache-2.0
     gpu_mb: 1300
     device: gpu
     packages: [transformers]
@@ -1019,6 +1074,8 @@ models:
   depth:
     note: UniDepth V2 ViT-B/14 — 거리 (targeted · river 가 주기적으로)
     files: [~/.cache/huggingface/hub/models--lpiccinelli--unidepth-v2-vitb14, external/UniDepth]
+    provides: [depth_metric]
+    license: CC-BY-NC-4.0
     gpu_mb: 1300
     device: gpu
     packages: [torch]
@@ -1029,6 +1086,8 @@ models:
   unidepth_l:
     note: UniDepth V2 ViT-L/14 — unidepth 선택지 (vision_config models.unidepth.model_name)
     files: [models/unidepth-v2-vitl14, external/UniDepth]
+    provides: [depth_metric]
+    license: CC-BY-NC-4.0
     device: gpu
     packages: [torch]
     source:

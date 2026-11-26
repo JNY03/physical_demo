@@ -148,6 +148,14 @@ DEPTH_MODELS = ("unidepth", "moge2_aerial")
 #: 검출 모델. depth 결합(fusion)은 이 중 **먼저 오는 하나**의 검출을 쓴다 —
 #: 둘을 같이 돌리면 결과는 둘 다 저장되지만 거리·GPS 는 한쪽에만 붙는다.
 DETECT_MODELS = ("yoloe", "river", "targeted")
+# 역할 슬롯으로 고르는 **새 모델**(M2, 2026-11-27) — 레지스트리 models.<키>.runner 가 「모듈:클래스」 인 것.
+# 옛 선택지(RUNNERS) 뒤에 붙는다 — 결합(fusion)은 여전히 먼저 오는 검출 하나를 쓴다. 프로토콜: vision/runners/README.md
+from runners import DEPTH_KINDS as _RK_DEPTH, DETECT_KINDS as _RK_DETECT  # noqa: E402
+from runners import load_runner, runner_kind, runner_models  # noqa: E402
+RUNNER_SPECS = {k: v for k, v in runner_models().items() if k not in MODELS}
+DETECT_MODELS += tuple(k for k, v in RUNNER_SPECS.items() if runner_kind(v) in _RK_DETECT)
+DEPTH_MODELS += tuple(k for k, v in RUNNER_SPECS.items() if runner_kind(v) in _RK_DEPTH)
+MODELS += tuple(k for k in RUNNER_SPECS if k in DETECT_MODELS or k in DEPTH_MODELS)
 IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 COLORMAPS = {"turbo": cv2.COLORMAP_TURBO, "jet": cv2.COLORMAP_JET, "inferno": cv2.COLORMAP_INFERNO,
              "magma": cv2.COLORMAP_MAGMA, "viridis": cv2.COLORMAP_VIRIDIS, "plasma": cv2.COLORMAP_PLASMA}
@@ -4083,6 +4091,10 @@ def apply_profile(cfg, resolved):
     cfg["_profile_label"] = resolved.get("label")
     cfg["_profile_version"] = resolved.get("version")
     cfg["_active"] = resolved                          # 스캔 판이 끝나면 되돌릴 설정(원문은 resolved["_raw"])
+    # 역할 슬롯 고른 것 (M4) — {기능: {단계: {역할: 값}}}. 비전이 따르는 것은 지금 동작과 같은 자리뿐이다:
+    # 서버 model 슬롯 = 돌릴 선택지(--models 가 없을 때), targeted_detect 의 ovd · depth = cue_setup (resolve_profile 이 옮겼다).
+    # 기기 단계 슬롯은 오케스트레이터 몫이라 여기서는 들고만 있다
+    cfg["_slots"] = resolved.get("slots") or {}
     if resolved.get("targeted") is not None:
         cfg["models"].setdefault("targeted", {})["_resolved"] = resolved["targeted"]
 
@@ -4694,6 +4706,26 @@ class LiveRunner:
 
 
 # ---------------------------------------------------------------- 실행
+def make_runner(m, cfg, device):
+    """모델 하나의 실행기 — 옛 선택지는 RUNNERS, 레지스트리 runner(「모듈:클래스」)는 vision/runners 적재기로"""
+    if m in RUNNERS:
+        return RUNNERS[m](cfg["models"][m], device)
+    spec = RUNNER_SPECS[m]
+    mcfg = (cfg.get("models") or {}).get(m)
+    return load_runner(m, spec, device, mcfg if mcfg is not None else (spec.get("config") or {}))
+
+
+def slot_models(slots):
+    """프로필 역할 슬롯에서 서버 model 슬롯에 고른 것 — 비전이 돌릴 수 있는 것만, 적은 순서"""
+    out = []
+    for _fn, stages in sorted((slots or {}).items()):
+        v = ((stages or {}).get("server") or {}).get("model")
+        for m in (v if isinstance(v, list) else [v]):
+            if m in MODELS and m not in out:
+                out.append(m)
+    return out
+
+
 def normalize(values, allowed, aliases, what):
     out = []
     for v in values:
@@ -4794,7 +4826,17 @@ def main():
                 print("%-7s %s  프레임 %5d  결과: %s" % (dv, r.name, len(read_frame_list(r)), ", ".join(done) or "-"))
         return 0
 
-    models = normalize(args.models or defaults.get("models", ["yoloe"]), MODELS, MODEL_ALIASES, "모델")
+    want_models = args.models
+    if not want_models and args.profile and Path(args.profile).exists():
+        # --models 가 없으면 프로필 역할 슬롯(서버 model)에 고른 것을 돌린다 (M4) — --models 가 있으면 그것이 이긴다
+        import cue_catalog as cc
+        try:
+            want_models = slot_models(cc.check_slots(load_profile_file(args.profile).get("functions"))) or None
+        except (ValueError, OSError) as exc:                  # ProfileError 는 ValueError 다
+            raise SystemExit("프로필이 틀렸습니다 — %s" % exc)
+        if want_models:
+            log("모델은 프로필 역할 슬롯에서: %s" % " ".join(want_models))
+    models = normalize(want_models or defaults.get("models", ["yoloe"]), MODELS, MODEL_ALIASES, "모델")
     models = [m for m in MODELS if m in models]           # 검출을 먼저 돌려야 결합이 된다
     picked = [m for m in models if m in DETECT_MODELS]
     if len(picked) > 1:
@@ -4869,7 +4911,7 @@ def main():
     for m in load:
         t0 = time.time()
         log("모델 적재: %s" % m)
-        runners[m] = RUNNERS[m](cfg["models"][m], gpu)
+        runners[m] = make_runner(m, cfg, gpu)
         log("  %s 준비 (%.1fs)" % (m, time.time() - t0))
 
     if live:
