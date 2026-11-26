@@ -75,9 +75,13 @@ function Invoke-Wsl([string[]]$argv) {
 # ---- 카탈로그
 $cat = $null
 try {
-    $txt = Invoke-Wsl @("./venv/bin/python", "vision/cue_catalog.py", "--json")
+    # 설정한 Python($PyWsl)으로 읽는다. 읽은 것이 카탈로그일 때만 캐시를 덮는다 — 빈 출력으로 캐시를 덮으면
+    # 다음에도 못 뜬다 (2026-11-27, venv 가 없는 자리에서 실측)
+    $txt = Invoke-Wsl @($PyWsl, "vision/cue_catalog.py", "--json")
     $cat = $txt | ConvertFrom-Json
-    [System.IO.File]::WriteAllText($CatalogCache, $txt, (New-Object System.Text.UTF8Encoding($false)))
+    if ($null -ne $cat -and $null -ne $cat.models) {
+        [System.IO.File]::WriteAllText($CatalogCache, $txt, (New-Object System.Text.UTF8Encoding($false)))
+    } else { $cat = $null }
 } catch { $cat = $null }
 if ($null -eq $cat -and (Test-Path $CatalogCache)) {
     try { $cat = Get-Content $CatalogCache -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $cat = $null }
@@ -666,11 +670,24 @@ $form.MaximizeBox = $true
 $form.ClientSize = New-Object System.Drawing.Size(1180, 640)
 $form.MinimumSize = New-Object System.Drawing.Size(900, 640)
 
+# 시작 점검 배너 (부품 10_preflight) — 탭 위. 줄 수에 따라 높이가 바뀌면 탭이 그만큼 내려간다
+$pfPanel = New-Object System.Windows.Forms.Panel
+$pfPanel.Location = New-Object System.Drawing.Point(8, 4)
+$pfPanel.Size = New-Object System.Drawing.Size(1164, 0)
+$pfPanel.Anchor = "Top, Left, Right"
+$form.Controls.Add($pfPanel)
+
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Location = New-Object System.Drawing.Point(8, 8)
 $tabs.Size = New-Object System.Drawing.Size(1164, 572)
 $tabs.Anchor = "Top, Bottom, Left, Right"
 $form.Controls.Add($tabs)
+$pfPanel.Add_SizeChanged({
+    $top = $(if ($pfPanel.Height -gt 0) { $pfPanel.Bottom + 4 } else { 8 })
+    $bottom = $tabs.Bottom
+    $tabs.Top = $top
+    $tabs.Height = [Math]::Max(200, $bottom - $top)
+})
 function New-Tab($text) {
     $p = New-Object System.Windows.Forms.TabPage; $p.Text = $text; $tabs.TabPages.Add($p)
     # 탭 안 크기를 미리 맞춘다 — 창을 띄우기 전에는 탭 쪽이 작은 기본 크기라, 그대로 두면 Anchor 를 건 컨트롤이 창을 띄울 때 크게 부푼다
@@ -684,7 +701,10 @@ $tSrc    = New-Tab (L "step_src")
 $tFunc   = New-Tab (L "step_func")
 $tOver   = New-Tab (L "step_over")
 $tPlace  = New-Tab (L "step_place")
+$tStatus = $(if ($Str.ContainsKey("status_tab")) { New-Tab (L "status_tab") } else { $null })   # 실행 상태 (부품 20_status)
 $StepKeys = @("step_src", "step_func", "step_over", "step_place")
+Part-Hook "PreflightBanner" @($pfPanel)
+if ($tStatus) { Part-Hook "StatusPanel" @($tStatus) }        # 실행 상태 칸 (부품 20_status)
 
 function New-Group($parent, $text, $x, $y, $w, $h) {
     $g = New-Object System.Windows.Forms.GroupBox
@@ -3167,6 +3187,7 @@ function Load-Functions {
     $pre = Invoke-Wsl @($PyWsl, "-m", "ds_resources.cli", "preflight", "--json")
     $script:FnWhy = @{}
     $pj = From-Json $pre
+    Part-Hook "PreflightResult" @($pj)                 # 시작 점검 배너가 같은 결과를 쓴다(두 번 돌리지 않게)
     foreach ($f in @($pj.features)) { $script:FnWhy[$f.key] = [pscustomobject]@{ usable = $f.usable; runnable = $f.runnable; why = $f.why; how = $f.how } }
     # 순서: 지금 돌릴 수 있는 것(실행체 · 모델이 있다) → 쓸 수는 있으나 계약만 있는 것 → 못 쓰는 것. 같은 묶음 안은 이름순
     # 가장 자주 쓰는 기능(FnPinned)은 쓸 수 있으면 맨 위에 고정한다 (2026-11-27)
@@ -3500,7 +3521,11 @@ function Show-Plan {
     if ($cfg.onAll.Count -eq 0 -or (Chosen-Models).Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show((L "m_pick_both"), (L "b_plan")); return }
     Write-PreviewProfile
     Set-Status (L "s_plan_calc") $true
-    $argv = @("./venv/bin/python", "-m", "ds_resources.cli", "plan") + ((Orch-Args $cfg $PreviewWsl) -split " " | Where-Object { $_ })
+    $argv = @($PyWsl, "-m", "ds_resources.cli", "plan") + ((Orch-Args $cfg $PreviewWsl) -split " " | Where-Object { $_ })
+    if (Part-Hook "PreviewRun" @($tPlace, $argv)) {   # 배치 탭 안에 그린다 (부품 40_preview). 부품이 없으면 아래 대화 상자
+        Set-Status $(if ($script:Running) { L "s_running" } else { "" })
+        return
+    }
     $txt = Invoke-Wsl $argv
     Set-Status $(if ($script:Running) { L "s_running" } else { "" })
     if (-not $txt) { $txt = (L "m_no_plan") }
@@ -3540,6 +3565,13 @@ function Mine-Names {
     return @(Running-Names | Where-Object { $_ -eq "ds_server" -or $_ -eq "ds_slice" -or $_ -like "ds_vision_*" })
 }
 
+function Stop-All {
+    # 실행을 끈다 — 창을 닫을 때와 실행 상태 칸의 「정지」가 같이 쓴다 (poll 은 부르는 쪽이 정한다)
+    Save-Settings
+    Set-Status (L "s_stopping") $true
+    $debounce.Stop()
+    Stop-Windows (@(Vision-Names) + @("ds_slice", "ds_server"))
+}
 function Start-All {
     $cfg = Current-Config
     $why = Check-Inputs $cfg
@@ -3556,6 +3588,7 @@ function Start-All {
     $script:Running = $true
     $run.Visible = $false
     Set-Status (L "s_running")
+    Part-Hook "StatusStart"                            # 실행 상태 칸을 바로 한 번 읽는다 (부품 20_status)
 }
 
 # ---- 실행 중 반영 (마지막 변경 1초 뒤)
@@ -3663,15 +3696,15 @@ $form.Add_FormClosing({
     $r = [System.Windows.Forms.MessageBox]::Show((L "m_stop"), (L "d_title"),
                                                 [System.Windows.Forms.MessageBoxButtons]::OKCancel)
     if ($r -ne [System.Windows.Forms.DialogResult]::OK) { $e.Cancel = $true; return }
-    Save-Settings
-    Set-Status (L "s_stopping") $true
-    $poll.Stop(); $debounce.Stop()
-    Stop-Windows (@(Vision-Names) + @("ds_slice", "ds_server"))
+    $poll.Stop()
+    Stop-All
 })
 
 Move-SrcFoot
 Load-UserSources
 Load-Sources
+[void](Part-Hook "Cam360Button" @($gStream, $null, $null))   # 꺼진 cam360 옆 「360 카메라 실행」 (부품 30_sources)
+Part-Hook "SourcesAuto"                                       # 소스 연결 자동 갱신
 Load-Functions
 Build-TargetChecks
 Build-CueBoxes
