@@ -12,6 +12,10 @@
   python -m ds_resources.cli preflight [--json]
       이 기기에서 무엇이 되고 무엇이 왜 안 되는지 — 자원 · 둘레(docker · k3s · Redis) · 가중치를 읽고
       기능마다 된다/안 된다와 고치는 길을 적는다. 아무것도 깔거나 띄우지 않는다.
+      issues: 기기 단위로 지금 고칠 것 [{id, level, title, detail, fix}] (런처 시작 점검 배너).
+  python -m ds_resources.cli fix <id> [--dry-run]
+      다시 점검해서 그 id 의 고치기 명령(fix.argv)을 저장소 루트에서 돌리고 결과 JSON 을 찍는다
+      (KUBECONFIG 가 없으면 ~/.kube/config). 밖에서 받은 명령은 돌리지 않는다.
 
 기기별 모델 매칭 · 수동 배치 (2026-11-26)
   --assign pi13=yoloe a2=yoloe,river robot1=       기기마다 올릴 모델 (적지 않은 기기는 --models 전부,
@@ -135,6 +139,22 @@ def brief(p):
     return "\n".join(lines)
 
 
+def plan_json(p):
+    """기계가 읽는 배치 미리보기 (런처가 창 안에 그린다) — 배치표 칸(gpu_units · cpu_units · refused · degraded ·
+    waiting · functions, GPU 단위의 admit) 그대로에 방식 · 근거와 스냅숏 노드 요약을 **더하기만** 한다.
+    옛 칸(mode · basis · why · caps)은 이름도 자리도 그대로다."""
+    plan = p["plan"]
+    nodes = []
+    for n in (p.get("snapshot") or {}).get("nodes") or []:
+        one = {"name": n.get("name"), "role": n.get("role"), "ready": bool(n.get("ready")),
+               "stale": bool(n.get("stale")), "source": n.get("source")}
+        one.update(ctl.Controller._node_gpu(n))
+        nodes.append(one)
+    return dict(plan, mode=p["mode"], basis=p["basis"], why=p["why"], caps=p.get("caps") or {},
+                ok=bool(p.get("ok")), vision_off=list(p.get("vision_off") or []), nodes=nodes,
+                waiting=list(plan.get("waiting") or []), functions=plan.get("functions") or {})
+
+
 def refused_codes(req):
     """요청 기록의 거절 이유 코드들 — requests.<id>.refused (배치표 + admit), 없으면(옛 기록) plan.refused"""
     items = req.get("refused")
@@ -163,7 +183,9 @@ def submit_with_retry(k, submit, nothing_running, stopped=lambda: False, sleep=t
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="자원 기반 비전 오케스트레이터")
-    ap.add_argument("cmd", choices=("plan", "run", "status", "places", "preflight"))
+    ap.add_argument("cmd", choices=("plan", "run", "status", "places", "preflight", "fix"))
+    ap.add_argument("target", nargs="?", help="fix: 고칠 점검 id (preflight issues[].id)")
+    ap.add_argument("--dry-run", action="store_true", help="fix: 돌리지 않고 무엇을 돌릴지만")
     ap.add_argument("--sources", nargs="*", default=[])
     ap.add_argument("--models", nargs="*", default=[])
     ap.add_argument("--cpu-tasks", nargs="*", default=[])
@@ -184,6 +206,13 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--poll", type=float, default=3.0)
     a = ap.parse_args(argv)
+    if a.cmd == "fix":
+        from ds_resources import preflight as pf
+        if not a.target:
+            ap.error("fix 에는 id 가 필요합니다 (preflight --json 의 issues[].id)")
+        res = pf.run_fix(a.target, dry_run=a.dry_run)
+        print(json.dumps(res, ensure_ascii=False, indent=1))
+        return 0 if res["ok"] else 1
     if not a.redis_public:
         import subprocess
         try:
@@ -261,9 +290,7 @@ def main(argv=None):
         k = build(a, writer=False)
         p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks, functions=funcs,
                       assign=assign, manual=manual, limits=limits)
-        print(json.dumps(p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"], "caps": p.get("caps") or {}},
-                         ensure_ascii=False)
-              if a.json else brief(p))
+        print(json.dumps(plan_json(p), ensure_ascii=False) if a.json else brief(p))
         return 0
 
     k = build(a, writer=True)
