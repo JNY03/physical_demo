@@ -608,6 +608,18 @@ function Chosen-MB {
     return $mb
 }
 
+# ---- 부품 (2026-11-27) — tools/launcher/parts/*.ps1 을 이름순으로 불러온다. 부품은 함수 · 화면 글($Str 에 더하기)만
+# 정의하고, 본문이 정해진 자리(Part-Hook)에서 부른다. 부품마다 PartTest-<이름> 함수를 두면 자체 시험이 결과를 싣는다
+$PartsDir = Join-Path $Here "parts"
+if (Test-Path $PartsDir) {
+    foreach ($pf in (Get-ChildItem $PartsDir -Filter "*.ps1" | Sort-Object Name)) { . $pf.FullName }
+}
+function Part-Hook($name, [object[]]$hookArgs = @()) {
+    # 본문 → 부품: 「Hook-<name>」 함수가 있으면 부른다(없으면 아무 일도 없다 — 부품을 빼도 런처는 돈다)
+    $f = Get-Command -Name ("Hook-" + $name) -CommandType Function -ErrorAction SilentlyContinue
+    if ($f) { return (& $f @hookArgs) }
+}
+
 # ---- 창
 $font = New-Object System.Drawing.Font("Malgun Gothic", 10)
 $form = New-Object System.Windows.Forms.Form
@@ -3328,6 +3340,9 @@ function Self-Test {
     $langBox.SelectedIndex = 0
     Apply-Language
     $r.back_to_ko = $run.Text
+    foreach ($pt in @(Get-Command -Name "PartTest-*" -CommandType Function -ErrorAction SilentlyContinue)) {
+        try { $r[$pt.Name] = & $pt } catch { $r[$pt.Name] = "실패: " + $_.Exception.Message }
+    }
     $r | ConvertTo-Json -Depth 10
 }
 # 끝에서 끝까지(창을 실제로 띄운다): 실행 → 실행 중 거리 끄기 → 전부 끄기. 결과를 한 줄씩 찍는다

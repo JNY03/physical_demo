@@ -52,6 +52,15 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 foreach ($f in "launcher.ps1", "web_launcher.cmd") {
     Copy-Item (Join-Path $here $f) (Join-Path $Dest $f) -Force
 }
+# 부품 (tools/launcher/parts/*.ps1) — 런처가 자기 폴더의 parts\ 에서 불러온다. 저장소에서 지운 부품은 여기서도 지운다
+$partsSrc = Join-Path $here "parts"
+$partsDst = Join-Path $Dest "parts"
+if (Test-Path $partsSrc) {
+    New-Item -ItemType Directory -Force -Path $partsDst | Out-Null
+    Get-ChildItem $partsDst -Filter "*.ps1" -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-Path (Join-Path $partsSrc $_.Name)) } | Remove-Item -Force
+    Copy-Item (Join-Path $partsSrc "*.ps1") $partsDst -Force -ErrorAction SilentlyContinue
+}
 
 # ---- 그 기기 값 (저장소 파일은 그대로 두고 여기에만 적는다 — launcher.ps1 의 Pick-Setting 이 읽는다)
 $local = Join-Path $Dest "launcher.local.json"
