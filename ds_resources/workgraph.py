@@ -394,6 +394,10 @@ def build(reg, funcs, functions, sources=None, selection=None, params=None, fps=
         if n["source"] is None or n["domain"]:
             continue
         for a in KIND_ARTIFACTS.get(n["kind"], []):
+            # 도메인 기능 안의 구성 모델(targeted 의 텍스트 · prompt-free arm · OVD)은 「같은 일」로 보지 않는다 —
+            # 그 기능만의 문구 · 판정을 위해 돈다. 거리(depth)만은 같은 일이다(같은 물체 거리)
+            if n["internal"] and a != "depth":
+                continue
             groups.setdefault((n["source"], n["stage"], a), []).append(n)
     for (s, side, a), ns in sorted(groups.items()):
         if len(ns) < 2 or a == "masks":
@@ -401,9 +405,24 @@ def build(reg, funcs, functions, sources=None, selection=None, params=None, fps=
         mbs = [n["gpu_mb"] for n in ns]
         save = sum(mbs) - min(mbs)
         fns = sorted({f for n in ns for f in n["consumers"]})
-        warnings.append({"source": s, "stage": side, "artifact": a, "models": [n["model"] for n in ns],
-                         "functions": fns, "nodes": [n["node"] for n in ns], "save_mb": int(save), "code": "dup_kind",
-                         "reason": DUP_TEXT % save})
+        # 맞추기 — 한 모델로 모을 때 기능마다 그 슬롯에 넣을 **그 슬롯의 선택지 키** (같은 정체의 다른 이름을 푼다:
+        # depth_estimate 의 unidepth ↔ targeted 의 unidepth_l). 모든 기능 슬롯에 넣을 수 있는 것 중 GPU 가 작은 것이 먼저
+        opts = []
+        for c in ns:
+            align = _align(c, ns, funcs, table)
+            if align is not None:
+                opts.append((c["gpu_mb"], c["model"], c, align))
+        opts.sort(key=lambda o: (o[0], o[1]))
+        first = opts[0][2] if opts else None
+        order = ([first] if first else []) + [n for n in ns if n is not first]
+        row = {"source": s, "stage": side, "artifact": a, "models": [n["model"] for n in order],
+               "functions": fns, "nodes": [n["node"] for n in order], "save_mb": int(save), "code": "dup_kind",
+               "reason": DUP_TEXT % save}
+        if opts:                                         # 실제로 맞출 수 있는 쪽으로 모을 때 아끼는 몫
+            row["align"] = opts[0][3]
+            row["save_mb"] = int(sum(mbs) - opts[0][0])
+            row["reason"] = DUP_TEXT % row["save_mb"]
+        warnings.append(row)
     return {"work": out, "work_edges": edges, "work_warnings": warnings, "work_inputs": inputs, "work_reid": reid,
             "work_gpu": {"format": FORMAT, "total_mb": int(total), "naive_mb": int(naive),
                          "saved_mb": int(naive - total)}}
@@ -422,6 +441,29 @@ def apply_model_params(funcs, selection, picks, params):
             if fn in selection and "server" in selection[fn]:
                 selection[fn]["server"][d["slot"]] = v
     return selection
+
+
+def _align(cand, ns, funcs, table):
+    """cand 의 정체로 모을 때 {기능: {stage, role, model}} — 넣을 수 없는 기능이 하나라도 있으면 None"""
+    from ds_resources import slots as slt
+    ident = cand["identity"]
+    out = {}
+    for n in ns:
+        for u in n["uses"]:
+            if u["role"] == "input":
+                continue
+            st = (funcs.get(u["function"]) or {}).get("stages", {}).get(u["stage"]) or {}
+            sl = next((x for x in st.get("slots") or [] if x["role"] == u["role"]), None)
+            if sl is None:
+                return None
+            if n is cand:
+                key = next((k for k in n["models"] if k in slt.choices(sl, u["stage"], st, table)), n["model"])
+            else:
+                key = next((k for k in slt.choices(sl, u["stage"], st, table) if identity(k, table) == ident), None)
+            if key is None:
+                return None
+            out[u["function"]] = {"stage": u["stage"], "role": u["role"], "model": key}
+    return out
 
 
 def shared_need(reg, models, need, table=None):

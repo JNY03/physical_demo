@@ -321,6 +321,9 @@ class DepthTracker:
         # **새 트랙은 기다리지 않는다** — 처음 보는 위험물이 있으면 주기를 당긴다
         fresh = any(k is None or k not in self._mem for _d, k in keyed)
         due = (self._n % self.period == 0) or fresh
+        # 같은 장에 같은 모델(독립 depth)이 어차피 잰다면 기다리지 않고 받는다 (work/1 — vision/work_share.py)
+        if not due and getattr(self.provider, "fresh", None) is not None and self.provider.fresh():
+            due = True
         t0 = time.perf_counter()
         dmap = self.provider(bgr) if due else None
         ms = round((time.perf_counter() - t0) * 1000, 1) if due else 0.0
