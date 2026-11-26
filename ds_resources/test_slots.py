@@ -92,14 +92,15 @@ def test_new_model_appears_where_its_capabilities_fit():
         comp_only={"provides": ["detect"], "runs_on": ["gpu"], "files": []})        # runner 없음 → 구성품
     fs = slt.function_slots(reg, have=lambda k: True)
     keys = lambda fn, side, role: [c["key"] for r in fs[fn][side] if r["role"] == role for c in r["choices"]]
-    assert keys("object_detect", "server", "model") == ["yoloe", "big_det"]          # 기본 먼저, gpu 만
-    # 기기 슬롯은 실제 레지스트리의 CPU 모델(yolo26n_seg_cpu …)도 뜬다 — 여기서 더한 것만 본다
     added = lambda ks: [k for k in ks if k in ("big_det", "pi_det", "vlm_x", "comp_only")]
+    first_and_added = lambda ks: ks[:1] + added(ks[1:])       # 기본값은 맨 앞, 그 뒤는 시험에서 더한 것만
+    assert first_and_added(keys("object_detect", "server", "model")) == ["yoloe", "big_det"]          # 기본 먼저, gpu 만
+    # 기기 슬롯은 실제 레지스트리의 CPU 모델(yolo26n_seg_cpu …)도 뜬다 — 여기서 더한 것만 본다
     assert added(keys("object_detect", "device", "detector")) == ["pi_det"]          # 파이 · small
-    assert keys("zeroshot_detect", "server", "model") == ["yoloe", "big_det"]
+    assert first_and_added(keys("zeroshot_detect", "server", "model")) == ["yoloe", "big_det"]
     assert added(keys("zeroshot_detect", "device", "detector")) == []                # open_vocab 이 없다
-    assert keys("segmentation", "server", "model") == ["yoloe", "big_det"]
-    assert keys("vlm", "server", "model") == ["vlm_x"]
+    assert first_and_added(keys("segmentation", "server", "model")) == ["yoloe", "big_det"]
+    assert added(keys("vlm", "server", "model")) == ["vlm_x"]
     assert "comp_only" not in keys("object_detect", "server", "model")              # 혼자 못 도는 것은 안 뜬다
     assert keys("river_detect", "server", "model") == ["river"]                      # 옛 슬롯은 명시만
     row = next(c for r in fs["object_detect"]["server"] for c in r["choices"] if c["key"] == "big_det")
@@ -283,7 +284,11 @@ def test_preflight_required_slot_without_model_blocks(monkeypatch):
     from ds_resources import preflight as pf
     monkeypatch.setattr(pf, "_weight_state", lambda models, dest=None: {m: (True, "") for m in models})
     mach = {"gpu": "x", "kubectl": True}
-    by = {r["key"]: r for r in pf.features(mach, fnc.load())[0]}
+    # 실제 레지스트리에는 이제 VLM(qwen3_vl_2b)이 있다 — VLM 모델을 뺀 레지스트리로 「없으면 막힌다」를 본다
+
+    bare = copy.deepcopy(_reg())
+    bare["models"] = {k: v for k, v in bare["models"].items() if "vlm" not in (v.get("provides") or [])}
+    by = {r["key"]: r for r in pf.features(mach, fnc.load(bare), reg=bare)[0]}
     assert by["vlm"]["usable"] is False and "vlm" in by["vlm"]["why"] and "weights" in by["vlm"]["needs"]
     assert by["object_detect"]["usable"] is True                     # 기기 슬롯은 선택 — 막지 않는다
     reg = _with_models(vlm_x={"runner": "v:V", "provides": ["vlm"], "runs_on": ["gpu"], "files": []})

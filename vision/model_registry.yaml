@@ -1102,7 +1102,7 @@ models:
     - {path: models/unidepth-v2-vitl14, hf: lpiccinelli/unidepth-v2-vitl14, rev: 52b349b514bd8b47642f67ac78cb7b5dc5c51dd9,
        include: [config.json, model.safetensors], sha256: 2e45efad4607bd068c2c835dcc65ba64d516625d111ba446cc1aead6c4cdccc7}
     - {path: external/UniDepth, repo: https://github.com/lpiccinelli-eth/UniDepth.git, commit: 8d8cfe4c7ee15297099983607febf0d4f32eb3d6}
-  # ── Depth Anything 3 (ByteDance-Seed, 2026-11-26) ── runner: vision/runners/depth_anything_3.py
+  # ── Depth Anything 3 (ByteDance-Seed, 2026-11-26) ── runner: vision/runners/da3_metric.py (외부 패키지 depth_anything_3 를 가리지 않게 이름을 다르게)
   # DA3-Metric 은 fx 가 있어야 미터가 된다 (metric = fx·출력/300). fx 는 ① 기기 화각(fov_x_deg) ② DA3-Small 의
   # 카메라 디코더 추정(기본) ③ 설정의 가정 화각 순서로 쓴다 — 그래서 da3_metric_l 은 da3-small 까지 함께 적재한다.
   # p90 · GPU 는 RTX 4050 Laptop 실측 (2026-11-26, ds_gpu.lock, 버킷별 4~15장, 워밍업 3장 뒤). GPU = torch 예약 최대치 증가분.
@@ -1114,7 +1114,7 @@ models:
       GPU 는 절반. 상자 중앙값은 UniDepth-L 과 대체로 ±25~40% 안에서 맞지만 화각 추정이 갈리는 광각(Go1)·파노라마에서 벌어진다
     provides: [depth_metric]
     runs_on: [gpu]
-    runner: depth_anything_3:Runner
+    runner: da3_metric:Runner
     license: Apache-2.0 (가중치 · 코드 모두)
     files: [models/da3-metric-large, models/da3-small, external/Depth-Anything-3]
     gpu_mb: 2000
@@ -1133,7 +1133,7 @@ models:
       거리 단계(depth_track)는 거절한다. da3_metric_l 의 fx 출처로 쓰인다
     provides: [depth_relative]
     runs_on: [gpu]
-    runner: depth_anything_3:Runner
+    runner: da3_metric:Runner
     license: Apache-2.0 (가중치 · 코드 모두)
     files: [models/da3-small, external/Depth-Anything-3]
     gpu_mb: 400

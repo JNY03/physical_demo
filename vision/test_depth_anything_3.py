@@ -24,7 +24,7 @@ def _load(name, path):
     return mod
 
 
-da3 = _load("da3_under_test", HERE / "runners" / "depth_anything_3.py")
+da3 = _load("da3_under_test", HERE / "runners" / "da3_metric.py")
 dt = _load("depth_track_da3_test", HERE / "depth_track.py")
 
 METRIC_W = "models/da3-metric-large"

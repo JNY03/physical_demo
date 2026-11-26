@@ -169,7 +169,7 @@ class _UniDepth:
 
 
 def _da3_module():
-    """vision/runners/depth_anything_3.py 를 파일 경로로 불러온다 (sys.path 에 기대지 않는다).
+    """vision/runners/da3_metric.py 를 파일 경로로 불러온다 (sys.path 에 기대지 않는다).
     그 모듈은 맨 위에서 torch 를 부르지 않는다 — 가중치 폴더가 DA3 인지 보는 데만 써도 가볍다."""
     import importlib.util
     import sys
@@ -177,7 +177,7 @@ def _da3_module():
     name = "ds_runner_depth_anything_3"
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(
-            name, Path(__file__).resolve().with_name("runners") / "depth_anything_3.py")
+            name, Path(__file__).resolve().with_name("runners") / "da3_metric.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         sys.modules[name] = mod
@@ -185,7 +185,7 @@ def _da3_module():
 
 
 class _DA3:
-    """Depth Anything 3 **Metric** — `runners/depth_anything_3.Runner` 를 거리 단계에 끼운다.
+    """Depth Anything 3 **Metric** — `runners/da3_metric.Runner` 를 거리 단계에 끼운다.
 
     DA3-Metric 은 fx 가 있어야 미터가 된다. 거리 단계는 화각을 받지 않으므로 fx 는 Runner 의
     `focal_model`(기본 models/da3-small 의 카메라 디코더) 이나 spec 의 `fov_x_deg` 에서 온다.
