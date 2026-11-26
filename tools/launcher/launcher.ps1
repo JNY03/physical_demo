@@ -3300,7 +3300,14 @@ function Load-Functions {
 }
 function Load-Places {
     Set-Status (L "s_loading") $true
-    $args2 = @($PyWsl, "-m", "ds_resources.cli", "places", "--json") + @((Limit-Args) -split " " | Where-Object { $_ })
+    # 지금 켠 기능 · 소스 · 기기별 배정 · 수동 자리까지 넘긴다 — 그래야 자동 배치 계산에 작업 그래프(work · work_warnings)가
+    # 실려 기능 단계의 「함께 쓰는 작업」 · 중복 알림이 보인다 (2026-11-27)
+    $onAll = @((Current-Config).onAll)
+    $extra = (Limit-Args) + (Functions-Args) + (Assign-Args) + (Pin-Args)
+    if ($onAll.Count) { $extra += " --sources " + ($onAll -join " ") }
+    $fp = Part-Hook "OrchArgs" @($PreviewWsl)
+    if ($fp) { $extra += [string]$fp }
+    $args2 = @($PyWsl, "-m", "ds_resources.cli", "places", "--json") + @($extra -split " " | Where-Object { $_ })
     $txt = Invoke-Wsl $args2
     $script:Places = From-Json $txt
     if ($null -eq $script:Places) { $manualNote.Text = (L "m_no_places") }
