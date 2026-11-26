@@ -12,6 +12,9 @@ models:
     runner: my_model:MyRunner          # vision/runners/my_model.py 의 MyRunner (점이 있으면 절대 모듈 이름)
     kind: detect                       # detect | segment | depth | track | vlm | embed (없으면 provides 로 짐작)
     provides: [detect, open_vocab]     # 능력: detect segment open_vocab ovd depth_metric depth_relative track vlm embed
+                                       # 지정 물체 탐지 근거 모델 자리: detect_text(YOLOE 텍스트 가중치) ·
+                                       # detect_free(YOLOE -pf) · embed_image_text(CLIP ViT-B/32 ONNX 셋, files_for) —
+                                       # 이 셋은 runner 없이도 targeted_detect 의 detector · free_arm · embed 슬롯에 뜬다(component)
     runs_on: [gpu]                     # gpu | cpu_x86 | cpu_arm64 (기기 단계 슬롯은 cpu_arm64 만 본다)
     size: small                        # 기기(파이) 슬롯 중 size: small 인 곳에 뜨려면
     gpu_mb: 800                        # 배치 어림 (MB) — 같은 모델은 프로세스에서 한 번만 센다

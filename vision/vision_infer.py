@@ -2396,17 +2396,31 @@ def _ultra_clip_dir(models_dir):
         pass
 
 
-class _TextArm:
-    """YOLOE 텍스트 프롬프트 — 모델은 캐시, 문구만 바꾼다."""
+def _text_encoder_name(model):
+    """YOLOE 가중치가 쓰는 텍스트 인코더 파일 이름 — 가중치 yaml 의 text_model 로 고른다
+    (YOLOE-11: mobileclip_blt.ts · YOLOE-26: mobileclip2_b.ts). vision/runners/yoloe26.py 와 같은 표"""
+    from runners.yoloe26 import ENCODERS
+    variant = str((getattr(model.model, "yaml", None) or {}).get("text_model") or "mobileclip:blt")
+    return ENCODERS.get(variant)
 
-    def __init__(self, weight, enc_dir, prompts, owners, device, imgsz, conf, max_det, follow):
+
+class _TextArm:
+    """YOLOE 텍스트 프롬프트 — 모델은 캐시, 문구만 바꾼다. YOLOE-11 · YOLOE-26 둘 다 (인코더는 가중치가 고른다)."""
+
+    def __init__(self, weight, enc_dir, prompts, owners, device, imgsz, conf, max_det, follow,
+                 encoder="mobileclip_blt.ts"):
         from ultralytics import YOLOE
         weight = Path(weight)
         if not weight.is_file():
             raise _ArmMissing("가중치가 없다: %s" % weight)
-        if not (Path(enc_dir) / "mobileclip_blt.ts").is_file():
-            raise _ArmMissing("텍스트 인코더가 없다: %s/mobileclip_blt.ts" % enc_dir)
+        if not (Path(enc_dir) / encoder).is_file():
+            raise _ArmMissing("텍스트 인코더가 없다: %s/%s" % (enc_dir, encoder))
         self.model = _cached(("yoloe_text", str(weight)), lambda: YOLOE(str(weight)))
+        want = _text_encoder_name(self.model)
+        if want is None or not (Path(enc_dir) / want).is_file():
+            # 없으면 ultralytics 가 인터넷에서 받으려 한다 — 폐쇄망에서 조용히 나가지 않게 먼저 거절한다
+            raise _ArmMissing("%s 의 텍스트 인코더가 없다: %s/%s" % (weight.name, enc_dir, want))
+        self.encoder = want
         with contextlib.chdir(enc_dir):
             pe = self.model.get_text_pe(list(prompts))
         self.model.set_classes(list(prompts), pe)
@@ -2553,6 +2567,14 @@ class _GdinoArm:
         return out
 
 
+def _role_models(resolved, files):
+    """(역할 → 모델 키, 역할 → 파일 [Path]) — detector · free_arm · embed. 고르지 않으면 기본 모델과 예전 파일"""
+    import cue_catalog as cc
+    cm = (resolved or {}).get("cue_models") or {}
+    keys = {r: cc.role_model(r, cm) for r in cc.role_slots()}
+    return keys, {r: cc.role_files(k, files, r) for r, k in keys.items()}
+
+
 def _auto_free_vocab(name, vocab):
     """직접 입력 대상의 prompt-free 어휘 지도 — 같은 이름, 그리고 중심 명사(마지막 낱말)가 같은 이름."""
     name = name.lower().strip()
@@ -2592,6 +2614,8 @@ class TargetedRunner:
         self.names = [t["name"] for t in self.targets]
         self.distance = bool(resolved.get("distance", True))
         files = cc.model_files(cfg)
+        # 근거 모델 역할에서 고른 모델 (2026-11-27) — 고르지 않으면 기본(yoloe_text · yoloe_free · clip), 예전과 같은 파일
+        self.role_models, role_files = _role_models(resolved, files)
         imgsz = int(cfg.get("imgsz", 1280))
         arm_conf = float(cfg.get("arm_conf", 0.05))
         self.conf = float(cfg.get("conf", 0.15))
@@ -2623,16 +2647,17 @@ class TargetedRunner:
             want = {p.strip().lower() for ps in spec.values() for p in ps}
             decoys = [d for d in (cfg.get("decoys") or []) if str(d).strip().lower() not in want]
             prompts, owners = _expand_vocab(names, spec, decoys)
-            tw = files["yoloe_text"]
+            tw = role_files["detector"]
             try:
                 self.arms.append(("yoloe", _TextArm(tw[0], tw[1].parent, prompts, owners, device, imgsz, arm_conf,
-                                                    self.max_det, bool(cfg.get("imgsz_follow_frame", True)))))
+                                                    self.max_det, bool(cfg.get("imgsz_follow_frame", True)),
+                                                    encoder=tw[1].name)))
             except _ArmMissing as exc:
                 raise SystemExit("targeted: YOLOE 텍스트 arm 을 못 세움 — %s" % exc)
             self.decoys = decoys
             free_t = [t for t in text_t if "free_arm" in t["cues"]]
             if free_t:
-                fw = files["yoloe_free"][0]
+                fw = role_files["free_arm"][0]
                 try:
                     from ultralytics import YOLOE
                     vocab = {str(n).lower() for n in _cached(("yoloe_free", str(fw)),
@@ -2668,7 +2693,7 @@ class TargetedRunner:
                             self.max_det, fc.get("scene_words") or [], fc.get("scene_min_area", 0.10),
                             bool(fc.get("imgsz_follow_frame", True)))))
                 except _ArmMissing as exc:
-                    self.missing.append(("yoloe_free", str(exc)))
+                    self.missing.append((self.role_models["free_arm"], str(exc)))
         else:
             self.decoys = []
         for _label, a in self.arms:                    # 작은 프레임에서도 이만큼은 키워 본다(imgsz_min)
@@ -2731,8 +2756,8 @@ class TargetedRunner:
                 _MODEL_CACHE[key] = _m.DepthTracker(dspec, log=log)
             self.depth = _MODEL_CACHE[key]
             self.depth.classes = tuple(dist_names)
-        tw = files["yoloe_text"]
-        self.evidence = ta.TargetEvidence(self.targets, files["clip"], log=log,
+        tw = role_files["detector"]
+        self.evidence = ta.TargetEvidence(self.targets, role_files["embed"], log=log,
                                           parts_model=(tw[0], tw[1].parent, device))
         TARGET_STYLE.clear()
         for t in self.targets:
@@ -2761,14 +2786,20 @@ class TargetedRunner:
         import target_assess as ta
         files = cc.model_files(self.cfg)
         need = cc.needed_models(resolved, self.cfg)
-        if "clip" in need:
-            ta._shared_clip(files["clip"])
+        roles, rf = _role_models(resolved, files)
+        if roles["embed"] in need:
+            ta._shared_clip(rf["embed"])
         if "yolo_world" in need:
             from ultralytics import YOLO
             _cached(("yolo_world", str(files["yolo_world"][0])), lambda: YOLO(str(files["yolo_world"][0])))
-        if "yoloe_free" in need:
+        if roles["free_arm"] in need:
             from ultralytics import YOLOE
-            _cached(("yoloe_free", str(files["yoloe_free"][0])), lambda: YOLOE(str(files["yoloe_free"][0])))
+            _cached(("yoloe_free", str(rf["free_arm"][0])), lambda: YOLOE(str(rf["free_arm"][0])))
+        if roles["detector"] in need and roles["detector"] != "yoloe_text":
+            # 새 텍스트 가중치는 모델만 미리 올린다 (문구 · set_classes 는 _build 에서 — 돌고 있는 모델을 건드리지 않게).
+            # 기본(yoloe_text)은 예전처럼 _build 에서 올린다
+            from ultralytics import YOLOE
+            _cached(("yoloe_text", str(rf["detector"][0])), lambda: YOLOE(str(rf["detector"][0])))
         if "grounding_dino" in need:
             _GdinoArm(files["gdino"][0].parent, ["x"], ["x"], self.device)     # 모델만 캐시에 올린다
         for t in resolved["targets"]:
