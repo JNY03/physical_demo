@@ -1,0 +1,9 @@
+# ds-device-runner 에 넣을 모델 — 한 줄에 하나 (stage.py 가 읽는다). 이미지 크기가 곧 파이가 받는 크기다.
+#   <모델 키>      vision/model_registry.yaml models.<키> 의 files + 매개변수 안의 models/… 경로
+#   models/<경로>  그 파일 · 폴더를 그대로
+# 넣을 모델은 기기 슬롯(size: small · runs_on: cpu_arm64)에 뜨는 것만. 실행기 파일(vision/runners/<이름>.py)은
+# 언제나 다 들어간다 — 여기에는 가중치만 고른다. 고친 뒤 bash docker/device-runner/build.sh --push
+#
+# YOLO26n 320 (NCNN · ONNX end2end) — vision/runners/yolo26n_ncnn.py 가 레지스트리에 오르면 키(yolo26n_ncnn)로 바꾼다
+models/yolo26n_ncnn/yolo26n_ncnn_320
+models/yolo26n_ncnn/yolo26n_320.onnx

@@ -200,6 +200,27 @@ TZ=Asia/Seoul
 - arm64(파이)는 같은 명령에 `docker buildx build --platform linux/arm64` 를 쓴다.
   **이 기기에서는 amd64 만 빌드해 확인했다** — arm64 는 확인하지 못했다(휠이 있는지부터 봐야 한다).
 
+### 6-1. 기기 단계 실행체 `ds-device-runner` (파이에서 도는 작은 모델)
+
+기능의 **기기 단계**(object_detect · zeroshot_detect · segmentation · depth_estimate 의 `device`)를 파이 CPU 로
+돌리는 이미지다. 실행체는 [`vision/device_stage.py`](../vision/device_stage.py) 하나이고, 어떤 모델을 돌릴지는
+k3s 가 파드를 띄울 때 **역할 슬롯에 고른 모델**로 정한다(`--model {slot.detector}` — `orchestrator/k3s_executor.py`).
+torch · ultralytics 가 없다(numpy · opencv-headless · onnxruntime CPU · ncnn · redis · PyYAML).
+
+```bash
+docker start ds-registry                              # 이 기기의 사설 레지스트리 (:5000)
+bash docker/device-runner/build.sh                    # amd64 만, 로컬 도커에 — 시험
+bash docker/device-runner/build.sh --push             # arm64 + amd64 → 127.0.0.1:5000/ds-device-runner:<git 해시>
+```
+
+- **모델 더하기**: 실행기 파일 `vision/runners/<이름>.py` 는 언제나 다 들어간다. 가중치만
+  [`docker/device-runner/models.txt`](device-runner/models.txt) 에 한 줄(레지스트리 키 또는 `models/…` 경로) 더한다.
+  레지스트리 `models.<키>` 에 `runs_on: [cpu_arm64]` · `size: small` 이 있으면 기기 슬롯 선택지에 뜬다.
+  커밋 → `build.sh --push` → 레지스트리 `functions.*.stages.device.image` 의 태그를 새 해시로.
+- 결과는 Redis `device_stage:<소스>:<기능>`(검출 상위 k 개 · 처리 ms · CPU% — 프레임은 내지 않는다),
+  하트비트는 `cpu_telemetry:<UNIT_ID>`. 입력은 그 카메라의 파이에 놓이면 `http://<노드>:8090/stream/1`(MJPEG),
+  아니면 서버 Redis `camera_stream:<소스>`.
+
 ---
 
 ## 7. 가시화는 바뀌지 않는다

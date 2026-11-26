@@ -520,6 +520,9 @@ class Controller:
         if manual:
             req["manual"] = dict(manual)
         self._specs = {t["task"]: t for t in specs}
+        self._stages = {st["unit"]: st for st in stages}   # 기능 단계 — 파이에 띄울 때 image · command · 슬롯을 싣는다
+        # 소스 → 그 카메라가 달린 노드 (ds.source 라벨). 기기 단계가 그 노드에 놓이면 카메라를 직접 읽는다
+        self._source_nodes = {n["source"]: n["name"] for n in snapshot["nodes"] if n.get("source") and n.get("name")}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
         if functions:
             # 역할 슬롯 고른 것 — 기기 단계 것도 오케스트레이터가 보도록 계획에 싣는다 (비전은 서버 쪽만 따른다)
@@ -528,6 +531,7 @@ class Controller:
             except ValueError as e:
                 plan["slots"] = {}
                 self.log("역할 슬롯 선택이 틀림 — 계획에 싣지 않음: %s" % e)
+            self._slot_pick = plan["slots"]
         placed = {s for u in plan["gpu_units"] for s in u["sources"]}
         plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상 없음. 들어오면 바로 처리")
                            for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])
@@ -714,6 +718,25 @@ class Controller:
         return events
 
     # ------------------------------------------------------------ CPU 작업
+    def stage_launch(self, task):
+        """기능 단계 단위 → {spec, args} (CPU 실행기가 파드 명령을 채울 것). 기능 단계가 아니거나 image 가 없으면 {}.
+
+        spec  계약의 image · command · env (command 의 {slot.<역할>} · {source} · {fps} … 는 실행기가 채운다)
+        args  function · stage · source · fps · cpu_m · mem_mb · slots — slots 는 계획(plan.slots)의 그 기능 · 단계 몫
+              (프로필 functions.<기능>.<단계>.<역할> 이 이기고 없으면 기본값). source_node — 그 소스의 카메라가 달린
+              노드 이름(알 때만). 파드가 그 노드에 놓였으면 카메라 MJPEG 을 직접 읽는다(vision/device_stage.py)"""
+        st = (getattr(self, "_stages", {}) or {}).get(task)
+        if not st or not st.get("image"):
+            return {}
+        picks = ((getattr(self, "_slot_pick", {}) or {}).get(st["function"]) or {}).get(st["stage"]) or {}
+        spec = {"image": st["image"], "command": list(st.get("command") or []), "env": dict(st.get("env") or {})}
+        args = {"function": st["function"], "stage": st["stage"], "source": st.get("source"), "fps": st.get("fps"),
+                "cpu_m": st.get("cpu_m"), "mem_mb": st.get("mem_mb"), "slots": dict(picks)}
+        node = (getattr(self, "_source_nodes", {}) or {}).get(st.get("source"))
+        if node:
+            args["source_node"] = node
+        return {"spec": spec, "args": args}
+
     def launch_cpu(self, rid, xid, mode, u, replaces=None):
         uid = "cpu-%s-%s" % (u["task"], uuid.uuid4().hex[:6])
         rec = {"unit_id": uid, "kind": "cpu", "task": u["task"], "node": u["node"], "requests": u["requests"],
@@ -725,6 +748,7 @@ class Controller:
             self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s, %s (data_stream 기기)" % (u["task"], self.local),
                       detail={"unit_id": uid, "node": u["node"], "note": u.get("reason")}, **_stream_tags(u))
             return uid
+        rec.update(self.stage_launch(u["task"]))
         try:
             self.cpu_ex.launch(rec)
         except Exception as e:  # noqa: BLE001
@@ -751,7 +775,9 @@ class Controller:
         """CPU 작업만 다시 배치한다(GPU 는 옮기지 않는다). 그 노드를 빼고 placement 의 CPU 규칙으로."""
         self.cpu_ex.stop(u)
         self.state.update_unit(u["unit_id"], status="replaced", reason=reason, ended_at=self.clock())
-        spec = (getattr(self, "_specs", {}) or {}).get(u["task"]) or self.cpu_specs([u["task"]])[0]
+        st = (getattr(self, "_stages", {}) or {}).get(u["task"])
+        spec = ((getattr(self, "_specs", {}) or {}).get(u["task"])
+                or (placement.stage_task(st) if st else None) or self.cpu_specs([u["task"]])[0])
         out = {"cpu_units": [], "refused": []}
         placement.place_cpu(spec, [n for n in nodes if n["name"] != u["node"]] + [self.local_node_snapshot()],
                             out, self.local)
