@@ -666,6 +666,7 @@ function Part-Hook($name, [object[]]$hookArgs = @()) {
     $f = Get-Command -Name ("Hook-" + $name) -CommandType Function -ErrorAction SilentlyContinue
     if ($f) { return (& $f @hookArgs) }
 }
+Part-Hook "SettingsLoad" @($saved)                     # settings.json 의 functionParams (부품 50_workgraph)
 
 # ---- 창
 $font = New-Object System.Drawing.Font("Malgun Gothic", 10)
@@ -2224,6 +2225,7 @@ function Update-GpuTotal {
     if ($script:GpuTotalMB) { $gpuTotal.Text = (L "n_gpu_of") -f $a, ("{0:0.0}" -f ($script:GpuTotalMB / 1024.0)) }
     else { $gpuTotal.Text = (L "n_gpu_gb") -f $a }
     $modelTip.SetToolTip($gpuTotal, ((L "n_total") -f $base, $add, ($base + $add)))
+    [void](Part-Hook "MatchFoot" @($gMatch))           # 중복 알림 줄 (부품 50_workgraph)
 }
 $script:MoreOpen = $null                                   # 「계약만 / 못 씀」 묶음을 펼쳤나 (처음: 그 안에 고른 것이 있으면 펼침)
 $script:SelFn = $null                                      # 오른쪽 상세에 보이는 기능
@@ -2501,6 +2503,7 @@ function Build-Detail {
     $infoPanel.ResumeLayout()
     $script:Building = $wasB
     if ($kind -eq "targeted") { Set-TargetNote; Layout-Target }
+    [void](Part-Hook "DetailExtra" @($fn, $detailBody))   # 재식별 범위 · 추적 입력 · 함께 쓰는 작업 (부품 50_workgraph)
 }
 function Get-Model($opt) {
     # 모델 받기 — tools/fetch_models.py 를 창 하나로 띄워 진행을 보인다 (끝나면 「모델 추가」를 다시 열어 확인)
@@ -3272,6 +3275,7 @@ function Load-Functions {
     $script:FnOpts = $r.function_options
     $script:ModelInfo = $r.model_info
     $script:FnUnits = @($r.units)                         # 상세 칸 「단계」 — 기능마다 작업 조각
+    Part-Hook "PlacesLoaded" @($r)                        # function_params · artifacts (부품 50_workgraph)
     $g = @(@($r.nodes) | Where-Object { $_.role -eq "gpu" -and $null -ne $_.gpu } | Select-Object -First 1)
     if ($g.Count) { $script:GpuTotalMB = [int]$g[0].gpu.total_mb }   # 「예상 GPU a / b GB」 의 b
     $all = @($r.function_options.PSObject.Properties.Name)
@@ -3501,6 +3505,7 @@ function Build-Profile {
     $feat = @{}
     foreach ($k in $featChecks.Keys) { if ($featChecks[$k].Checked) { $feat[$k] = $true } }
     if ($feat.Count -gt 0) { $prof.features = $feat }
+    [void](Part-Hook "ProfileExtra" @($prof))          # function_params (부품 50_workgraph)
     return $prof
 }
 $script:ProfileVer = [int]((Get-Date).ToString("HHmmss"))
@@ -3528,7 +3533,7 @@ function Save-Settings {
                        overlay = $script:Overlay;
                        assign = $script:Assign; manual = $manualOn.Checked; manualPlace = $script:ManualPlace;
                        nodeLimit = $script:NodeLimit; fnModel = $script:FnModel; fnSrc = $script:FnSrc;
-                       cueOff = @($script:CueOff); cuePick = $script:CuePick; targetDev = $script:TargetDev;
+                       cueOff = @($script:CueOff); cuePick = $script:CuePick; targetDev = $script:TargetDev; functionParams = $script:FnParams;
                        features = $(if ($featChecks.Count) { $h = @{}; foreach ($k in $featChecks.Keys) { $h[$k] = $featChecks[$k].Checked }; $h } else { $null }) } |
         ConvertTo-Json -Depth 8 | Set-Content $SettingsFile -Encoding UTF8
 }
@@ -3616,7 +3621,7 @@ function Pin-Args {
 }
 function Orch-Args($cfg, $profWsl = $ProfileWsl) {
     return ("--sources {0} --models {1} --profile {2}" -f ($cfg.onAll -join " "), ((Chosen-Models) -join " "), $profWsl) +
-           (Functions-Args) + (Assign-Args) + (Pin-Args) + (Limit-Args)
+           (Functions-Args) + (Assign-Args) + (Pin-Args) + (Limit-Args) + (Part-Hook "OrchArgs" @($profWsl))   # 부품 50_workgraph
 }
 function Show-Plan {
     $cfg = Current-Config

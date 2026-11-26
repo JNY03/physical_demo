@@ -255,6 +255,7 @@ function Hook-PreviewShow($parent, $planJson) {
         }
         $y += 6
     }
+    [void](Part-Hook "PreviewCards" @($body, $p))      # 카드마다 공유 작업 줄 (부품 50_workgraph)
     $body.ResumeLayout()
     $box.Visible = $true
     $box.BringToFront()
