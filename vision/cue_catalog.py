@@ -85,10 +85,19 @@ def load_registry(path=REGISTRY):
                 for m in ms or []:
                     if m not in reg["models"]:
                         raise SystemExit("%s: 선택지 %s 단서 %s 에 모르는 모델 %r" % (path, name, cue, m))
+    for need, ch in (reg.get("cue_model_choices") or {}).items():
+        for m in (ch or {}).get("choices") or []:
+            if m not in reg["models"]:
+                raise SystemExit("%s: cue_model_choices.%s 에 모르는 모델 %r" % (path, need, m))
     return reg
 
 
 _REG = load_registry()
+#: 근거 모델 중 바꿀 수 있는 것 — {need: {"choices": (모델 키…), "multi": bool, "model_id": {모델: 값}}}
+CUE_CHOICES = {str(k): {"choices": tuple(str(m) for m in (v or {}).get("choices") or ()),
+                        "multi": bool((v or {}).get("multi")),
+                        "model_id": dict((v or {}).get("model_id") or {})}
+               for k, v in (_REG.get("cue_model_choices") or {}).items()}
 #: 검출 모델 · 깊이 모델 (vision_infer.py 와 같은 이름)
 MODELS = tuple(_REG["options"])
 DETECT_MODELS = tuple(m for m, o in _REG["options"].items() if o.get("kind") == "detect")
@@ -221,18 +230,66 @@ def gdino_mode(tcfg):
     return "auto" if v == "auto" else bool(v)
 
 
-def ovd_available(tcfg, files, targets=None):
+def ovd_available(tcfg, files, targets=None, pick=None):
     """OVD 동의에 쓸 탐지기. YOLO-World 는 있으면 쓴다. GroundingDINO 는 무거워서(프레임당 수백 ms)
     yaml `ovd.grounding_dino` 가 true 이거나, auto(기본)이면 **그 근거를 선언한 대상**(ovd_rules.grounding_dino,
     지금은 demo_door — main 이 그 문을 GDINO 근거로 확정했다)을 고를 때만 쓴다. targets=None 이면 '쓸 수 있는가' 만 본다."""
+    pick = None if pick is None else set(pick)        # 런처 근거 표에서 고른 OVD 모델 (None = 지금 규칙 그대로)
     out = []
-    if have("yolo_world", files):
+    if have("yolo_world", files) and (pick is None or "yolo_world" in pick):
         out.append("yolo_world")
     mode = gdino_mode(tcfg)
+    if pick is not None:                              # 사람이 고르면 auto 규칙보다 앞선다 (끄는 것도 · 켜는 것도)
+        mode = "grounding_dino" in pick
     if mode is not False and have("gdino", files):
         if mode is True or targets is None or any("grounding_dino" in (t.get("ovd_rules") or {}) for t in targets):
             out.append("grounding_dino")
     return out
+
+
+def depth_key(cue_models=None):
+    """거리 근거에 쓸 모델 키 (기본 depth = UniDepth ViT-B/14)."""
+    return str((cue_models or {}).get("depth") or "depth")
+
+
+def depth_model_id(cue_models, files):
+    """거리 모델 키 → depth_track 에 넘길 model_id. 기본(depth)이면 None(yaml 값 그대로).
+    로컬 가중치(models/… · external/…)는 실제 자리(files 의 첫 경로)로, 허브 이름은 그대로 넘긴다."""
+    key = depth_key(cue_models)
+    if key == "depth":
+        return None
+    mid = str(CUE_CHOICES.get("depth", {}).get("model_id", {}).get(key) or "")
+    if mid.startswith(("models/", "external/")) and files.get(key):
+        return str(files[key][0])
+    return mid or None
+
+
+def check_cue_setup(cs):
+    """프로필 models.targeted.cue_setup → {"off": [근거], "models": {need: 모델 | [모델]}}. 틀리면 ProfileError"""
+    if cs in (None, {}):
+        return {"off": [], "models": {}}
+    if not isinstance(cs, dict) or set(cs) - {"off", "models"}:
+        raise ProfileError("cue_setup 은 {off: [근거], models: {ovd: [...], depth: ...}}")
+    off = [str(k) for k in (cs.get("off") or [])]
+    for k in off:
+        if k not in CUES:
+            raise ProfileError("cue_setup.off 에 모르는 근거 %r (가능: %s)" % (k, ", ".join(CUES)))
+        if k == "class":
+            raise ProfileError("탐지기 이름(class) 근거는 끌 수 없다 — 후보를 내는 것이 그것이다")
+    models = {}
+    for need, v in (cs.get("models") or {}).items():
+        ch = CUE_CHOICES.get(need)
+        if ch is None:
+            raise ProfileError("cue_setup.models 에 바꿀 수 없는 근거 모델 %r (가능: %s)" % (need, ", ".join(CUE_CHOICES)))
+        vals = list(v) if isinstance(v, (list, tuple)) else [v]
+        if not vals or (len(vals) > 1 and not ch["multi"]):
+            raise ProfileError("cue_setup.models.%s 는 %s" % (need, "하나 이상" if ch["multi"] else "하나"))
+        for m in vals:
+            if m not in ch["choices"]:
+                raise ProfileError("cue_setup.models.%s 에 고를 수 없는 모델 %r (가능: %s)"
+                                   % (need, m, ", ".join(ch["choices"])))
+        models[need] = [str(m) for m in vals] if ch["multi"] else str(vals[0])
+    return {"off": sorted(set(off)), "models": models}
 
 
 # ---------------------------------------------------------------- 대상
@@ -398,7 +455,7 @@ def _direct_target(name, spec):
     return apply_prompts(t, check_prompts(spec.get("prompt"), "대상 %s" % name))
 
 
-def available_cues(t, tcfg, files, distance=True):
+def available_cues(t, tcfg, files, distance=True, cue_models=None):
     """대상 하나에서 **쓸 수 있는** 근거 → (기본 역할, 쓸 수 없으면 None 과 이유)."""
     det = t.get("detector", "yoloe_text")
     out = {}
@@ -411,13 +468,13 @@ def available_cues(t, tcfg, files, distance=True):
         else:
             for need in c["needs"]:
                 if need == "ovd":
-                    if not ovd_available(tcfg, files, [t]):
+                    if not ovd_available(tcfg, files, [t], (cue_models or {}).get("ovd")):
                         why = "OVD 가중치 없음"
                 elif need == "depth":
                     if not distance:
                         why = "거리 측정 꺼짐"
-                    elif not have("depth", files):
-                        why = "UniDepth 없음"
+                    elif not have(depth_key(cue_models), files):
+                        why = "%s 없음" % depth_key(cue_models)
                 elif not have(need, files):
                     why = "%s 없음" % need
         if key == "class" and det == "trained" and not _trained_ok(t):
@@ -578,7 +635,7 @@ def resolve_profile(profile, cfg, models, targets_db=None):
             raise ProfileError("프로필에 모르는 모델 %r (가능: %s)" % (m, ", ".join(MODELS)))
         if not isinstance(part, dict):
             raise ProfileError("프로필 models.%s 는 사전" % m)
-        extra = set(part) - ({"targets", "distance", "overlay"} if m == "targeted" else {"overlay"})
+        extra = set(part) - ({"targets", "distance", "overlay", "cue_setup"} if m == "targeted" else {"overlay"})
         if extra:
             raise ProfileError("모델 %s 에는 %s 를 줄 수 없음 (대상, 근거, 거리는 지정 클래스 탐지에만)"
                                % (m, ", ".join(sorted(extra))))
@@ -600,6 +657,7 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     result["features"] = dict(feats)
     tpart = pm.get("targeted") or {}
     distance = bool(tpart.get("distance", tcfg.get("distance", True)))
+    setup = check_cue_setup(tpart.get("cue_setup"))
     if "targeted" in models:
         specs = tpart.get("targets")
         if specs is None:
@@ -635,12 +693,21 @@ def resolve_profile(profile, cfg, models, targets_db=None):
             if s.get("min_score") is not None:
                 t["min_score"] = float(s["min_score"])
             t_dist = distance and bool(s.get("distance", True))
-            avail = available_cues(t, tcfg, files, t_dist)
-            t["cues"] = resolve_cues(t, s.get("cues"), avail)
+            avail = available_cues(t, tcfg, files, t_dist, setup["models"])
+            # 근거 표에서 끈 근거는 모든 대상에서 뺀다 — 대상별로 직접 고른 것이어도 (근거 표가 위다)
+            for k in setup["off"]:
+                avail[k] = avail.get(k) or "근거 표에서 끔"
+            spec_cues = s.get("cues")
+            if isinstance(spec_cues, list):
+                spec_cues = [k for k in spec_cues if k not in setup["off"]]
+            elif isinstance(spec_cues, dict):
+                spec_cues = {k: v for k, v in spec_cues.items() if k not in setup["off"]}
+            t["cues"] = resolve_cues(t, spec_cues, avail)
             t["distance"] = t_dist
             t["unavailable"] = {k: v for k, v in avail.items() if v}
             out.append(t)
-        result["targeted"] = {"targets": out, "distance": distance}
+        result["targeted"] = {"targets": out, "distance": distance, "cue_models": setup["models"],
+                              "cues_off": setup["off"]}
     names = [t["name"] for t in (result["targeted"] or {}).get("targets", [])]
     opts = overlay_options(models, distance, names)
     for m, part in pm.items():
@@ -666,17 +733,20 @@ def resolve_profile(profile, cfg, models, targets_db=None):
 def needed_models(resolved, tcfg):
     """확정된 targeted 설정이 적재해야 할 모델 키 집합."""
     files = model_files(tcfg)
+    cm = (resolved or {}).get("cue_models") or {}
     need = set()
     for t in (resolved or {}).get("targets", []):
         if t.get("detector") == "trained":
             need.add("trained")
         else:
             need.add("yoloe_text")
-            need.update(ovd_available(tcfg, files, [t]))     # 탐지기 근거에 OVD 확신이 들어간다
+            need.update(ovd_available(tcfg, files, [t], cm.get("ovd")))     # 탐지기 근거에 OVD 확신이 들어간다
         for k in t["cues"]:
             for n in CUES[k]["needs"]:
                 if n == "ovd":
-                    need.update(ovd_available(tcfg, files, [t]))
+                    need.update(ovd_available(tcfg, files, [t], cm.get("ovd")))
+                elif n == "depth":
+                    need.add(depth_key(cm))
                 else:
                     need.add(n)
     return need
@@ -714,7 +784,9 @@ def option_cues(files=None, tcfg=None):
                     ms += ["yolo_world", "grounding_dino"] if n == "ovd" else [n]
                 if k == "class":
                     ms = ["yoloe_text", "trained"]
-                rows.append({"key": k, "label": c["label"], "models": [model_row(m) for m in ms]})
+                # needs: 바꿀 수 있는 근거 모델(cue_model_choices)과 잇는 열쇠 — 런처 근거 표가 고르는 칸을 단다
+                rows.append({"key": k, "label": c["label"], "models": [model_row(m) for m in ms],
+                             "needs": list(c["needs"])})
         else:
             for k, ms in (cm or {}).items():
                 rows.append({"key": k, "label": labels.get(k, k), "models": [model_row(m) for m in ms or []]})
@@ -781,7 +853,14 @@ def catalog(cfg=None):
             "gpu_mb_targeted": {k: v for k, v in GPU_MB.items()},
             "gpu_mb_base": GPU_MB["base"],
             "gpu_mb_option": dict(OPTION_GPU_MB),
-            "options": option_cues(files, tcfg)}
+            "options": option_cues(files, tcfg),
+            # 근거 표에서 바꿀 수 있는 근거 모델 — {need: {choices: [{key, note, available}], multi, default}}
+            "cue_choices": {need: {"choices": [{"key": m, "note": str(_REG["models"].get(m, {}).get("note", "")),
+                                                "available": have(str(_REG["models"].get(m, {}).get("files_key", m)),
+                                                                  files)} for m in ch["choices"]],
+                                   "multi": ch["multi"],
+                                   "default": (ovd_available(tcfg, files) if need == "ovd" else ["depth"])}
+                            for need, ch in CUE_CHOICES.items()}}
 
 
 def overlay_defaults(cfg):

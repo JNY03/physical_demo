@@ -2677,7 +2677,8 @@ class TargetedRunner:
         # OVD — 대상이 OVD 근거를 고른 경우만
         self.ovd = []
         ovd_t = [t for t in text_t if "class" in t["cues"] or "ovd_pair_iou" in t["cues"]]
-        ok = cc.ovd_available(cfg, files, ovd_t)
+        cue_models = resolved.get("cue_models") or {}       # 런처 근거 표에서 고른 근거 모델 (2026-11-27)
+        ok = cc.ovd_available(cfg, files, ovd_t, cue_models.get("ovd"))
         if ovd_t and "yolo_world" in ok:
             labels, owners = [], []
             for t in ovd_t:
@@ -2710,6 +2711,9 @@ class TargetedRunner:
         dist_names = [t["name"] for t in self.targets if t.get("distance")]
         if self.distance and dist_names:
             dspec = dict(cfg.get("depth") or {}, enabled=True, classes=dist_names)
+            mid = cc.depth_model_id(cue_models, files)
+            if mid:                                       # 근거 표에서 고른 거리 모델 (같은 UniDepth 코드, 가중치만)
+                dspec["model_id"] = mid
             key = ("depth", json.dumps({k: v for k, v in dspec.items() if k != "classes"}, sort_keys=True))
             import importlib.util as _ilu
             if key not in _MODEL_CACHE:
@@ -2765,6 +2769,9 @@ class TargetedRunner:
                 _cached(("trained", t["name"], str(t["trained"]["weight"])), lambda: TrainedBoxArm(t, self.device))
         if resolved.get("distance") and any(t.get("distance") for t in resolved["targets"]):
             dspec = dict(self.cfg.get("depth") or {}, enabled=True)
+            mid = cc.depth_model_id(resolved.get("cue_models"), files)
+            if mid:
+                dspec["model_id"] = mid
             key = ("depth", json.dumps({k: v for k, v in dspec.items() if k != "classes"}, sort_keys=True))
             if key not in _MODEL_CACHE:
                 import importlib.util as _ilu

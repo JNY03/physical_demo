@@ -128,6 +128,16 @@ cues:
 #:     작업은 Redis 키 cpu_telemetry:<UNIT_ID> 에 JSON {"ts": <유닉스 초>} 를 CPU_HEARTBEAT_FRESH_S(30초)보다 자주
 #:     (예: 10초마다) 쓴다. 그것이 running 의 근거다 — 없으면 starting 에서 넘어가지 않고, running 뒤 60초
 #:     (CPU_REPLACE_AFTER_S) 끊기면 다른 노드로 다시 배치된다 (ds_resources/controller.py)
+#: 근거가 쓰는 모델 중 **바꿀 수 있는 것** (2026-11-27). 런처 「기능」 단계 근거 표가 고르게 하고, 프로필
+#: models.targeted.cue_setup.models 로 비전에 간다. 비전이 실제로 갈아 끼울 수 있는 것만 적는다.
+#:   choices   고를 수 있는 모델 키 (models 구역)        multi  여럿을 함께 고를 수 있나
+#:   model_id  거리 모델처럼 같은 코드에 가중치만 바꾸는 것 — 모델 키 → 넘길 값 (상대 경로는 DS_HOME 기준)
+#: 여기에 없는 근거 모델(clip 등)은 고정이다 — 근거 표에 글로만 보인다
+cue_model_choices:
+  ovd:   {choices: [yolo_world, grounding_dino], multi: true}
+  depth: {choices: [depth, unidepth_l], multi: false,
+          model_id: {depth: lpiccinelli/unidepth-v2-vitb14, unidepth_l: models/unidepth-v2-vitl14}}
+
 cpu_tasks:
   cam360_slice:
     note: 360 파노라마를 90도 화면으로 자른다 (e2p/slice360_live.py). camera360 은 보류(2026-11-24) — 비교 측정 전

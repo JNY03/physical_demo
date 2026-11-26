@@ -369,6 +369,8 @@ $Str = @{
     lg_none       = @{ ko = "올린 작업 없음"; en = "nothing placed" }
     lg_over       = @{ ko = "넘침"; en = "over" }
     lg_auto       = @{ ko = "자동 예정"; en = "planned" }
+    n_cue_off     = @{ ko = "기능 단계 근거 표에서 끈 근거입니다"; en = "Turned off in the cue table (Capabilities step)" }
+    n_same_cues   = @{ ko = "{0} 과 같은 근거 (위 표)"; en = "same cues as {0} (above)" }
 }
 # 작업(기능) 이름 — vision/model_registry.yaml 의 functions 키 → 사람이 읽는 이름과 「무엇을 위한 것인가」.
 # 모르는 키는 키 그대로 보여 준다(계약에 기능이 늘어도 화면은 깨지지 않는다).
@@ -536,12 +538,12 @@ $s = [pscustomobject]@{ sources = $Sources; robotCam = 1; vision = $false; model
                         slice = $false; sliceU = ""; targets = $null; direct = @(); distance = $cat.distance_default;
                         cueMode = $null; cues = $null; overlay = $null; features = $null;
                         assign = $null; manual = $false; manualPlace = $null; lang = "ko"; nodeLimit = $null;
-                        fnModel = $null; fnSrc = $null }
+                        fnModel = $null; fnSrc = $null; cueOff = $null; cuePick = $null }
 if (Test-Path $SettingsFile) {
     try {
         $saved = Get-Content $SettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
         foreach ($k in "sources", "robotCam", "vision", "orchestrate", "models", "slice", "sliceU", "targets", "direct", "distance",
-                       "cueMode", "cues", "overlay", "features", "assign", "manual", "manualPlace", "lang", "nodeLimit", "fnModel", "fnSrc") {
+                       "cueMode", "cues", "overlay", "features", "assign", "manual", "manualPlace", "lang", "nodeLimit", "fnModel", "fnSrc", "cueOff", "cuePick") {
             if ($null -ne $saved.$k) { $s.$k = $saved.$k }
         }
     } catch { }
@@ -564,6 +566,9 @@ $script:FnSrc    = @{}
 foreach ($kv in (To-Hash $s.fnSrc).GetEnumerator()) { $script:FnSrc[$kv.Key] = @($kv.Value) }
 $script:FnList   = @()
 $script:FnOpts   = $null
+# 근거 표 (2026-11-27) — 지정 물체 탐지 파이프라인 전체에서 끈 근거 · 근거 모델 고름 (need → "auto" | "a+b")
+$script:CueOff   = @(@($s.cueOff) | Where-Object { $_ })
+$script:CuePick  = To-Hash $s.cuePick
 $script:NodeLimit = To-Hash $s.nodeLimit        # 노드 → @{headroom, cores} (런처에서 조절하는 한도)
 $script:PlacesKey = $null                                # 노드 · 작업을 어떤 기능 묶음으로 읽었나
 $script:PreviewCompare = $false                          # 미리보기에서 적용 전과 견줄까
@@ -1244,6 +1249,10 @@ function Build-CueBoxes {
             if ($mode -eq "custom" -and ($on -ne [bool]$c.default)) { $cb.Font = New-Object System.Drawing.Font($font, [System.Drawing.FontStyle]::Bold) }
             $cb.Enabled = ($mode -eq "custom") -and -not ($c.needs_distance -and -not $distOn.Checked)
             if ($c.key -eq "class") { $cb.Enabled = $false; $cb.Checked = $true }      # 후보를 내는 근거 — 끌 수 없다
+            if (@($script:CueOff) -contains $c.key) {                                   # 근거 표에서 끈 근거 — 모든 대상에서 빠진다
+                $cb.Enabled = $false; $cb.Checked = $false
+                $modelTip.SetToolTip($cb, (L "n_cue_off"))
+            }
             $cb.Add_CheckedChanged({ On-CueCheck $this })
             $i++
         }
@@ -1603,9 +1612,35 @@ function On-MatchCheck($cb) {
     Build-Match
     Changed
 }
+function Cue-PickItems($need) {
+    # 근거 모델 고르는 칸의 항목 — [{v, t}]. 여럿 고를 수 있으면 조합까지. 맨 앞은 「자동」(지금 규칙)
+    $ch = $cat.cue_choices.$need
+    $ks = @($ch.choices | ForEach-Object { if ($_.available) { $_.key } else { $null } } | Where-Object { $_ })
+    $items = @([pscustomobject]@{ v = "auto"; t = (L "v_auto") })
+    foreach ($k in $ks) { $items += [pscustomobject]@{ v = $k; t = $k } }
+    if ($ch.multi -and $ks.Count -gt 1) { $items += [pscustomobject]@{ v = ($ks -join "+"); t = ($ks -join " + ") } }
+    return $items
+}
+function On-CueOff($chk) {
+    if ($script:Building) { return }
+    $k = $chk.Tag.key
+    $script:CueOff = @(@($script:CueOff) | Where-Object { $_ -ne $k })
+    if (-not $chk.Checked) { $script:CueOff += $k }
+    Build-CueTable
+    Build-CueBoxes
+    Changed
+}
+function On-CuePick($cb) {
+    if ($script:Building) { return }
+    $script:CuePick[$cb.Tag.need] = @($cb.Tag.items)[$cb.SelectedIndex].v
+    Build-CueTable
+    Changed
+}
 function Build-CueTable {
     # 고른 **기능**마다 그 기능이 쓰는 근거를 펼친다. 첫 칸은 기능 이름(지정 물체 탐지 …)이고,
     # 「역할」은 그 근거가 하는 일(형태 비교 …), 「모델」은 그 일에 쓰이는 가중치다 (2026-11-26)
+    # 지정 물체 탐지 파이프라인(targeted)은 여기서 근거를 켜고 끄고, 바꿀 수 있는 근거 모델을 고른다 (2026-11-27).
+    # 대상(클래스)마다의 세부는 지정 클래스 탭 그대로다. 같은 파이프라인을 쓰는 기능(재식별 · 근거 설명)은 표를 한 번만 그린다
     $script:Building = $true
     $cueTable.Controls.Clear()
     $fns = @(Chosen-Functions | Where-Object { @(Fn-Options $_).Count -gt 0 })
@@ -1614,13 +1649,21 @@ function Build-CueTable {
         $script:Building = $false
         return
     }
-    $cols = @(4, 150, 280, 400, 500)
+    $cols = @(4, 150, 280, 400, 560)
     $hdr = @("h_capability", "h_cue", "h_role2", "h_model", "h_gpu")
     for ($i = 0; $i -lt $hdr.Count; $i++) { [void](New-Label $cueTable (L $hdr[$i]) $cols[$i] 4) }
     $y = 26
+    $drawn = @{}
     foreach ($fn in $fns) {
         $opt = Fn-Model $fn
         $rows = @($cat.options.$opt)
+        if ($drawn.ContainsKey($opt)) {
+            [void](New-Label $cueTable (Fn-Text2 $fn) $cols[0] $y)
+            [void](New-Label $cueTable ((L "n_same_cues") -f (Fn-Text2 $drawn[$opt])) $cols[1] $y)
+            $y += 22
+            continue
+        }
+        $drawn[$opt] = $fn
         $first = $true
         if ($rows.Count -eq 0) {
             [void](New-Label $cueTable (Fn-Text2 $fn) $cols[0] $y)
@@ -1630,14 +1673,42 @@ function Build-CueTable {
         }
         foreach ($r in $rows) {
             [void](New-Label $cueTable $(if ($first) { Fn-Text2 $fn } else { "" }) $cols[0] $y)
-            [void](New-Label $cueTable $r.label $cols[1] $y)
+            $off = ($opt -eq "targeted") -and (@($script:CueOff) -contains $r.key)
+            if ($opt -eq "targeted") {
+                # 근거를 켜고 끈다 — 끄면 모든 대상에서 빠진다(지정 클래스 탭의 그 칸도 흐려진다). 탐지기는 끌 수 없다
+                $cb = New-Check $cueTable $r.label $cols[1] ($y - 3) (-not $off)
+                $cb.Tag = @{ key = $r.key }
+                if ($r.key -eq "class") { $cb.Enabled = $false; $cb.Checked = $true }
+                $cb.Add_CheckedChanged({ On-CueOff $this })
+            } else {
+                [void](New-Label $cueTable $r.label $cols[1] $y)
+            }
             [void](New-Label $cueTable (Cue-Role $r.key) $cols[2] $y)
-            $ms = @(Cue-Models $r)
-            [void](New-Label $cueTable $(if ($ms.Count) { $ms -join ", " } else { L "v_rule" }) $cols[3] $y)
+            $need = @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })[0]
+            if ($opt -eq "targeted" -and $need) {
+                $items = @(Cue-PickItems $need)
+                $mc = New-Object System.Windows.Forms.ComboBox
+                $mc.DropDownStyle = "DropDownList"
+                $mc.Location = New-Object System.Drawing.Point($cols[3], ($y - 3))
+                $mc.Width = 150
+                foreach ($it in $items) { [void]$mc.Items.Add($it.t) }
+                $cur = [string]$script:CuePick[$need]
+                $idx = 0
+                for ($j = 0; $j -lt $items.Count; $j++) { if ($items[$j].v -eq $cur) { $idx = $j } }
+                $mc.SelectedIndex = $idx
+                $mc.Tag = @{ need = $need; items = $items }
+                $mc.Enabled = -not $off
+                $mc.Add_SelectionChangeCommitted({ On-CuePick $this })
+                $modelTip.SetToolTip($mc, (@($cat.cue_choices.$need.choices | ForEach-Object { "{0}: {1}" -f $_.key, $_.note }) -join "`n"))
+                $cueTable.Controls.Add($mc)
+            } else {
+                $ms = @(Cue-Models $r)
+                [void](New-Label $cueTable $(if ($ms.Count) { $ms -join ", " } else { L "v_rule" }) $cols[3] $y)
+            }
             $mb = Cue-MB $r
             if ($null -eq $mb -and $first -and $opt -ne "targeted") { $mb = [int]$cat.gpu_mb_option.$opt }
-            [void](New-Label $cueTable $(if ($null -ne $mb) { "{0} MB" -f $mb } else { "-" }) $cols[4] $y)
-            $y += 22
+            [void](New-Label $cueTable $(if ($off) { "-" } elseif ($null -ne $mb) { "{0} MB" -f $mb } else { "-" }) $cols[4] $y)
+            $y += 26
             $first = $false
         }
     }
@@ -2663,6 +2734,21 @@ function Build-Profile {
         $tm.targets = $ts
         $tm.distance = [bool]$distOn.Checked
     }
+    if ((Chosen-Models) -contains "targeted") {
+        # 근거 표 — 끈 근거 · 근거 모델 고름. 기본(자동)이면 칸을 쓰지 않는다 (비전이 지금 규칙 그대로)
+        $cs = @{}
+        if (@($script:CueOff).Count) { $cs.off = @($script:CueOff) }
+        $mp = @{}
+        foreach ($need in $script:CuePick.Keys) {
+            $v = [string]$script:CuePick[$need]
+            if (-not $v -or $v -eq "auto") { continue }
+            $ch = $cat.cue_choices.$need
+            if ($null -eq $ch) { continue }
+            if ($ch.multi) { $mp[$need] = @($v -split "\+") } else { $mp[$need] = $v }   # 하나면 글 하나여도 비전이 받는다
+        }
+        if ($mp.Count) { $cs.models = $mp }
+        if ($cs.Count) { $tm.cue_setup = $cs }
+    }
     foreach ($m in (Chosen-Models)) {
         $o = $script:Overlay[$m]
         if (-not $o -or $o.Count -eq 0) { continue }
@@ -2709,6 +2795,7 @@ function Save-Settings {
                        overlay = $script:Overlay;
                        assign = $script:Assign; manual = $manualOn.Checked; manualPlace = $script:ManualPlace;
                        nodeLimit = $script:NodeLimit; fnModel = $script:FnModel; fnSrc = $script:FnSrc;
+                       cueOff = @($script:CueOff); cuePick = $script:CuePick;
                        features = $(if ($featChecks.Count) { $h = @{}; foreach ($k in $featChecks.Keys) { $h[$k] = $featChecks[$k].Checked }; $h } else { $null }) } |
         ConvertTo-Json -Depth 8 | Set-Content $SettingsFile -Encoding UTF8
 }
@@ -3025,6 +3112,17 @@ function Self-Test {
     Pick-Function "object_detect" "yoloe" @(@(On-All)[0])
     Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
     $r.fn_order = @($script:FnList | ForEach-Object { "{0}:{1}" -f (Fn-Rank $_), $_ })   # 돌릴 수 있는 기능이 위로
+    # 근거 표 — 근거 하나를 끄고 근거 모델을 고르면 프로필 cue_setup 으로 가고, 지정 클래스 탭의 그 칸은 흐려진다 (2026-11-27)
+    foreach ($n in @("person", "chair")) { if ($script:TargetChecks[$n]) { $script:TargetChecks[$n].Checked = $true } }
+    $script:CueOff = @("semantic"); $script:CuePick = @{ ovd = "yolo_world"; depth = "unidepth_l" }
+    Build-CueTable; Build-CueBoxes
+    $r.cue_setup = (Build-Profile).models.targeted.cue_setup
+    $r.cue_table_combos = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] } | ForEach-Object { $_.Text })
+    $r.cue_table_off_box = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Tag.key -eq "semantic" } | ForEach-Object { $_.Checked })
+    $pc = Find-Ctl $cuePanel { param($c) $c -is [System.Windows.Forms.CheckBox] -and $c.Tag.target -eq "person" -and $c.Tag.key -eq "semantic" }
+    $r.class_tab_semantic_enabled = $(if ($pc) { $pc.Enabled } else { "none" })
+    $script:CueOff = @(); $script:CuePick = @{}
+    Build-CueTable; Build-CueBoxes
     $r.target_tab_enabled = $tTarget.Controls[0].Enabled
     # 사용자 설정에 기대지 않는다 — 아래 단계가 쓰는 대상을 직접 켠다 (저장된 대상이 person · chair 뿐이면 door 근거
     # 컨트롤이 없어 시험이 깨졌다, 2026-11-24)

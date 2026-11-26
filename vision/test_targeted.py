@@ -541,3 +541,42 @@ def test_catalog_carries_prompt_guide_for_launcher():
     assert cat["ref_images"]["max_images"] == cc.REF_MAX_IMAGES and cat["ref_images"]["guide"]
     for t in cat["targets"]:
         assert t["prompt"] == [] and t["refs"] is None          # 등록 대상에는 아직 사람이 넣은 것이 없다
+
+
+# ---------------------------------------------------------------- 근거 표 (cue_setup, 2026-11-27)
+def test_cue_setup_turns_cues_off_for_every_target_and_picks_models():
+    base = _resolve({"models": {"targeted": {"targets": [{"name": "person"}, {"name": "chair"}]}}})["targeted"]
+    on = {k for t in base["targets"] for k in t["cues"]}
+    off = sorted(k for k in on if k != "class")[:1]
+    assert off, on
+    prof = {"models": {"targeted": {"targets": [{"name": "person", "cues": off + ["class"]}, {"name": "chair"}],
+                                    "cue_setup": {"off": off, "models": {"ovd": ["yolo_world"], "depth": "depth"}}}}}
+    r = _resolve(prof)["targeted"]
+    assert all(off[0] not in t["cues"] for t in r["targets"])          # 대상이 직접 골라도 근거 표가 위다
+    assert r["cues_off"] == off and r["cue_models"] == {"ovd": ["yolo_world"], "depth": "depth"}
+    assert "grounding_dino" not in cc.needed_models(r, {})              # 고르지 않은 OVD 는 적재하지 않는다
+
+
+@pytest.mark.parametrize("cs, msg", [
+    ({"off": ["class"]}, "끌 수 없다"),
+    ({"off": ["nope"]}, "모르는 근거"),
+    ({"models": {"clip": "clip"}}, "바꿀 수 없는"),
+    ({"models": {"depth": ["depth", "unidepth_l"]}}, "하나"),
+    ({"models": {"ovd": ["sam"]}}, "고를 수 없는"),
+    ({"extra": 1}, "cue_setup"),
+])
+def test_cue_setup_rejects_bad_values(cs, msg):
+    with pytest.raises(cc.ProfileError, match=msg):
+        _resolve({"models": {"targeted": {"cue_setup": cs}}})
+
+
+def test_depth_choice_resolves_local_weights_and_needs_that_model():
+    files = cc.model_files({})
+    assert cc.depth_model_id({}, files) is None                          # 기본은 yaml 그대로
+    mid = cc.depth_model_id({"depth": "unidepth_l"}, files)
+    assert mid.endswith("models/unidepth-v2-vitl14")
+    r = _resolve({"models": {"targeted": {"targets": [{"name": "demo_box"}],
+                                          "cue_setup": {"models": {"depth": "unidepth_l"}}}}})["targeted"]
+    need = cc.needed_models(r, {})
+    assert "depth" not in need and ("unidepth_l" in need or not any("depth" in cc.CUES[k]["needs"]
+                                                                   for t in r["targets"] for k in t["cues"]))
