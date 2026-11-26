@@ -33,11 +33,12 @@ torch · ultralytics · ds_resources 를 import 하지 않는다.
                 매개변수는 vision_config.yaml models.<키> → 없으면 레지스트리 models.<키>.config → 빈 사전.
                 레지스트리에 없는 키면 vision/runners/<키>.py 의 Runner 클래스를 찾는다(이름만으로 더할 수 있게).
   --runner 모듈:클래스 · --cfg JSON  레지스트리 없이 직접 (시험용). cfg 안의 models/… · external/… 는 DS_HOME 기준.
-  --imgsz · --threads 는 cfg 에 그 칸이 없을 때만 넣는다(모델 파일이 입력 크기를 고정한 경우 그쪽이 이긴다).
+  --imgsz 는 cfg 에 그 칸이 없을 때만 넣는다(모델 파일이 입력 크기를 고정한 경우 그쪽이 이긴다).
 
 자원 계약 (기능 계약의 기기 단계: fps 1~5 · cpu_m · mem_mb)
   --fps 는 1~5 로 자른다. 처리 시간이 주기보다 길면 그만큼 늦게 돈다(쌓지 않는다).
-  스레드는 --threads(기본: DS_CPU_M 또는 cpu_m 를 1000 으로 나눠 올림, 1~4). cv2 는 1 스레드.
+  스레드는 --threads > DS_CPU_M(계약 cpu_m 을 1000 으로 나눠 올림, 1~4) > cfg threads > 2. cv2 는 1 스레드.
+  onnxruntime 의 스레드 헛돌기(spin wait)는 끈다 (no_spin_onnxruntime — 쉬는 동안 코어를 먹지 않게).
   메모리 상한은 k3s limits 가 건다 — 여기서는 rss_mb 를 하트비트에 남기고 DS_MEM_MB 를 넘으면 한 번 알린다.
 
   python vision/device_stage.py --model yolo26n_ncnn --source pi13 --function object_detect --fps 2 --imgsz 320
@@ -154,7 +155,38 @@ def model_spec(key, registry=None, config=None):
     return spec, dict(cfg)
 
 
+def no_spin_onnxruntime():
+    """onnxruntime 의 스레드 헛돌기(spin wait)를 끈다 — 실행기를 고치지 않고 InferenceSession 을 감싼다.
+
+    왜: 기본값이면 추론이 끝난 뒤에도 작업 스레드가 다음 일을 기다리며 코어를 돌린다. 2 fps · 장당 15 ms 인데
+    CPU 가 250% 로 잡혔다(x86 스모크, 2026-11-26). 파이에서는 그만큼 cpu_m 몫과 로봇 제어 몫을 먹는다.
+    onnxruntime 이 없으면(NCNN 만 쓰는 실행기) 아무것도 하지 않는다."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return False
+    base = ort.InferenceSession
+    if getattr(base, "_ds_no_spin", False):
+        return True
+
+    class NoSpinSession(base):
+        _ds_no_spin = True
+
+        def __init__(self, path_or_bytes, sess_options=None, *args, **kw):
+            so = sess_options if sess_options is not None else ort.SessionOptions()
+            for k in ("session.intra_op.allow_spinning", "session.inter_op.allow_spinning"):
+                try:
+                    so.add_session_config_entry(k, "0")
+                except Exception:  # noqa: BLE001 — 옛 판에 없는 칸이면 그대로
+                    pass
+            super().__init__(path_or_bytes, so, *args, **kw)
+
+    ort.InferenceSession = NoSpinSession
+    return True
+
+
 def make_runner(key, spec, cfg):
+    no_spin_onnxruntime()
     sys.path.insert(0, str(HERE))
     from runners import load_runner
     return load_runner(key, spec, "cpu", cfg)
@@ -561,7 +593,11 @@ def main(argv=None):
     cfg = resolve_paths(cfg)
     if a.imgsz:
         cfg.setdefault("imgsz", a.imgsz)
-    cfg.setdefault("threads", a.threads or threads_for(os.environ.get("DS_CPU_M")))
+    # 스레드: --threads > 단계 계약 cpu_m(DS_CPU_M, k3s 가 준다) > 모델 매개변수 > 2.
+    # 계약이 있으면 매개변수(보통 threads: 4 — 파이 코어 전부)를 누른다 — 계약 몫을 넘기면 limits 에서 조여 오히려 느리다
+    if a.threads or os.environ.get("DS_CPU_M"):
+        cfg["threads"] = a.threads or threads_for(os.environ.get("DS_CPU_M"))
+    cfg.setdefault("threads", 2)
     import redis
     r = redis.Redis.from_url(a.redis, socket_connect_timeout=3, socket_timeout=10)
     t0 = time.perf_counter()

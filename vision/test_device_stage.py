@@ -123,6 +123,30 @@ def test_unknown_model_key_falls_back_to_runner_file_or_stops(tmp_path):
         ds.model_spec("no_such_model_zz", reg, vc)
 
 
+def test_no_spin_wraps_onnxruntime_sessions(monkeypatch):
+    """onnxruntime 세션에 spin 끄기 설정이 들어간다 — 실행기 코드는 그대로 (SessionOptions 를 넘겨도, 안 넘겨도)"""
+    ort = pytest.importorskip("onnxruntime")
+    seen = []
+
+    class FakeSession:
+        def __init__(self, path, so=None, providers=None):
+            seen.append(so)
+
+    class FakeOpts:
+        def __init__(self):
+            self.kv = {}
+
+        def add_session_config_entry(self, k, v):
+            self.kv[k] = v
+    monkeypatch.setattr(ort, "InferenceSession", FakeSession)
+    monkeypatch.setattr(ort, "SessionOptions", FakeOpts)
+    assert ds.no_spin_onnxruntime() is True
+    ort.InferenceSession("m.onnx", FakeOpts(), providers=["CPUExecutionProvider"])
+    ort.InferenceSession("m.onnx")
+    assert [s.kv["session.intra_op.allow_spinning"] for s in seen] == ["0", "0"]
+    assert ds.no_spin_onnxruntime() is True and ort.InferenceSession.__mro__[1] is FakeSession   # 두 번 감싸지 않는다
+
+
 # ---------------------------------------------------------------- 돌리기
 def test_one_frame_from_redis_becomes_one_compact_record_and_a_heartbeat():
     r = FakeRedis()
