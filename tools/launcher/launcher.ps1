@@ -410,6 +410,15 @@ $Str = @{
     t_dist_col    = @{ ko = "거리를 쓰는 근거: {0} (거리 측정을 켜야 쓴다)"; en = "Evidence that needs distance: {0} (needs Distance on)" }
     t_expand      = @{ ko = "이 대상의 근거 · 크기와 색 · 글과 사진을 펼친다"; en = "Show this target's evidence, size and colour, text and photos" }
     n_same_cues   = @{ ko = "{0} 과 같은 근거 (위 표)"; en = "same cues as {0} (above)" }
+    # 근거 모델 역할 (2026-11-27) — 근거 표 「모델」 칸의 콤보 옆 이름표. 같은 이름표의 근거는 한 모델을 나눠 쓴다
+    role_detector = @{ ko = "탐지기"; en = "detector" }
+    role_free_arm = @{ ko = "넓히기"; en = "wider" }
+    role_embed    = @{ ko = "CLIP"; en = "CLIP" }
+    role_ovd      = @{ ko = "OVD"; en = "OVD" }
+    role_depth    = @{ ko = "거리"; en = "distance" }
+    v_default_m   = @{ ko = "{0} (기본)"; en = "{0} (default)" }
+    t_role_share  = @{ ko = "{0} — 이 역할의 모델을 함께 쓰는 근거: {1}. 하나를 바꾸면 모두 바뀐다"
+                      en = "{0} — evidence sharing this role's model: {1}. Changing one changes all" }
 }
 # 작업(기능) 이름 — vision/model_registry.yaml 의 functions 키 → 사람이 읽는 이름과 「무엇을 위한 것인가」.
 # 모르는 키는 키 그대로 보여 준다(계약에 기능이 늘어도 화면은 깨지지 않는다).
@@ -1381,7 +1390,7 @@ function Dist-Text($name) {
 }
 $script:CueOpen = @{}                                     # 대상 → 펼쳤나 (화면에서만, 저장하지 않는다)
 function Build-CueBoxes {
-    # 대상 표 — 대상마다 한 줄: 쓸지 | 찾을 기기(지정 물체 탐지를 켠 기기마다 한 칸) | 근거 기본값 · 직접 고르기 | 거리 | [▶].
+    # 대상 표 — 대상마다 한 줄: 쓸지 | 찾을 기기(지정 물체 탐지를 켠 기기마다 한 칸) | 근거 기본값 · 직접 고르기 | [▶].
     # [▶] 를 누르면 그 대상의 근거 칸 · 직접 입력의 크기와 색 · 「글과 사진 보기」가 줄 아래에 펼쳐진다 (2026-11-27,
     # 옛 지정 클래스 탭의 대상 체크 · 대상마다 묶음 · 기기 줄을 표 하나로). 접힌 줄의 근거 칸도 만들어 둔다(Cue-Selection 이 읽는다)
     $keep = if ($script:TargetChecks.Count -gt 0) { @(Checked-Targets) } else { @($script:InitialTargets) }
@@ -1404,13 +1413,12 @@ function Build-CueBoxes {
     $xMode = $xDev + $tsrc.Count * $devW + 6
     $m1 = (Text-W (L "r_default")) + 28
     $m2 = (Text-W (L "r_custom")) + 28
-    $xDist = $xMode + $m1 + $m2 + 4
-    $distW = [Math]::Max((Text-W (L "lbl_dist")), [Math]::Max((Text-W (L "v_dist_on")), (Text-W (L "v_dist_off")))) + 14
-    $xBtn = $xDist + $distW
+    # 「거리」 칸은 없앴다 (2026-11-27, 사용자 요청) — 거리 측정은 위 전체 체크($distOn) 하나로 켜고 끈다.
+    # 대상마다 거리를 쓰는 근거는 대상 이름의 풍선말로만 알린다 (Dist-Text)
+    $xBtn = $xMode + $m1 + $m2 + 4
     [void](New-Label $cuePanel (L "h_target_name") 4 4)
     for ($i = 0; $i -lt $tsrc.Count; $i++) { [void](New-Label $cuePanel $tsrc[$i] ($xDev + $i * $devW) 4) }
     [void](New-Label $cuePanel (L "h_cue") $xMode 4)
-    [void](New-Label $cuePanel (L "lbl_dist") $xDist 4)
     $y = 26
     foreach ($name in $names) {
         $on = $keep -contains $name
@@ -1452,11 +1460,7 @@ function Build-CueBoxes {
                 $mx += $rm[2]
             }
             $dt = @(Dist-Text $name)
-            $dl = New-Label $row $dt[0] $xDist 0
-            $dl.AutoSize = $false
-            $dl.Size = New-Object System.Drawing.Size($distW, $rowH)
-            $dl.TextAlign = "MiddleLeft"
-            if ($dt[1]) { $modelTip.SetToolTip($dl, $dt[1]) }
+            if ($dt[1]) { $modelTip.SetToolTip($c, ("{0}`n{1}: {2}" -f $dt[1], (L "lbl_dist"), $dt[0])) }
             $ex = New-Object System.Windows.Forms.Button
             $ex.Text = $(if ($open) { "▼" } else { "▶" })
             $ex.Location = New-Object System.Drawing.Point($xBtn, 0)
@@ -1574,8 +1578,10 @@ function Layout-Target {
     $directAdd.Location = New-Object System.Drawing.Point(($ax + $directBox.Width + 6), $y)
     $distOn.Location = New-Object System.Drawing.Point(($directAdd.Right + 24), ($y + 4))
     $y += 38
-    $slotHead.Location = New-Object System.Drawing.Point(0, $y); $y += 24
-    $slotPanel.Location = New-Object System.Drawing.Point(0, $y); $y += $slotPanel.Height + 6
+    if ($slotPanel.Visible) {
+        $slotHead.Location = New-Object System.Drawing.Point(0, $y); $y += 24
+        $slotPanel.Location = New-Object System.Drawing.Point(0, $y); $y += $slotPanel.Height + 6
+    }
     $cueHead.Location = New-Object System.Drawing.Point(0, $y); $y += 24
     $cueTable.Location = New-Object System.Drawing.Point(0, $y); $y += $cueTable.Height
     $tgtSection.Height = $y + 8
@@ -1913,10 +1919,57 @@ function On-MatchCheck($cb) {
     Build-Match
     Changed
 }
+function Cue-Legacy($need) {
+    # 옛 cue_setup.models 로도 가는 역할인가 (ovd · depth). 옛 카탈로그(cue_setup 칸이 없는 것)는 전부 그렇다
+    $ch = $cat.cue_choices.$need
+    if ($null -eq $ch) { return $false }
+    if ($null -eq $ch.PSObject.Properties["cue_setup"]) { return ($null -eq $ch.PSObject.Properties["cues"]) }
+    return [bool]$ch.cue_setup
+}
+function Cue-RoleOf($r) {
+    # 그 근거 줄의 모델 역할 (detector · free_arm · embed · ovd · depth) — 카탈로그 model_role, 옛 카탈로그면 needs 에서
+    $role = [string]$r.model_role
+    if ($role -and $role -ne "none" -and $null -ne $cat.cue_choices.$role) { return $role }
+    return @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })[0]
+}
+function Role-Short($role) {
+    $k = "role_" + $role
+    if ($Str.ContainsKey($k)) { return (L $k) }
+    return $role
+}
+function Role-Pick($role) {
+    # 지금 고른 것 — "auto"(기본 · 지금 규칙) 또는 모델 키(ovd 는 "a+b"). 고른 모델이 이 PC 에 없으면 auto 로 본다
+    $v = [string]$script:CuePick[$role]
+    if (-not $v -or $v -eq "auto") { return "auto" }
+    $ch = $cat.cue_choices.$role
+    $ok = @($ch.choices | Where-Object { $_.available } | ForEach-Object { $_.key })
+    if (@($v -split "\+" | Where-Object { $ok -notcontains $_ }).Count) { return "auto" }
+    if (-not (Cue-Legacy $role) -and @($ch.default)[0] -eq $v) { return "auto" }
+    return $v
+}
+function Role-MB($role, $dflt) {
+    # 그 역할의 예상 GPU — 고른 모델(여럿이면 합). 기본(auto)이면 $dflt 모델 키의 어림
+    $v = Role-Pick $role
+    $g = $cat.gpu_mb_targeted
+    if ($v -eq "auto") { if ($dflt) { return [int]$g.$dflt } return 0 }
+    $sum = 0
+    foreach ($k in @($v -split "\+")) {
+        $c = @($cat.cue_choices.$role.choices | Where-Object { $_.key -eq $k } | Select-Object -First 1)
+        if ($c.Count -and $null -ne $c[0].gpu_mb) { $sum += [int]$c[0].gpu_mb } elseif ($null -ne $g.$k) { $sum += [int]$g.$k }
+    }
+    return $sum
+}
 function Cue-PickItems($need) {
-    # 근거 모델 고르는 칸의 항목 — [{v, t}]. 여럿 고를 수 있으면 조합까지. 맨 앞은 「자동」(지금 규칙)
+    # 근거 모델 고르는 칸의 항목 — [{v, t}]. 여럿 고를 수 있으면 조합까지. 맨 앞은 「자동」(지금 규칙) —
+    # 기본 모델이 정해진 역할(detector · free_arm · embed)은 「<기본 모델> (기본)」 이다
     $ch = $cat.cue_choices.$need
     $ks = @($ch.choices | ForEach-Object { if ($_.available) { $_.key } else { $null } } | Where-Object { $_ })
+    if (-not (Cue-Legacy $need)) {
+        $d = [string]@($ch.default)[0]
+        $items = @([pscustomobject]@{ v = "auto"; t = ((L "v_default_m") -f $d) })
+        foreach ($k in $ks) { if ($k -ne $d) { $items += [pscustomobject]@{ v = $k; t = $k } } }
+        return $items
+    }
     $items = @([pscustomobject]@{ v = "auto"; t = (L "v_auto") })
     foreach ($k in $ks) { $items += [pscustomobject]@{ v = $k; t = $k } }
     if ($ch.multi -and $ks.Count -gt 1) { $items += [pscustomobject]@{ v = ($ks -join "+"); t = ($ks -join " + ") } }
@@ -1965,18 +2018,22 @@ function Fn-Slots($fn) {
                                    store = "fnModel"; key = $fn; note = $note; mb = [int]$cat.gpu_mb_option.$cur }
         return $out
     }
+    # 근거 모델 역할마다 슬롯 하나 (2026-11-27) — detector · free_arm · embed · ovd · depth. 같은 역할의 근거는 한 슬롯을 나눠 쓴다.
+    # 그 역할의 근거가 모두 꺼졌을 때만 off. 근거 표의 줄마다 이 슬롯의 콤보가 붙는다(Draw-CueRows)
     $seen = @{}
     foreach ($r in @($cat.options.$cur)) {
-        foreach ($need in @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })) {
-            if ($seen.ContainsKey($need)) { continue }
-            $seen[$need] = $true
-            $v = [string]$script:CuePick[$need]
-            if (-not $v) { $v = "auto" }
-            $note = (@($cat.cue_choices.$need.choices | ForEach-Object { "{0}: {1}" -f $_.key, $_.note }) -join "`n")
-            $out += [pscustomobject]@{ role = $need; label = ("{0} ({1})" -f $need, $r.label); choices = @(Cue-PickItems $need)
-                                       current = $v; required = $false; store = "cuePick"; key = $need; note = $note
-                                       mb = (Cue-MB $r); off = (@($script:CueOff) -contains $r.key) }
-        }
+        $need = Cue-RoleOf $r
+        if (-not $need) { continue }
+        $on = -not (@($script:CueOff) -contains $r.key)
+        if ($seen.ContainsKey($need)) { if ($on) { $seen[$need].off = $false }; $seen[$need].cues += $r.label; continue }
+        $ch = $cat.cue_choices.$need
+        $note = (@($ch.choices | ForEach-Object { "{0}: {1}" -f $_.key, $_.note }) -join "`n")
+        $lab = $(if ($ch.label) { $(if ($script:Lang -eq "en" -and $ch.label_en) { [string]$ch.label_en } else { [string]$ch.label }) } else { $need })
+        $sl = [pscustomobject]@{ role = $need; label = ("{0} ({1})" -f $lab, $r.label); choices = @(Cue-PickItems $need)
+                                 current = (Role-Pick $need); required = $false; store = "cuePick"; key = $need; note = $note
+                                 mb = (Cue-MB $r); off = (-not $on); short = (Role-Short $need); cues = @($r.label) }
+        $seen[$need] = $sl
+        $out += $sl
     }
     return $out
 }
@@ -2061,14 +2118,20 @@ function Draw-CueRows($panel, $opt, $edit, $y) {
     # 그 선택지(targeted · yoloe · river …)가 쓰는 근거마다 한 줄: 근거 | 역할(하는 일) | 모델 | 예상 GPU. 다음 줄의 y 를 돌려준다.
     # $edit 이면(지정 물체 탐지 파이프라인) 근거를 켜고 끈다 — 끄면 모든 대상에서 빠진다(대상 표의 그 칸도 흐려진다). 탐지기는 끌 수 없다.
     # 근거 모델 고르기는 위 슬롯 줄(Fn-Slots)에서 한다 — 여기 「모델」 칸은 지금 고른 것을 적는다
-    $cols = @(4, 152, 300, 466)
-    $ws = @(146, 144, 162, 80)
+    $cols = @(4, 150, 266, 486)
+    $ws = @(142, 112, 216, 72)
     $hdr = @("h_cue", "h_role2", "h_model", "h_gpu")
     for ($i = 0; $i -lt $hdr.Count; $i++) { [void](Cell $panel (L $hdr[$i]) $cols[$i] $y $ws[$i]) }
     $y += 22
     $rows = @($cat.options.$opt)
     if ($rows.Count -eq 0) { [void](New-Label $panel (L "v_rule") $cols[0] $y); return ($y + 22) }
     $first = $true
+    $slots = @{}
+    if ($edit) {
+        $tfn = @(@($script:FnList) | Where-Object { (Fn-Model $_) -eq "targeted" } | Select-Object -First 1)
+        $fnKey = $(if ($tfn.Count) { $tfn[0] } else { "targeted_detect" })
+        foreach ($sl in @(Fn-Slots $fnKey)) { if ($sl.store -eq "cuePick") { $slots[$sl.role] = $sl } }
+    }
     foreach ($r in $rows) {
         $off = $edit -and (@($script:CueOff) -contains $r.key)
         if ($edit) {
@@ -2083,21 +2146,49 @@ function Draw-CueRows($panel, $opt, $edit, $y) {
             [void](Cell $panel $r.label $cols[0] $y $ws[0])
         }
         [void](Cell $panel (Cue-Role $r.key) $cols[1] $y $ws[1])
-        $need = @(@($r.needs) | Where-Object { $null -ne $cat.cue_choices.$_ })[0]
-        if ($edit -and $need) {
-            $cur = [string]$script:CuePick[$need]
-            if (-not $cur) { $cur = "auto" }
-            $hit = @(Cue-PickItems $need | Where-Object { $_.v -eq $cur } | Select-Object -First 1)
-            $mt = $(if ($hit.Count) { [string]$hit[0].t } else { $cur })
-            [void](Cell $panel ("{0}: {1}" -f $need, $mt) $cols[2] $y $ws[2])
+        $need = Cue-RoleOf $r
+        if ($edit -and $need -and $slots.ContainsKey($need)) {
+            # 모델 칸 = [역할 이름표] + 고르기. 같은 이름표의 줄은 한 모델을 나눠 쓴다 — 하나를 바꾸면 표 전체를 다시 그린다
+            $sl = $slots[$need]
+            $tagW = 58
+            $tag = Cell $panel ("[{0}]" -f $sl.short) $cols[2] ($y + 1) $tagW
+            $tag.ForeColor = [System.Drawing.SystemColors]::GrayText
+            $tip = (L "t_role_share") -f $sl.label, (@($sl.cues) -join ", ")
+            $modelTip.SetToolTip($tag, $tip)
+            $items = @($sl.choices)
+            if ($items.Count -gt 1) {
+                $cb = New-Object System.Windows.Forms.ComboBox
+                $cb.DropDownStyle = "DropDownList"
+                $cb.Location = New-Object System.Drawing.Point(($cols[2] + $tagW), ($y - 3))
+                $cb.Width = $ws[2] - $tagW - 4
+                foreach ($it in $items) { [void]$cb.Items.Add([string]$it.t) }
+                $idx = 0
+                for ($j = 0; $j -lt $items.Count; $j++) { if ($items[$j].v -eq $sl.current) { $idx = $j } }
+                $cb.SelectedIndex = $idx
+                $cb.Tag = @{ slot = $sl; items = $items; cue = $r.key }
+                $cb.Enabled = -not $off
+                $cb.Add_SelectionChangeCommitted({ On-SlotPick $this })
+                $modelTip.SetToolTip($cb, ($tip + "`n" + [string]$sl.note))
+                $panel.Controls.Add($cb)
+            } else {
+                $t = $(if ($items.Count) { [string]$items[0].t } else { "" })
+                [void](Cell $panel $t ($cols[2] + $tagW) $y ($ws[2] - $tagW))
+            }
         } else {
             $ms = @(Cue-Models $r)
             [void](Cell $panel $(if ($ms.Count) { $ms -join ", " } else { L "v_rule" }) $cols[2] $y $ws[2])
         }
         $mb = Cue-MB $r
+        if ($edit -and $need -and (Role-Pick $need) -ne "auto") {
+            # 고른 모델의 몫 — 그 줄의 기본 모델 몫을 고른 것으로 바꾼다 (학습 검출기 같은 다른 몫은 그대로)
+            $dk = @($r.models | ForEach-Object { $_.key } | Where-Object { @($cat.cue_choices.$need.choices | ForEach-Object { $_.key }) -contains $_ })
+            $rest = 0
+            foreach ($x in @($r.models)) { if ($dk -notcontains $x.key -and $null -ne $cat.gpu_mb_targeted.($x.key)) { $rest += [int]$cat.gpu_mb_targeted.($x.key) } }
+            $mb = $rest + (Role-MB $need $null)
+        }
         if ($null -eq $mb -and $first -and $opt -ne "targeted") { $mb = [int]$cat.gpu_mb_option.$opt }
         [void](Cell $panel $(if ($off) { "-" } elseif ($null -ne $mb) { "{0} MB" -f $mb } else { "-" }) $cols[3] $y $ws[3])
-        $y += 26
+        $y += $(if ($edit) { 28 } else { 26 })
         $first = $false
     }
     return $y
@@ -2108,10 +2199,10 @@ function Build-CueTable {
     $script:Building = $true
     $slotPanel.SuspendLayout()
     $slotPanel.Controls.Clear()
-    $tfn = @(@($script:FnList) | Where-Object { (Fn-Model $_) -eq "targeted" } | Select-Object -First 1)
-    $sy = 2
-    if ($tfn.Count) { $sy = Draw-Slots $slotPanel @(Fn-Slots $tfn[0]) 2 }
-    $slotPanel.Height = $sy + 2
+    # 근거 모델 고르기는 근거 표의 「모델」 칸으로 들어갔다 (2026-11-27) — 근거마다 [역할] + 콤보. 슬롯 줄은 비워 둔다
+    $slotPanel.Height = 0
+    $slotPanel.Visible = $false
+    $slotHead.Visible = $false
     $slotPanel.ResumeLayout()
     $cueTable.SuspendLayout()
     $cueTable.Controls.Clear()
@@ -3338,6 +3429,7 @@ function Pin-Key {
 function Vision-Groups-Key { if ((Chosen-Models) -contains "targeted") { return ((Checked-Targets) -join ",") + ($distOn.Checked) } return "" }
 
 function Build-Profile {
+    $script:ProfileFunctions = $null
     $pm = @{}
     $tm = @{}
     if (((Chosen-Models) -contains "targeted") -and $script:TargetsTouched) {
@@ -3364,15 +3456,20 @@ function Build-Profile {
         $cs = @{}
         if (@($script:CueOff).Count) { $cs.off = @($script:CueOff) }
         $mp = @{}
-        foreach ($need in $script:CuePick.Keys) {
-            $v = [string]$script:CuePick[$need]
-            if (-not $v -or $v -eq "auto") { continue }
+        $fx = @{}
+        foreach ($need in @($script:CuePick.Keys | Sort-Object)) {
+            $v = Role-Pick $need                     # 기본 · 이 PC 에 없는 모델은 적지 않는다 (비전이 지금 규칙 그대로)
+            if ($v -eq "auto") { continue }
             $ch = $cat.cue_choices.$need
             if ($null -eq $ch) { continue }
-            if ($ch.multi) { $mp[$need] = @($v -split "\+") } else { $mp[$need] = $v }   # 하나면 글 하나여도 비전이 받는다
+            if ($ch.multi) { $val = @($v -split "\+") } else { $val = $v }   # 하나면 글 하나여도 비전이 받는다
+            # 역할 슬롯 — functions.targeted_detect.server.<역할>. ovd · depth 는 옛 cue_setup.models 에도 (같은 값)
+            $fx[$need] = $val
+            if (Cue-Legacy $need) { $mp[$need] = $val }
         }
         if ($mp.Count) { $cs.models = $mp }
         if ($cs.Count) { $tm.cue_setup = $cs }
+        if ($fx.Count) { $script:ProfileFunctions = @{ targeted_detect = @{ server = $fx } } } else { $script:ProfileFunctions = $null }
     }
     foreach ($m in (Chosen-Models)) {
         $o = $script:Overlay[$m]
@@ -3390,6 +3487,7 @@ function Build-Profile {
     }
     if ($tm.Count -gt 0) { $pm["targeted"] = $tm }
     $prof = @{ profile_version = [int]$script:ProfileVer; models = $pm }   # 버전은 Write-Profile 이 올린다
+    if ((Chosen-Models) -contains "targeted" -and $script:ProfileFunctions) { $prof.functions = $script:ProfileFunctions }
     if ((Chosen-Models) -contains "targeted") {
         # 기기마다 다른 대상 — 전부를 찾는 기기는 적지 않는다(비전은 적힌 기기만 거른다)
         $all = @(Checked-Targets)
@@ -3491,12 +3589,16 @@ function Start-Slice {
     Start-WslWindow "ds_slice" "360 슬라이스" ("./venv/bin/python e2p/slice360_live.py{0}" -f $a)
 }
 function Targeted-MB {   # targeted 단서 모델 합 (프로세스 기본값 제외) — model_registry.yaml
+    # 근거 모델 역할에서 고른 모델을 따른다 (2026-11-27) — 고르지 않으면 예전 합 그대로
     $g = $cat.gpu_mb_targeted
-    $mb = [int]$g.yoloe_text + [int]$g.yoloe_free + [int]$g.clip + [int]$g.yolo_world
+    $mb = (Role-MB "detector" "yoloe_text") + (Role-MB "free_arm" "yoloe_free") + (Role-MB "embed" "clip")
     $ts = Checked-Targets
-    if ($ts -contains "demo_door") { $mb += [int]$g.grounding_dino }
+    if ((Role-Pick "ovd") -eq "auto") {
+        $mb += [int]$g.yolo_world
+        if ($ts -contains "demo_door") { $mb += [int]$g.grounding_dino }
+    } else { $mb += (Role-MB "ovd" $null) }
     if ($ts -contains "demo_box") { $mb += [int]$g.trained }
-    if ($distOn.Checked) { $mb += [int]$g.depth }
+    if ($distOn.Checked) { $mb += (Role-MB "depth" "depth") }
     return $mb
 }
 function Assign-Args {
@@ -3774,8 +3876,9 @@ function Self-Test {
     $script:CueOff = @("semantic"); $script:CuePick = @{ ovd = "yolo_world"; depth = "unidepth_l" }
     Build-CueTable; Build-CueBoxes
     $r.cue_setup = (Build-Profile).models.targeted.cue_setup
-    # 근거 모델 고르기는 근거 표 위 슬롯 줄(Fn-Slots)로 옮겼다
-    $r.cue_table_combos = @($slotPanel.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] } | ForEach-Object { $_.Text })
+    # 근거 모델 고르기는 근거 표의 「모델」 칸(근거마다 [역할] + 콤보)으로 옮겼다 (2026-11-27)
+    $r.cue_table_combos = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and @("ovd", "depth") -contains $_.Tag.slot.role } |
+                            ForEach-Object { "{0}:{1}" -f $_.Tag.cue, $_.Text })
     $r.targeted_slots = @(Fn-Slots "targeted_detect" | ForEach-Object { "{0}={1}" -f $_.role, $_.current })
     $r.object_slots = @(Fn-Slots "object_detect" | ForEach-Object { "{0}={1}" -f $_.role, $_.current })
     $r.cue_table_off_box = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Tag.key -eq "semantic" } | ForEach-Object { $_.Checked })
@@ -3783,6 +3886,47 @@ function Self-Test {
     $r.target_row_semantic_enabled = $(if ($pc) { $pc.Enabled } else { "none" })
     $script:CueOff = @(); $script:CuePick = @{}
     Build-CueTable; Build-CueBoxes
+    # 근거마다 모델 (2026-11-27) — 탐지기 → yoloe26_text_s, CLIP → clip_fp32. 같은 역할의 줄은 함께 바뀌고,
+    # 프로필 functions.targeted_detect.server.<역할> 로 간다 (ovd · depth 는 cue_setup.models 에도)
+    $r.gpu_before_roles = Targeted-MB
+    $r.role_profile_default = [bool]((Build-Profile).functions)
+    $pick = { param($cue, $v)
+        $cb = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Tag.cue -eq $cue })[0]
+        $j = 0; for ($i = 0; $i -lt @($cb.Tag.items).Count; $i++) { if (@($cb.Tag.items)[$i].v -eq $v) { $j = $i } }
+        $cb.SelectedIndex = $j
+        On-SlotPick $cb }
+    & $pick "class" "yoloe26_text_s"
+    & $pick "semantic" "clip_fp32"
+    & $pick "size_veto" "unidepth_l"
+    $rp = Build-Profile
+    $r.role_profile = $rp.functions
+    $r.role_profile_cue_setup = $rp.models.targeted.cue_setup
+    $r.role_combos = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] } |
+                       ForEach-Object { "{0}={1}" -f $_.Tag.cue, $_.Text })
+    $r.role_tags = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] -and $_.Text -like "``[*" } | ForEach-Object { $_.Text } | Sort-Object -Unique)
+    $r.gpu_after_roles = Targeted-MB
+    $r.profile_json_roles = ($rp | ConvertTo-Json -Depth 8)
+    if ($env:DS_LAUNCHER_TESTSHOT) {
+        $form.StartPosition = "Manual"
+        $form.Location = New-Object System.Drawing.Point(-20000, -20000)
+        $form.Show()
+        $tabs.SelectedIndex = 1
+        Select-Fn "targeted_detect"
+        Save-Shot "test_cue_roles.png"
+        $detailBody.AutoScrollPosition = New-Object System.Drawing.Point(0, $cueTable.Top)
+        Save-Shot "test_cue_roles_table.png"
+        # 정렬 — 근거 표의 콤보 · 이름표가 같은 열에 서고 표 폭 안에 든다
+        $cbs = @($cueTable.Controls | Where-Object { $_ -is [System.Windows.Forms.ComboBox] })
+        $r.role_combo_lefts = @($cbs | ForEach-Object { $_.Left } | Sort-Object -Unique)
+        $r.role_combo_inside = (@($cbs | Where-Object { $_.Right -gt $cueTable.ClientSize.Width }).Count -eq 0)
+        $form.Hide()
+    }
+    $script:CuePick = @{}
+    Build-CueTable; Build-CueBoxes
+    $r.gpu_back_roles = Targeted-MB
+    # 대상 표에 「거리」 칸이 없다 (2026-11-27) — 머리줄에 「거리」 글이 없고 줄에도 씀/꺼짐 글이 없다
+    $r.target_dist_column = @(All-Ctls $cuePanel | Where-Object { $_ -is [System.Windows.Forms.Label] -and
+        @((L "lbl_dist"), (L "v_dist_on"), (L "v_dist_off")) -contains $_.Text }).Count
     # 기기마다 다른 대상 (2026-11-27) — 두 기기에 지정 물체 탐지를 켜고 chair 는 첫 기기에서만
     $two = @(@($Sources | Where-Object { $srcChecks[$_].Enabled }) | Select-Object -First 2)
     if ($two.Count -lt 2) { $two = @("pi12", "robot1") }

@@ -85,8 +85,7 @@ def estimate_mb(models, profile=None, cfg=None):
         if (resolved.get("features") or {}).get("reid"):
             need.add("reid")
         if (resolved.get("targeted") or {}).get("distance"):
-            # 고른 거리 모델 (기본 depth = UniDepth ViT-B/14). 예전에는 늘 depth 를 셌다 — 바꿔 고르면 두 번 셌다
-            need.add(cc.depth_key((resolved.get("targeted") or {}).get("cue_models")))
+            need.add(cc.depth_key((resolved.get("targeted") or {}).get("cue_models")))   # 근거 표에서 고른 거리 모델
         # 같은 묶음의 선택지 · 새 모델이 이미 적재하는 정체는 근거 쪽에서 빼고 센다 (work/1 — 같은 일은 한 번).
         # 겹치지 않으면 아무것도 빠지지 않는다 — 옛 어림 그대로
         from ds_resources import workgraph as wg

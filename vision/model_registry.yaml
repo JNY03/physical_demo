@@ -117,31 +117,35 @@ options:
 #:   needs     쓰는 모델 키 (models). ovd = YOLO-World · Grounding DINO 중 쓸 수 있는 것, depth = 거리 모델
 #:   requires  대상 파일에 있어야 하는 칸 (하나라도 있으면 됨)
 #:   detector  이 단서를 쓸 수 있는 탐지기 종류 (yoloe_text | trained)
+#:   model_role  이 근거가 쓰는 모델을 고르는 역할 슬롯 (functions.targeted_detect.stages.server.slots 의 역할).
+#:             detector 탐지기 모델 · free_arm 후보 넓히기 모델 · embed CLIP 임베딩 · ovd · depth · none(모델 없음).
+#:             같은 역할을 쓰는 근거는 한 모델을 나눠 쓴다 — 하나를 바꾸면 그 역할의 근거가 모두 바뀐다.
+#:             needs 의 기본 모델 키(yoloe_text · yoloe_free · clip)는 그 역할에서 고른 모델로 바뀌어 적재된다
 cues:
-  class:         {label: 탐지기, label_en: detector, role: score, roles: [score], weight: 0.50, needs: [], requires: [], detector: [yoloe_text, trained]}
-  free_arm:      {label: 후보 넓히기, label_en: wider candidates, role: "on", roles: ["on"], weight: 0.0, needs: [yoloe_free], requires: [free_vocab], detector: [yoloe_text]}
-  semantic:      {label: 글 설명, label_en: description, role: score, roles: [score, gate], weight: 0.20, needs: [clip], requires: [], detector: [yoloe_text, trained]}
-  dict_features: {label: 특징 사전, label_en: features, role: score, roles: [score, gate], weight: 0.20, needs: [clip], requires: [features], detector: [yoloe_text, trained]}
-  shape:         {label: 형상, label_en: shape, role: score, roles: [score, gate], weight: 0.10, needs: [], requires: [shape, size_mm], detector: [yoloe_text]}
-  colour:        {label: 색상, label_en: colour, role: score, roles: [score, gate], weight: 0.15, needs: [], requires: [colours], detector: [yoloe_text, trained]}
-  ovd_pair_iou:  {label: OVD 짝 IoU, label_en: OVD pair IoU, role: gate, roles: [gate], weight: 0.0, needs: [ovd], requires: [pair_iou_min], detector: [yoloe_text]}
-  clip_colour:   {label: CLIP 색, label_en: CLIP colour, role: gate, roles: [gate, score], weight: 0.10, needs: [clip], requires: [clip_colour], detector: [yoloe_text, trained]}
-  clip_shape:    {label: CLIP 모양, label_en: CLIP shape, role: gate, roles: [gate, score], weight: 0.10, needs: [clip], requires: [clip_shape], detector: [yoloe_text, trained]}
-  saturation:    {label: 채도, label_en: saturation, role: gate, roles: [gate], weight: 0.0, needs: [], requires: [saturation], detector: [yoloe_text, trained]}
-  parts:         {label: 부분, label_en: parts, role: local, roles: [local], weight: 0.0, needs: [yoloe_text], requires: [parts], detector: [yoloe_text]}
-  hue:           {label: 색상 H, label_en: hue, role: gate, roles: [gate], weight: 0.0, needs: [], requires: [hue], detector: [yoloe_text, trained]}
-  aspect:        {label: 종횡비, label_en: aspect, role: gate, roles: [gate, score], weight: 0.10, needs: [], requires: [aspect, trained], detector: [yoloe_text, trained]}
-  ground:        {label: 바닥 위치, label_en: ground, role: gate, roles: [gate], weight: 0.0, needs: [], requires: [trained], detector: [trained]}
-  height:        {label: 높이 측정, label_en: height, role: cond, roles: [cond], weight: 0.0, needs: [], requires: [trained], detector: [trained]}
-  calibration:   {label: 거리 검증 범위, label_en: calibration, role: cond, roles: [cond], weight: 0.0, needs: [], requires: [trained], detector: [trained]}
-  size_veto:     {label: 크기 거부, label_en: size veto, role: veto, roles: [veto], weight: 0.0, needs: [depth], requires: [size_mm], detector: [yoloe_text, trained]}
-  lookalike:     {label: 닮은꼴 감점, label_en: look-alike, role: "on", roles: ["on"], weight: 0.0, needs: [clip], requires: [confusers], detector: [yoloe_text, trained]}
+  class:         {label: 탐지기, label_en: detector, role: score, roles: [score], weight: 0.50, needs: [], requires: [], detector: [yoloe_text, trained], model_role: detector}
+  free_arm:      {label: 후보 넓히기, label_en: wider candidates, role: "on", roles: ["on"], weight: 0.0, needs: [yoloe_free], requires: [free_vocab], detector: [yoloe_text], model_role: free_arm}
+  semantic:      {label: 글 설명, label_en: description, role: score, roles: [score, gate], weight: 0.20, needs: [clip], requires: [], detector: [yoloe_text, trained], model_role: embed}
+  dict_features: {label: 특징 사전, label_en: features, role: score, roles: [score, gate], weight: 0.20, needs: [clip], requires: [features], detector: [yoloe_text, trained], model_role: embed}
+  shape:         {label: 형상, label_en: shape, role: score, roles: [score, gate], weight: 0.10, needs: [], requires: [shape, size_mm], detector: [yoloe_text], model_role: none}
+  colour:        {label: 색상, label_en: colour, role: score, roles: [score, gate], weight: 0.15, needs: [], requires: [colours], detector: [yoloe_text, trained], model_role: none}
+  ovd_pair_iou:  {label: OVD 짝 IoU, label_en: OVD pair IoU, role: gate, roles: [gate], weight: 0.0, needs: [ovd], requires: [pair_iou_min], detector: [yoloe_text], model_role: ovd}
+  clip_colour:   {label: CLIP 색, label_en: CLIP colour, role: gate, roles: [gate, score], weight: 0.10, needs: [clip], requires: [clip_colour], detector: [yoloe_text, trained], model_role: embed}
+  clip_shape:    {label: CLIP 모양, label_en: CLIP shape, role: gate, roles: [gate, score], weight: 0.10, needs: [clip], requires: [clip_shape], detector: [yoloe_text, trained], model_role: embed}
+  saturation:    {label: 채도, label_en: saturation, role: gate, roles: [gate], weight: 0.0, needs: [], requires: [saturation], detector: [yoloe_text, trained], model_role: none}
+  parts:         {label: 부분, label_en: parts, role: local, roles: [local], weight: 0.0, needs: [yoloe_text], requires: [parts], detector: [yoloe_text], model_role: detector}
+  hue:           {label: 색상 H, label_en: hue, role: gate, roles: [gate], weight: 0.0, needs: [], requires: [hue], detector: [yoloe_text, trained], model_role: none}
+  aspect:        {label: 종횡비, label_en: aspect, role: gate, roles: [gate, score], weight: 0.10, needs: [], requires: [aspect, trained], detector: [yoloe_text, trained], model_role: none}
+  ground:        {label: 바닥 위치, label_en: ground, role: gate, roles: [gate], weight: 0.0, needs: [], requires: [trained], detector: [trained], model_role: none}
+  height:        {label: 높이 측정, label_en: height, role: cond, roles: [cond], weight: 0.0, needs: [], requires: [trained], detector: [trained], model_role: none}
+  calibration:   {label: 거리 검증 범위, label_en: calibration, role: cond, roles: [cond], weight: 0.0, needs: [], requires: [trained], detector: [trained], model_role: none}
+  size_veto:     {label: 크기 거부, label_en: size veto, role: veto, roles: [veto], weight: 0.0, needs: [depth], requires: [size_mm], detector: [yoloe_text, trained], model_role: depth}
+  lookalike:     {label: 닮은꼴 감점, label_en: look-alike, role: "on", roles: ["on"], weight: 0.0, needs: [clip], requires: [confusers], detector: [yoloe_text, trained], model_role: embed}
   # 사람이 올린 기준 사진(zip)의 CLIP 이미지 임베딩과 crop 을 견준다. 임베딩은
   # cue_catalog.attach_reference_images 가 대상 파일 옆 `<대상>.refs.npz` 에 만든다.
   # 사람이 올린 기준 사진과 후보 조각을 CLIP 임베딩으로 견준다 (target_assess 의 REF_SIM_MIN · REF_SPAN).
   # 가장 닮은 몇 장의 평균이 하한(0.70) 이면 50%, +0.10 이면 100%. 못 재면(작은 조각 · 사진 없음) 통과가 아니라 '못 잼'이다.
   # 문턱을 0.99 로 두지 마라 — 양자화 ONNX 는 묶음 크기만 달라져도 코사인이 0.990 까지 흔들린다.
-  ref_match:     {label: 기준 사진, label_en: reference photos, role: score, roles: [score, gate, "on"], weight: 0.15, needs: [clip], requires: [reference_images], detector: [yoloe_text, trained]}
+  ref_match:     {label: 기준 사진, label_en: reference photos, role: score, roles: [score, gate, "on"], weight: 0.15, needs: [clip], requires: [reference_images], detector: [yoloe_text, trained], model_role: embed}
 
 #: CPU 작업 — 오케스트레이터가 파이(k3s) 또는 data_stream 기기에 둔다 (placement/1)
 #:   cpu_m · mem_mb  requests (limits 는 2배)       roles  둘 수 있는 노드 역할 (gpu = data_stream 기기)
@@ -157,7 +161,8 @@ cues:
 #: models.targeted.cue_setup.models 로 비전에 간다. 비전이 실제로 갈아 끼울 수 있는 것만 적는다.
 #:   choices   고를 수 있는 모델 키 (models 구역)        multi  여럿을 함께 고를 수 있나
 #:   model_id  거리 모델처럼 같은 코드에 가중치만 바꾸는 것 — 모델 키 → 넘길 값 (상대 경로는 DS_HOME 기준)
-#: 여기에 없는 근거 모델(clip 등)은 고정이다 — 근거 표에 글로만 보인다
+#: 탐지기(yoloe_text) · 후보 넓히기(yoloe_free) · CLIP(clip) 은 여기가 아니라 functions.targeted_detect 서버 단계의
+#: 역할 슬롯 detector · free_arm · embed 가 고른다 (2026-11-27, 능력 detect_text · detect_free · embed_image_text)
 cue_model_choices:
   ovd:   {choices: [yolo_world, grounding_dino], multi: true}
   # da3_metric_l: depth_track 이 model_id 의 config.json 을 보고 DA3 로 돌린다 (kind 는 yaml 의 unidepth 그대로)
@@ -476,6 +481,22 @@ functions:
         image: null
         command: null
         note: options.targeted 가 맡는다 (GPU Executor 가 띄운다)
+        # 근거마다 쓰는 모델 (2026-11-27) — cues.<근거>.model_role 이 여기 역할을 가리킨다. ovd · depth 는
+        # cue_model_choices 에서 온다(옛 칸 그대로). component: 비전 코드(TargetedRunner)가 모델 파일을 직접 부르는
+        # 구성 모델 자리라 runner 가 없는 모델도 능력(provides)으로 뜬다. 능력의 약속:
+        #   detect_text       ultralytics YOLOE 텍스트 프롬프트 가중치. files = [가중치, 텍스트 인코더(.ts)] —
+        #                     인코더는 가중치 yaml 의 text_model 로 고른다(YOLOE-11 mobileclip_blt · YOLOE-26 mobileclip2_b)
+        #   detect_free       ultralytics YOLOE prompt-free(-pf) 가중치 (내장 어휘). files = [가중치]
+        #   embed_image_text  CLIP ViT-B/32 **같은 임베딩 공간**의 ONNX 셋 [비전, 글, tokenizer.json]
+        #                     (files_for.embed_image_text 가 있으면 그것, 없으면 files). 기준 사진 npz(clip_b32)를 그대로 쓴다.
+        #                     mobileclip_s0_cpu 는 넣지 않는다 — 글 인코더 파일이 없고(이미지 인코더만), 임베딩 공간이
+        #                     CLIP ViT-B/32 와 달라 기준 사진 npz · 글 문장 임베딩과 견줄 수 없다
+        slots:
+          detector: {label: 탐지기 모델, label_en: detector model, needs: [detect_text], component: true, default: yoloe_text}
+          free_arm: {label: 후보 넓히기 모델, label_en: wider-candidate model, needs: [detect_free], optional: true,
+                     component: true, default: yoloe_free}
+          embed:    {label: CLIP 임베딩, label_en: CLIP embedding, needs: [embed_image_text], optional: true,
+                     component: true, default: clip}
 
   river_detect:
     options: [river]                    # 도메인 전용 기능 — 모델은 cue_models(yoloe_text · yoloe_free · clip · depth)
@@ -1092,6 +1113,7 @@ models:
     - {path: models/yoloe-11l-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt, sha256: bf39e17c356f4b73977aa978bbdf6d19d0830e6bff46727d2d1f260414e41e0f}
   yoloe_text:
     note: YOLOE-11l-seg 텍스트 프롬프트 + MobileCLIP 텍스트 인코더
+    provides: [detect, segment, open_vocab, detect_text]
     files: [models/yoloe-11l-seg.pt, models/mobileclip_blt.ts]
     license: AGPL-3.0 (ultralytics)
     gpu_mb: 900
@@ -1102,6 +1124,7 @@ models:
     - {path: models/mobileclip_blt.ts, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/mobileclip_blt.ts, sha256: a67804d1b0f07b8b9a20c1761ec0847f34660f5fa338ec70e8f3fce68ed95e54}
   yoloe_free:
     note: YOLOE-11s-seg prompt-free — 후보 넓히기 arm
+    provides: [detect, segment, open_vocab, detect_free]
     files: [models/yoloe-11s-seg-pf.pt]
     gpu_mb: 500
     device: gpu
@@ -1110,6 +1133,7 @@ models:
     - {path: models/yoloe-11s-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11s-seg-pf.pt, sha256: 292bdf157a9ec7315f34b567cb93467c5043cd1889a1cc18abbfdeb88d7a948d}
   clip:
     note: CLIP ViT-B/32 ONNX 양자화본 (글 설명 · 특징 · 색 · 모양 · 닮은꼴 · 기준 사진)
+    provides: [embed_image_text]
     files: [models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx,
             models/clip-vit-base-patch32/onnx/text_model_quantized.onnx,
             models/clip-vit-base-patch32/tokenizer.json]
@@ -1125,8 +1149,18 @@ models:
     # [49406 320 1125 539 320 2390 1746 2489 49407] 로 나온다. 옛 사전이 있는 기기는 그대로 두면 된다(안 읽는다).
     - {path: models/clip-vit-base-patch32/tokenizer.json, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: tokenizer.json, sha256: f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd}
   clip_fp32:
-    note: CLIP ViT-B/32 ONNX fp32 — river 위험물 확인 (GPU 19.5 ms)
+    note: CLIP ViT-B/32 ONNX fp32 — river 위험물 확인 (GPU 19.5 ms). 지정 물체 탐지의 embed 역할로도 고른다 (양자화본과 같은 임베딩 공간 — 기준 사진 npz 를 그대로 쓴다)
     files: [models/clip-vit-base-patch32/onnx/vision_model.onnx]
+    # embed_image_text 로 쓸 때는 글 인코더 · 토크나이저도 있어야 한다 — files 는 river 가 쓰는 비전 인코더만 그대로 둔다
+    files_for:
+      embed_image_text: [models/clip-vit-base-patch32/onnx/vision_model.onnx,
+                         models/clip-vit-base-patch32/onnx/text_model.onnx,
+                         models/clip-vit-base-patch32/tokenizer.json]
+    provides: [embed_image_text]
+    # 2026-11-27 실측 (RTX 4050, 지정 물체 탐지 person · chair · door, 60장): onnxruntime CUDA 몫이 양자화본 ~380 MB →
+    # fp32 ~1210 MB (nvidia 남은 몫 − torch 예약). 대신 근거 판정(assess)이 장당 p50 144 → 25 ms — 양자화본은 CUDA EP 에서
+    # 양자화 연산이 CPU 로 되돌아가 느리다
+    gpu_mb: 1200
     device: gpu
     packages: [onnxruntime-gpu]
     source:
@@ -1176,6 +1210,7 @@ models:
     note: UniDepth V2 ViT-L/14 — unidepth 선택지 (vision_config models.unidepth.model_name)
     files: [models/unidepth-v2-vitl14, external/UniDepth]
     provides: [depth_metric]
+    gpu_mb: 1500                        # options.unidepth 와 같은 모델 — 그 어림 (거리 역할로 고를 때 GPU 셈이 0 이 되지 않게)
     license: CC-BY-NC-4.0
     device: gpu
     packages: [torch]
@@ -1469,7 +1504,7 @@ models:
     gpu_mb: 350
     device: gpu
     packages: [ultralytics]
-    provides: [detect, segment, open_vocab]
+    provides: [detect, segment, open_vocab, detect_free]
     runs_on: [gpu]
     runner: yoloe26:FreeRunner
     config: {weight: models/yoloe-26l-seg-pf.pt, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
@@ -1483,7 +1518,7 @@ models:
     gpu_mb: 300
     device: gpu
     packages: [ultralytics]
-    provides: [detect, segment, open_vocab]
+    provides: [detect, segment, open_vocab, detect_free]
     runs_on: [gpu]
     runner: yoloe26:FreeRunner
     config: {weight: models/yoloe-26s-seg-pf.pt, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
@@ -1497,7 +1532,7 @@ models:
     gpu_mb: 250
     device: gpu
     packages: [ultralytics, clip]
-    provides: [detect, segment, open_vocab]
+    provides: [detect, segment, open_vocab, detect_text]
     runs_on: [gpu]
     runner: yoloe26:TextRunner
     config: {weight: models/yoloe-26l-seg.pt, text_encoder_dir: models, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
@@ -1512,7 +1547,7 @@ models:
     gpu_mb: 200
     device: gpu
     packages: [ultralytics, clip]
-    provides: [detect, segment, open_vocab]
+    provides: [detect, segment, open_vocab, detect_text]
     runs_on: [gpu]
     runner: yoloe26:TextRunner
     config: {weight: models/yoloe-26s-seg.pt, text_encoder_dir: models, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)

@@ -18,7 +18,7 @@
 
 역할 슬롯 (slots/1, 2026-11-27) — 단계마다 「어떤 능력의 모델이 들어갈 자리」를 선언한다.
   stages.<단계>.slots.<역할>: {label, label_en, needs: [능력], optional, multi, size: small|any,
-                              default, choices: [명시 선택지], auto}
+                              default, choices: [명시 선택지], auto, component}
   읽은 단계에는 `slots` 목록(역할 이름순이 아니라 적은 순서)이 붙는다. 선택지 계산은 ds_resources/slots.py 가 한다
   (여기서는 선언만 고르게 편다 — 모델 표를 모른다).
   옛 칸은 그대로 읽히고 슬롯으로도 바뀐다(별칭):
@@ -82,7 +82,7 @@ PARAM_KINDS = ("choice", "function", "sources", "model")
 PARAM_KEYS = ("kind", "label", "label_en", "choices", "default", "labels", "labels_en", "artifact", "min", "when",
               "slot")
 #: 역할 슬롯 칸 (slots/1) — 칸 추가만 한다
-SLOT_KEYS = ("label", "label_en", "needs", "optional", "multi", "size", "default", "choices", "auto")
+SLOT_KEYS = ("label", "label_en", "needs", "optional", "multi", "size", "default", "choices", "auto", "component")
 SLOT_SIZES = ("small", "any")
 #: 옛 options 가 바뀌어 들어가는 슬롯 역할 · 옛 cue_model_choices 가 들어가는 기능
 MODEL_ROLE = "model"
@@ -193,6 +193,8 @@ def _slot(role, body, what):
             "default": default, "choices": choices,
             # auto: 능력(needs)으로 모델 표에서 저절로 채우는가. 적지 않으면 needs 가 있을 때만 그렇다
             "auto": _bool(body.get("auto", bool(needs)), what + ".auto"),
+            # component: 기능 코드가 모델 파일을 직접 부르는 자리 — runner 가 없는 구성 모델도 능력으로 뜬다
+            "component": _bool(body.get("component", False), what + ".component"),
             "origin": "slots"}
 
 

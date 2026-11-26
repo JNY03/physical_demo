@@ -140,7 +140,9 @@ class ProfileError(ValueError):
 #: role: score 점수 · gate 필수 · veto 거부 · cond 조건(거리 신뢰) · on 켜기만(후보 넓히기·감점)
 CUES = {k: {"label": str(c["label"]), "role": str(c["role"]), "roles": tuple(str(r) for r in c["roles"]),
             "weight": float(c.get("weight") or 0.0), "needs": list(c.get("needs") or []),
-            "requires": list(c.get("requires") or []), "detector": tuple(c.get("detector") or ())}
+            "requires": list(c.get("requires") or []), "detector": tuple(c.get("detector") or ()),
+            # 이 근거의 모델을 고르는 역할 슬롯 (targeted_detect 서버 단계) — none 이면 모델이 없거나 고정
+            "model_role": str(c.get("model_role") or "none")}
         for k, c in _REG["cues"].items()}
 ROLES = ("score", "gate", "veto", "cond", "on", "local", "off")
 #: 카드(영상 · 웹)에 쓰는 근거 이름 — **카드는 영어로만**(2026-11-23). 런처 화면은 위 label(한글)
@@ -284,6 +286,64 @@ def depth_model_id(cue_models, files):
     if mid.startswith(("models/", "external/")) and files.get(key):
         return str(files[key][0])
     return mid or None
+
+
+# ---------------------------------------------------------------- 근거 모델 역할 (2026-11-27)
+# 근거마다 쓰는 모델을 역할 슬롯으로 고른다: detector(YOLOE 텍스트) · free_arm(prompt-free) · embed(CLIP ONNX) ·
+# ovd · depth. 앞 셋은 레지스트리 functions.targeted_detect.stages.server.slots 의 component 슬롯이고, 고를 수 있는
+# 모델은 능력(provides)으로 저절로 뜬다(ds_resources/slots.py). 아무것도 고르지 않으면 기본 모델 — 예전과 같다.
+def role_slots():
+    """{역할: {label, label_en, needs, default, choices: [모델 키], optional}} — component 슬롯만 (ovd · depth 는 CUE_CHOICES)"""
+    if "_roles" not in _CACHE:
+        from ds_resources import slots as sl
+        st = (_functions().get(CUE_SLOT_FUNCTION) or {}).get("stages", {}).get("server") or {}
+        table = sl.parts(_REG)
+        out = {}
+        for x in st.get("slots") or []:
+            if not x.get("component"):
+                continue
+            out[x["role"]] = {"label": x["label"], "label_en": x["label_en"], "needs": list(x["needs"]),
+                              "default": x["default"], "optional": x["optional"],
+                              "choices": sl.choices(x, "server", st, table)}
+        _CACHE["_roles"] = out
+    return _CACHE["_roles"]
+
+
+def need_role(need):
+    """근거 needs 의 기본 모델 키 → 그것을 고르는 역할 (yoloe_text → detector …). 고를 수 없는 것이면 None"""
+    for role, r in role_slots().items():
+        if r["default"] == need:
+            return role
+    return None
+
+
+def role_model(role, cue_models=None):
+    """그 역할에서 쓸 모델 키 — 고른 것이 없으면 기본값"""
+    v = (cue_models or {}).get(role)
+    return str(v) if v else str(role_slots()[role]["default"])
+
+
+def need_model(need, cue_models=None):
+    """근거 needs 의 모델 키 → 실제로 적재할 모델 키 (역할에서 고른 것으로 바뀐다)"""
+    role = need_role(need)
+    return role_model(role, cue_models) if role else need
+
+
+def role_files(key, files, role=None):
+    """그 모델을 그 역할로 쓸 때의 파일 [Path]. 기본 모델은 files(yaml models.targeted.files 가 이긴다) 그대로 —
+    예전과 같은 경로다. 다른 모델은 레지스트리 files (+ 역할 능력의 files_for)"""
+    if role is None:
+        role = need_role(key) or next((r for r, x in role_slots().items() if key in x["choices"]), None)
+    if role is not None and key == role_slots()[role]["default"]:
+        return list(files.get(key, []))
+    from ds_resources import slots as sl
+    needs = role_slots()[role]["needs"] if role else ()
+    return [_p(x) for x in sl.role_files(key, _REG, needs)] or list(files.get(key, []))
+
+
+def have_model(key, files, role=None):
+    fs = role_files(key, files, role)
+    return bool(fs) and all(p.exists() for p in fs) if key != "trained" else True
 
 
 def check_cue_setup(cs):
@@ -497,12 +557,18 @@ def available_cues(t, tcfg, files, distance=True, cue_models=None):
                         why = "거리 측정 꺼짐"
                     elif not have(depth_key(cue_models), files):
                         why = "%s 없음" % depth_key(cue_models)
+                elif need_role(need):
+                    m = need_model(need, cue_models)
+                    if not have_model(m, files, need_role(need)):
+                        why = "%s 없음" % m
                 elif not have(need, files):
                     why = "%s 없음" % need
         if key == "class" and det == "trained" and not _trained_ok(t):
             why = "학습 가중치 없음"
-        if key == "class" and det == "yoloe_text" and not have("yoloe_text", files):
-            why = "YOLOE 텍스트 가중치 없음"
+        if key == "class" and det == "yoloe_text":
+            m = role_model("detector", cue_models)
+            if not have_model(m, files, "detector"):
+                why = "YOLOE 텍스트 가중치 없음" + ("" if m == "yoloe_text" else " (%s)" % m)
         out[key] = why
     return out
 
@@ -684,7 +750,14 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     # 역할 슬롯 (M4, slots/1) — functions: {기능: {단계: {역할: 모델 | [모델]}}}. 고를 수 있는 것은 레지스트리에서 계산한다
     result["slots"] = check_slots(profile.get("functions"))
     _slots_to_cue_setup(result["slots"], setup)
+    _slots_to_roles(result["slots"], setup)
     if "targeted" in models:
+        for role in role_slots():
+            m = setup["models"].get(role)
+            if m and not have_model(m, files, role):
+                miss = [str(p) for p in role_files(m, files, role) if not p.exists()]
+                raise ProfileError("functions.%s.server.%s=%s — 가중치 없음: %s"
+                                   % (CUE_SLOT_FUNCTION, role, m, ", ".join(miss) or "파일 목록 없음"))
         specs = tpart.get("targets")
         if specs is None:
             specs = [{"name": n} for n in (tcfg.get("targets") or DEFAULT_TARGETS)]
@@ -732,8 +805,12 @@ def resolve_profile(profile, cfg, models, targets_db=None):
             t["distance"] = t_dist
             t["unavailable"] = {k: v for k, v in avail.items() if v}
             out.append(t)
-        result["targeted"] = {"targets": out, "distance": distance, "cue_models": setup["models"],
-                              "cues_off": setup["off"]}
+        cm = setup["models"]
+        # 역할마다 실제로 쓰는 모델 (기본값 포함). ovd 는 대상에 따라 자동 규칙이 고를 수 있다("auto")
+        roles = {r: role_model(r, cm) for r in role_slots()}
+        roles.update({"ovd": cm.get("ovd") or "auto", "depth": depth_key(cm)})
+        result["targeted"] = {"targets": out, "distance": distance, "cue_models": cm,
+                              "cues_off": setup["off"], "role_models": roles}
     names = [t["name"] for t in (result["targeted"] or {}).get("targets", [])]
     opts = overlay_options(models, distance, names)
     for m, part in pm.items():
@@ -813,6 +890,17 @@ def _slots_to_cue_setup(picks, setup):
         setup["models"][need] = v
 
 
+def _slots_to_roles(picks, setup):
+    """targeted_detect.server.{detector, free_arm, embed} 슬롯 → cue_models 의 같은 이름 칸 (고른 것만)"""
+    srv = ((picks or {}).get(CUE_SLOT_FUNCTION) or {}).get("server") or {}
+    for role in role_slots():
+        v = srv.get(role)
+        if isinstance(v, list):
+            v = v[0] if v else None
+        if v:                                          # None = 비운 슬롯 — 기본 모델
+            setup["models"][role] = str(v)
+
+
 def needed_models(resolved, tcfg):
     """확정된 targeted 설정이 적재해야 할 모델 키 집합."""
     files = model_files(tcfg)
@@ -822,7 +910,7 @@ def needed_models(resolved, tcfg):
         if t.get("detector") == "trained":
             need.add("trained")
         else:
-            need.add("yoloe_text")
+            need.add(role_model("detector", cm))
             need.update(ovd_available(tcfg, files, [t], cm.get("ovd")))     # 탐지기 근거에 OVD 확신이 들어간다
         for k in t["cues"]:
             for n in CUES[k]["needs"]:
@@ -831,7 +919,7 @@ def needed_models(resolved, tcfg):
                 elif n == "depth":
                     need.add(depth_key(cm))
                 else:
-                    need.add(n)
+                    need.add(need_model(n, cm))
     return need
 
 
@@ -880,7 +968,9 @@ def option_cues(files=None, tcfg=None):
                     ms = ["yoloe_text", "trained"]
                 # needs: 바꿀 수 있는 근거 모델(cue_model_choices)과 잇는 열쇠 — 런처 근거 표가 고르는 칸을 단다
                 rows.append({"key": k, "label": c["label"], "models": [model_row(m) for m in ms],
-                             "needs": list(c["needs"])})
+                             "needs": list(c["needs"]),
+                             # 모델을 고르는 역할 (런처 근거 표의 모델 칸이 이 역할의 cue_choices 로 고른다)
+                             "model_role": c["model_role"]})
         else:
             for k, ms in (cm or {}).items():
                 rows.append({"key": k, "label": labels.get(k, k), "models": [model_row(m) for m in ms or []]})
@@ -949,12 +1039,40 @@ def catalog(cfg=None):
             "gpu_mb_option": dict(OPTION_GPU_MB),
             "options": option_cues(files, tcfg),
             # 근거 표에서 바꿀 수 있는 근거 모델 — {need: {choices: [{key, note, available}], multi, default}}
-            "cue_choices": {need: {"choices": [{"key": m, "note": str(_REG["models"].get(m, {}).get("note", "")),
-                                                "available": have(str(_REG["models"].get(m, {}).get("files_key", m)),
-                                                                  files)} for m in ch["choices"]],
-                                   "multi": ch["multi"],
-                                   "default": (ovd_available(tcfg, files) if need == "ovd" else ["depth"])}
-                            for need, ch in CUE_CHOICES.items()}}
+            "cue_choices": cue_choices(files, tcfg)}
+
+
+def _choice_info(m, ok):
+    spec = _REG["models"].get(m, {}) or {}
+    p90 = spec.get("p90_ms")
+    return {"key": m, "shown": str(spec.get("shown") or m), "note": str(spec.get("note", "")), "available": bool(ok),
+            "gpu_mb": GPU_MB.get(m), "p90_ms": p90 if isinstance(p90, dict) else ({} if p90 is None else {"s": p90}),
+            "license": spec.get("license")}
+
+
+def cue_choices(files=None, tcfg=None):
+    """근거 모델 역할마다 고를 수 있는 것 — {역할: {choices: [{key, shown, note, available, gpu_mb, p90_ms}], multi,
+    default: [키], label, label_en, cues: [그 역할을 쓰는 근거], cue_setup: 옛 cue_setup.models 로도 가나}}. ovd · depth (옛 cue_model_choices) 와
+    detector · free_arm · embed (component 슬롯). 런처 근거 표가 역할마다 한 모델을 고르게 한다"""
+    files = model_files(tcfg) if files is None else files
+    users = {}
+    for k, c in CUES.items():
+        users.setdefault(c["model_role"], []).append(k)
+    out = {}
+    for role, r in role_slots().items():
+        out[role] = {"choices": [_choice_info(m, have_model(m, files, role)) for m in r["choices"]],
+                     "multi": False, "default": [r["default"]], "label": r["label"], "label_en": r["label_en"],
+                     "cues": users.get(role, []), "cue_setup": False}
+    labels = {"ovd": ("OVD 동의 모델", "OVD agreement"), "depth": ("거리 모델", "distance model")}
+    for need, ch in CUE_CHOICES.items():
+        out[need] = {"choices": [_choice_info(m, have(str(_REG["models"].get(m, {}).get("files_key", m)), files))
+                                 for m in ch["choices"]],
+                     "multi": ch["multi"],
+                     "default": (ovd_available(tcfg, files) if need == "ovd" else ["depth"]),
+                     "label": labels.get(need, (need, need))[0], "label_en": labels.get(need, (need, need))[1],
+                     # 옛 cue_setup.models 로도 적는 역할 (런처가 두 곳에 같은 값을 쓴다)
+                     "cue_setup": True, "cues": users.get(need, [])}
+    return out
 
 
 def overlay_defaults(cfg):

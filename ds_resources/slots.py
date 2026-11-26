@@ -11,7 +11,8 @@
 
   choices(slot, side, stage, parts)   → [부품 키…] 기본값이 맨 앞. 명시 선택지(choices) 다음에 능력으로 저절로
                                        맞는 것(auto). 저절로 맞는 조건:
-                                         - 혼자 도는 부품(선택지 · runner 가 있는 모델)
+                                         - 혼자 도는 부품(선택지 · runner 가 있는 모델). 슬롯이 component 면
+                                           (기능 코드가 모델 파일을 직접 부르는 자리) runner 없는 구성 모델도
                                          - slot.needs ⊆ part.provides
                                          - 그 단계에서 돌 수 있다: 기기 단계 → runs_on 에 cpu_arm64
                                            서버 단계 → gpu (needs.accel 이 gpu 가 아니면 cpu_x86 도)
@@ -32,7 +33,9 @@ from ds_resources import settings
 FORMAT = "slots/1"
 RUNS_ON = ("gpu", "cpu_x86", "cpu_arm64")
 #: 능력 이름 — 적는 쪽의 약속이다(모르는 능력도 받는다 — 새 능력은 모델과 슬롯이 같이 쓰면 된다)
-KNOWN_CAPS = ("detect", "segment", "open_vocab", "ovd", "depth_metric", "depth_relative", "track", "vlm", "embed")
+KNOWN_CAPS = ("detect", "segment", "open_vocab", "ovd", "depth_metric", "depth_relative", "track", "vlm", "embed",
+              # 지정 물체 탐지의 근거 모델 자리 (2026-11-27) — 약속은 레지스트리 targeted_detect 서버 단계 slots 주석
+              "detect_text", "detect_free", "embed_image_text")
 #: 부품 종류 — runner 의 kind 와 같은 이름
 KINDS = ("detect", "segment", "depth", "track", "vlm", "embed")
 
@@ -119,7 +122,9 @@ def platforms(side, stage=None):
 
 def fits(part, slot, side, stage=None):
     """그 부품이 그 슬롯에 저절로 맞는가 (능력 · 도는 곳 · 크기)"""
-    if not part.get("runnable") or part.get("domain"):
+    if part.get("domain"):
+        return False
+    if not part.get("runnable") and not (slot.get("component") and not part.get("pipeline")):
         return False
     if not set(slot.get("needs") or ()) <= set(part.get("provides") or ()):
         return False
@@ -161,19 +166,31 @@ def check_registry(reg, funcs=None):
     return True
 
 
-def _have_files(model_key, reg):
-    files = ((reg.get("models") or {}).get(model_key) or {}).get("files") or []
-    return all(settings.resolve(f).exists() for f in files)
+def role_files(model_key, reg, needs=()):
+    """그 슬롯(능력 needs)에서 쓸 때 있어야 하는 파일 — files_for.<능력> 이 있으면 그것을 더한다
+    (예: clip_fp32 는 river 에는 비전 인코더만, embed_image_text 로는 글 인코더 · 토크나이저까지)"""
+    m = (reg.get("models") or {}).get(model_key) or {}
+    out = list(m.get("files") or [])
+    for cap in needs or ():
+        for f in ((m.get("files_for") or {}).get(cap) or []):
+            if f not in out:
+                out.append(f)
+    return out
 
 
-def available(part, reg, have=None):
-    """가중치가 제자리에 있는가 — 구성 모델의 files 가 모두 있으면 참. have(모델 키) 로 바꿔 끼울 수 있다"""
-    have = have or (lambda k: _have_files(k, reg))
+def _have_files(model_key, reg, needs=()):
+    return all(settings.resolve(f).exists() for f in role_files(model_key, reg, needs))
+
+
+def available(part, reg, have=None, needs=()):
+    """가중치가 제자리에 있는가 — 구성 모델의 files 가 모두 있으면 참. have(모델 키) 로 바꿔 끼울 수 있다.
+    needs(슬롯 능력)를 주면 그 능력으로 쓸 때의 파일(files_for)까지 본다"""
+    have = have or (lambda k: _have_files(k, reg, needs))
     return all(have(k) for k in part.get("uses") or [])
 
 
-def _choice_row(part, reg, have):
-    ok = available(part, reg, have)
+def _choice_row(part, reg, have, needs=()):
+    ok = available(part, reg, have, needs)
     return {"key": part["key"], "shown": part["shown"], "provides": list(part["provides"]),
             "runs_on": list(part["runs_on"]), "size": part.get("size"), "gpu_mb": part.get("gpu_mb"),
             "p90_ms": part.get("p90_ms") or {}, "license": part.get("license"), "available": bool(ok),
@@ -187,10 +204,11 @@ def function_slots(reg, funcs=None, have=None, names=None):
     table = parts(reg)
     cache = {}
 
-    def row(k):
-        if k not in cache:
-            cache[k] = _choice_row(table[k], reg, have)
-        return cache[k]
+    def row(k, needs=()):
+        ck = (k, tuple(needs))
+        if ck not in cache:
+            cache[ck] = _choice_row(table[k], reg, have, needs)
+        return cache[ck]
 
     out = {}
     for fn, g in sorted(funcs.items()):
@@ -205,8 +223,8 @@ def function_slots(reg, funcs=None, have=None, names=None):
                 ch = choices(sl, side, st, table)
                 rows.append({"role": sl["role"], "label": sl["label"], "label_en": sl["label_en"],
                              "needs": list(sl["needs"]), "optional": sl["optional"], "multi": sl["multi"],
-                             "size": sl["size"], "origin": sl.get("origin"),
-                             "choices": [dict(row(k)) for k in ch], "default": sl["default"]})
+                             "size": sl["size"], "origin": sl.get("origin"), "component": bool(sl.get("component")),
+                             "choices": [dict(row(k, sl["needs"])) for k in ch], "default": sl["default"]})
             out.setdefault(fn, {})[side] = rows
     return out
 
