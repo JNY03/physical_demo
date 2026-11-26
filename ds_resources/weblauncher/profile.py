@@ -5,7 +5,9 @@
     {"sources": [...], "robotCam": 1, "vision": false, "orchestrate": true, "models": ["yoloe"],
      "slice": false, "sliceU": "", "targets": null | [...], "direct": [{"name", "size", "colour"}],
      "distance": true, "cueMode": {대상: "default"|"custom"}, "cues": {대상: [근거 키]},
-     "overlay": {모델: {바꾼 항목만}}, "features": {기능: 참/거짓}}
+     "overlay": {모델: {바꾼 항목만}}, "features": {기능: 참/거짓},
+     "assign": {기기: [모델...]},                      # 모델 매칭 탭 — 적지 않은 기기는 고른 모델 전부 (2026-11-26)
+     "manual": false, "manualPlace": {작업: 노드}}     # 수동 배치 탭 — 자동이면 false
 
 targets 가 null 이면 「대상을 건드리지 않음」 — 프로필에 대상을 넣지 않고 yaml 기본값을 쓴다(런처 TargetsTouched).
 build_profile 은 tools/launcher/launcher.ps1 의 Build-Profile 을 한 줄씩 옮긴 것이다(profile_version 만 뺀다 —
@@ -32,7 +34,8 @@ def default_ui(cat):
     """처음 여는 화면 — 런처의 '마지막 선택' 기본값과 같다"""
     return {"sources": list(SOURCES), "robotCam": 1, "vision": False, "models": ["yoloe"], "orchestrate": True,
             "slice": False, "sliceU": "", "targets": None, "direct": [], "distance": bool(cat.get("distance_default", True)),
-            "cueMode": {}, "cues": {}, "overlay": {}, "features": {}}
+            "cueMode": {}, "cues": {}, "overlay": {}, "features": {},
+            "assign": {}, "manual": False, "manualPlace": {}}
 
 
 def normalize_ui(ui, cat):
@@ -40,9 +43,14 @@ def normalize_ui(ui, cat):
     for k, v in (ui or {}).items():
         if v is not None or k == "targets":
             out[k] = copy.deepcopy(v)
-    for k in ("cueMode", "cues", "overlay", "features"):
+    for k in ("cueMode", "cues", "overlay", "features", "assign", "manualPlace"):
         if not isinstance(out.get(k), dict):
             out[k] = {}
+    out["manual"] = bool(out.get("manual"))
+    # 모델 매칭은 「그 기기에 올릴 모델 목록」 — 글자 하나를 적었으면 목록으로 고친다(화면이 잘못 보내도 받는다)
+    out["assign"] = {str(s): ([ms] if isinstance(ms, str) else [str(m) for m in (ms or [])])
+                     for s, ms in out["assign"].items()}
+    out["manualPlace"] = {str(k): str(v) for k, v in out["manualPlace"].items() if str(v or "").strip()}
     if not isinstance(out.get("direct"), list):
         out["direct"] = []
     out["direct"] = [{"name": str(d.get("name") or ""), "size": str(d.get("size") or ""), "colour": str(d.get("colour") or "")}
@@ -57,10 +65,13 @@ def ui_from_desired(d, cat):
     ui = default_ui(cat)
     if d.get("version"):
         s, sl, v = d.get("server") or {}, d.get("slice") or {}, d.get("vision") or {}
+        man = v.get("manual") or {}
         ui.update(sources=list(s.get("sources") or []), robotCam=int(s.get("robot_cam") or 1),
                   slice=bool(sl.get("enabled")), sliceU="" if sl.get("u") in (None, "") else str(sl.get("u")),
                   vision=bool(v.get("enabled")), orchestrate=bool(v.get("orchestrate", True)),
-                  models=list(v.get("models") or []))
+                  models=list(v.get("models") or []),
+                  assign={k: list(x) for k, x in (v.get("assign") or {}).items()},
+                  manual=bool(man.get("enabled")), manualPlace=dict(man.get("place") or {}))
     return ui
 
 
@@ -214,6 +225,12 @@ def validate_ui(ui, cat):
     bad = [s for s in ui.get("sources") or [] if s not in SOURCES]
     if bad:
         errs.append("모르는 소스: %s" % ", ".join(bad))
+    if ui.get("vision"):
+        srcs, a, chosen = vision_source_list(ui), assign_map(ui, cat), chosen_models(ui, cat)
+        if srcs and chosen and not [s for s in srcs if a.get(s, chosen)]:
+            errs.append("모델 매칭에서 모든 기기를 비웠습니다 — 하나 이상은 모델을 맞추세요.")
+        if ui.get("manual") and not ui.get("orchestrate"):
+            errs.append("수동 배치는 자원 배분을 켠 채로 씁니다.")
     return errs
 
 
@@ -234,6 +251,27 @@ def _int_or(v):
         return v
 
 
+def vision_source_list(ui):
+    """비전이 볼 소스 — desired.vision_sources 와 같은 규칙(서버 소스 + 슬라이스)"""
+    on = set(ui.get("sources") or [])
+    return [s for s in SOURCES if s in on] + sorted(on - set(SOURCES)) + (["cam360_slice"] if ui.get("slice") else [])
+
+
+def assign_map(ui, cat):
+    """모델 매칭 탭 → {기기: [모델...]}. **기본값(고른 모델 전부)은 적지 않는다** — 적어 두면 소스를 켜고 끌 때마다
+    구성 요소 열쇠가 바뀌어 비전이 괜히 다시 뜬다. 지금 꺼진 기기 · 안 고른 모델은 버린다."""
+    chosen = chosen_models(ui, cat)
+    srcs = set(vision_source_list(ui))
+    out = {}
+    for s, ms in sorted((ui.get("assign") or {}).items()):
+        if s not in srcs:
+            continue
+        keep = [m for m in chosen if m in set(ms)]
+        if keep != chosen:                            # 전부와 같으면 기본값이다 — 적지 않는다
+            out[s] = keep
+    return out
+
+
 def to_desired(ui, running, cat, prev=None):
     """화면 상태 → 원하는 상태 문서(version 은 desired.write 가 단다). prev 의 vision.max_fps 는 이어받는다."""
     ui = normalize_ui(ui, cat)
@@ -245,5 +283,8 @@ def to_desired(ui, running, cat, prev=None):
             "slice": {"enabled": bool(ui.get("slice")), "u": _slice_u(ui.get("sliceU")), "v": SLICE_V},
             "vision": {"enabled": bool(ui.get("vision")), "orchestrate": bool(ui.get("orchestrate")),
                        "models": chosen_models(ui, cat), "profile": build_profile(ui, cat),
-                       "max_fps": copy.deepcopy(((prev.get("vision") or {}).get("max_fps")) or {})},
+                       "max_fps": copy.deepcopy(((prev.get("vision") or {}).get("max_fps")) or {}),
+                       "assign": assign_map(ui, cat),
+                       "manual": {"enabled": bool(ui.get("manual")),
+                                  "place": {k: v for k, v in sorted((ui.get("manualPlace") or {}).items()) if v}}},
             "ui": ui}

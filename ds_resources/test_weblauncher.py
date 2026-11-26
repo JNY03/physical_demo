@@ -371,3 +371,54 @@ def test_host_check_rejects_other_names_and_allows_env(srv, monkeypatch):
     assert with_host("wsl.tail1234.ts.net:%s" % port)[0] == 200
     assert with_host("evil.example")[0] == 200
     assert with_host("other.example")[0] == 403
+
+
+# ------------------------------------------------------------ 모델 매칭 · 수동 배치 (2026-11-26)
+def test_assign_map_drops_the_default_and_keeps_an_empty_device():
+    """기본값(고른 모델 전부)은 적지 않는다 — 적어 두면 소스를 켜고 끌 때마다 비전이 괜히 다시 뜬다"""
+    u = ui(models=["yoloe", "river"], sources=["pi13", "a2"],
+           assign={"pi13": ["yoloe", "river"], "a2": ["yoloe"], "pi11": ["yoloe"]})
+    m = pf.assign_map(u, CAT)
+    assert m == {"a2": ["yoloe"]}                                  # pi13 은 전부(기본값) · pi11 은 꺼진 소스
+    u2 = ui(models=["yoloe"], sources=["pi13", "a2"], assign={"a2": []})
+    assert pf.assign_map(u2, CAT) == {"a2": []}                    # 비워 둔 기기는 남는다 (비전 없음)
+
+
+def test_to_desired_carries_match_and_manual():
+    u = ui(models=["yoloe"], sources=["pi13", "a2"], assign={"a2": []},
+           manual=True, manualPlace={"object_detect.device": "pi1", "x": ""})
+    d = pf.to_desired(u, True, CAT)
+    assert d["vision"]["assign"] == {"a2": []}
+    assert d["vision"]["manual"] == {"enabled": True, "place": {"object_detect.device": "pi1"}}
+    # 비워 둔 자리("x")는 화면 상태를 다듬을 때 사라진다 — 「자동」과 같은 뜻이라 적을 것이 없다
+    assert pf.ui_from_desired(d, CAT)["manualPlace"] == {"object_detect.device": "pi1"}
+
+
+def test_manual_needs_orchestration_and_all_devices_cannot_be_empty():
+    assert any("자원 배분" in e for e in pf.validate_ui(ui(manual=True, orchestrate=False), CAT))
+    assert any("모든 기기를 비웠" in e
+               for e in pf.validate_ui(ui(sources=["pi13"], models=["yoloe"], assign={"pi13": []}), CAT))
+
+
+def test_plan_passes_match_and_manual_to_the_planner(srv):
+    """배치 보기는 실행과 같은 계산이어야 한다 — 매칭 · 수동 자리를 그대로 넘긴다"""
+    seen = []
+    srv["app"].planner = lambda s, m, p, a=None, mp=None: (seen.append((s, m, a, mp)) or ("ok", {"mode": "local"}))
+    code, body = call(srv["base"], "POST", "/api/plan",
+                      {"ui": ui(sources=["pi13", "a2"], models=["yoloe"], assign={"a2": []},
+                                manual=True, manualPlace={"object_detect.device": "pi1"})})
+    assert code == 200 and body["assign"] == {"a2": []} and body["manual"] == {"object_detect.device": "pi1"}
+    assert seen[0][2] == {"a2": []} and seen[0][3] == {"object_detect.device": "pi1"}
+
+
+def test_places_endpoint_serves_nodes_and_units(srv):
+    srv["app"].places_fn = lambda: {"ok": True, "why": "", "mode": "k3s",
+                                    "nodes": [{"name": "pi1", "role": "robot", "ready": True, "stale": False,
+                                               "limited": True, "caps": {}, "thermal": {}}],
+                                    "units": [{"unit": "grasp.device", "pin": "device", "roles": ["robot"],
+                                               "pattern": "split", "criticality": "mission", "must_device": True}]}
+    code, body = call(srv["base"], "GET", "/api/places")
+    assert code == 200 and body["nodes"][0]["name"] == "pi1" and body["units"][0]["unit"] == "grasp.device"
+    srv["app"].places_fn = None
+    code, body = call(srv["base"], "GET", "/api/places")
+    assert code == 503 and body["errors"]

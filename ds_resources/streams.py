@@ -65,6 +65,9 @@ REASON_CODES = {
     "thermal_guard": "노드가 뜨겁거나 throttle 중이라 뺌",
     "deadline_miss": "전송 + 처리 시간이 작업 마감을 넘음",
     "pair_incomplete": "한 기능의 두 단계(기기 · 서버) 중 한쪽을 놓을 수 없어 기능을 거절",
+    "preempted": "우선순위가 높은 일에 자리를 내주려 뺌 (한도 면제로 들어온 일이 노드를 넘치게 했다)",
+    "manual_unavailable": "수동 배치로 고른 노드가 지금 없거나 그 작업을 받을 수 없음",
+    "manual_excluded": "수동 배치에서 올리지 않기로 고름",
 }
 MODES = ("k3s", "local")
 BASES = ("live", "saved")

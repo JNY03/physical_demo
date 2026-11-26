@@ -9,6 +9,7 @@ let running = false;
 let timer = null;
 let lastError = "";      // 저장 실패 이유 (상태 줄 앞에)
 let profileNote = "";    // 비전이 거절할 프로필이면 그 이유
+let places = null;       // /api/places — 수동 배치가 고를 노드 · 작업 (탭을 열 때 한 번)
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, kids = []) => {
@@ -109,7 +110,7 @@ function renderStream() {
     const dot = el("span", { class: "dot", id: "dot-" + n });
     src.append(check(n, ui.sources.includes(n), (on) => {
       ui.sources = cat.sources.filter((x) => (x === n ? on : ui.sources.includes(x)));
-      changed();
+      renderMatch(); changed();
     }, { node: el("span", {}, [n, " ", dot]) }));
   }
   const cam = $("robotCam"); cam.replaceChildren();
@@ -124,7 +125,7 @@ function renderStream() {
   for (const m of modelKeys()) {
     ms.append(check(shown(m), ui.models.includes(m), (on) => {
       ui.models = modelKeys().filter((x) => (x === m ? on : ui.models.includes(x)));
-      renderOverlay(); changed();
+      renderOverlay(); renderMatch(); changed();
     }, { title: optionTip(m), cls: "model" }));
   }
   const fs = $("features"); fs.replaceChildren();
@@ -247,6 +248,91 @@ function renderOverlay() {
   }
 }
 
+// ---------------------------------------------------------------- 모델 매칭 (기기마다 올릴 모델)
+// 적지 않은 기기는 고른 모델 전부다 — profile.py assign_map 과 같은 규칙. 한 기기를 다 비우면 「비전 없음」이다.
+const visionSources = () => cat.sources.filter((s) => ui.sources.includes(s)).concat(ui.slice ? ["cam360_slice"] : []);
+const assignFor = (s) => (Array.isArray(ui.assign[s]) ? chosenModels().filter((m) => ui.assign[s].includes(m))
+                                                      : chosenModels());
+function setAssign(s, m, on) {
+  const now = assignFor(s);
+  ui.assign[s] = chosenModels().filter((x) => (x === m ? on : now.includes(x)));
+  renderMatch(); changed();
+}
+function renderMatch() {
+  const box = $("match"); box.replaceChildren();
+  const srcs = visionSources(), models = chosenModels();
+  $("matchNote").textContent = !ui.vision ? "비전을 켜면 고를 수 있습니다."
+    : !models.length ? "스트림 탭에서 모델을 먼저 고르세요."
+    : !srcs.length ? "스트림 탭에서 소스를 먼저 고르세요."
+    : "적지 않은 기기는 고른 모델 전부를 올립니다. 모두 끄면 그 기기에는 비전을 올리지 않습니다 " +
+      "(모델 조합이 같은 기기끼리 한 프로세스로 묶입니다).";
+  if (!ui.vision || !models.length || !srcs.length) return;
+  const head = el("tr", {}, [el("th", { text: "기기" })].concat(models.map((m) => el("th", { text: shown(m) })))
+                             .concat([el("th", { text: "" })]));
+  const tbl = el("table", { class: "match" }, [head]);
+  for (const s of srcs) {
+    const on = assignFor(s);
+    const cells = models.map((m) => el("td", {}, [check("", on.includes(m), (v) => setAssign(s, m, v))]));
+    tbl.append(el("tr", {}, [el("td", { text: s })].concat(cells)
+                            .concat([el("td", { class: on.length ? "muted" : "err", text: on.length ? "" : "비전 없음" })])));
+  }
+  box.append(tbl);
+}
+
+// ---------------------------------------------------------------- 수동 배치 (작업마다 노드를 사람이 고른다)
+// 자동이면 배치 계산기가 고른다. 수동으로 고른 자리는 **한도를 면제**하지만 하드웨어 조건(센서 · 가속기 · arch)은 지킨다.
+function nodeChoices(u) {
+  if (!places) return [];
+  return places.nodes.filter((n) => {
+    if (u.pin === "device" && !n.limited) return false;        // 기기 안에서만 도는 단계
+    if (u.pin === "server" && n.limited) return false;         // 서버에서만 도는 단계
+    return !u.roles.length || u.roles.includes(n.role);
+  });
+}
+function renderManual() {
+  $("manualTable").replaceChildren();
+  $("nodes").replaceChildren();
+  $("manual").checked = !!ui.manual;
+  const note = $("manualNote");
+  if (!places) { note.textContent = "「노드 · 작업 다시 읽기」로 지금 쓸 수 있는 자리를 읽습니다."; return; }
+  note.textContent = (places.mode === "k3s" ? "k3s" : "로컬 전용") + (places.why ? " — " + places.why : "");
+  const nt = el("table", {}, [el("tr", {}, ["노드", "역할", "상태", "한도", "arch · 센서 · 가속기"].map((x) => el("th", { text: x })))]);
+  for (const n of places.nodes) {
+    const c = n.caps || {};
+    nt.append(el("tr", {}, [n.name, n.role || "", n.ready && !n.stale ? "쓸 수 있음" : (n.stale ? "stale" : "안 됨"),
+                            n.limited ? "있음 (온디바이스)" : "없음 (서버)",
+                            [c.arch || "?", (c.sensors || []).join(" ") || "?", c.accel || "?"].join(" · ")]
+                           .map((x) => el("td", { text: String(x) }))));
+  }
+  $("nodes").append(nt);
+  const tbl = el("table", {}, [el("tr", {}, ["작업", "패턴 · 중요도", "둘 수 있는 곳", "자리"].map((x) => el("th", { text: x })))]);
+  for (const u of places.units) {
+    const sel = el("select", {});
+    sel.disabled = !ui.manual;
+    sel.append(el("option", { value: "", text: "자동" }));
+    for (const n of nodeChoices(u)) sel.append(el("option", { value: n.name, text: n.name + (n.limited ? "" : " (서버)") }));
+    sel.append(el("option", { value: "none", text: "올리지 않음" }));
+    sel.value = ui.manualPlace[u.unit] || "";
+    sel.addEventListener("change", () => {
+      if (sel.value) ui.manualPlace[u.unit] = sel.value; else delete ui.manualPlace[u.unit];
+      changed();
+    });
+    const where = (u.pin === "none" ? (u.roles.join(" · ") || "아무 곳") : "pin " + u.pin)
+                  + (u.must_device ? " · 한도 면제" : "");
+    tbl.append(el("tr", { title: u.note || "" }, [el("td", { text: u.unit }),
+      el("td", { text: u.pattern + " · " + u.criticality }), el("td", { text: where }), el("td", {}, [sel])]));
+  }
+  $("manualTable").append(tbl);
+}
+async function loadPlaces(force) {
+  if (places && !force) return;
+  $("manualNote").textContent = "노드 · 작업을 읽는 중";
+  const r = await api("GET", "/api/places");
+  places = r.ok ? r.body : null;
+  if (!r.ok) $("manualNote").textContent = (r.body.errors || ["읽지 못했습니다."]).join(" / ");
+  renderManual();
+}
+
 function syncEnabled() {
   const vis = !!ui.vision;
   const tOn = vis && ui.models.includes("targeted");
@@ -257,12 +343,18 @@ function syncEnabled() {
   $("features").querySelectorAll("input").forEach((b, i) => { b.disabled = !vis || !feats[i].available; });
   $("orchestrate").disabled = !vis;
   $("planBtn").disabled = !vis;
+  $("matchGroup").disabled = !vis;
+  $("manualGroup").disabled = !vis || ui.orchestrate === false;    // 수동 배치는 자원 배분을 켠 채로만
+  $("manual").disabled = !vis || ui.orchestrate === false;
+  $("manualTable").querySelectorAll("select").forEach((s) => { s.disabled = !ui.manual; });
   $("sliceU").disabled = !ui.slice;
   $("runBtn").hidden = running;
   $("stopBtn").hidden = !running;
 }
 
-function renderAll() { renderStream(); renderTargets(); renderCues(); renderOverlay(); syncEnabled(); }
+function renderAll() {
+  renderStream(); renderTargets(); renderCues(); renderOverlay(); renderMatch(); renderManual(); syncEnabled();
+}
 
 // ---------------------------------------------------------------- 저장 · 실행 · 끄기
 function changed() {
@@ -291,9 +383,9 @@ async function save(run, interactive = false) {
 $("runBtn").addEventListener("click", () => save(true, true));
 $("stopBtn").addEventListener("click", () => { if (confirm("데이터 스트림을 끕니다.")) save(false, true); });
 $("robotCam").addEventListener("change", (e) => { ui.robotCam = parseInt(e.target.value, 10); changed(); });
-$("slice").addEventListener("change", (e) => { ui.slice = e.target.checked; changed(); });
+$("slice").addEventListener("change", (e) => { ui.slice = e.target.checked; renderMatch(); changed(); });
 $("sliceU").addEventListener("change", (e) => { ui.sliceU = e.target.value.trim(); changed(); });
-$("vision").addEventListener("change", (e) => { ui.vision = e.target.checked; renderOverlay(); changed(); });
+$("vision").addEventListener("change", (e) => { ui.vision = e.target.checked; renderOverlay(); renderMatch(); changed(); });
 $("orchestrate").addEventListener("change", (e) => { ui.orchestrate = e.target.checked; changed(); });
 $("distance").addEventListener("change", (e) => { ui.distance = e.target.checked; touch(); renderCues(); renderOverlay(); changed(); });
 function addDirect() {
@@ -315,10 +407,19 @@ $("planBtn").addEventListener("click", async () => {
   $("planText").textContent = r.ok ? r.body.text : (r.body.errors || ["배치를 계산하지 못했습니다."]).join("\n");
   $("planJson").textContent = r.ok ? JSON.stringify(r.body.json, null, 1) : "";
 });
+$("matchReset").addEventListener("click", () => { ui.assign = {}; renderMatch(); changed(); });
+$("manualReload").addEventListener("click", () => loadPlaces(true));
+$("manual").addEventListener("change", (e) => {           // 수동으로 자리 고르기 켜기 · 끄기
+  ui.manual = e.target.checked;
+  if (ui.manual) loadPlaces(false);
+  renderManual(); syncEnabled(); changed();
+});
 for (const b of document.querySelectorAll(".tabs button")) {
   b.addEventListener("click", () => {
     for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("on", x === b);
     for (const t of document.querySelectorAll(".tab")) t.classList.toggle("on", t.id === "tab-" + b.dataset.tab);
+    if (b.dataset.tab === "manual") loadPlaces(false);
+    if (b.dataset.tab === "match") renderMatch();
   });
 }
 

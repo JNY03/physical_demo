@@ -400,6 +400,9 @@ class K3sNodeSource:
         for r in rows:
             n = {k: r[k] for k in ("name", "role", "ready", "stale", "cpu_alloc_m", "mem_alloc_mb", "cpu_now_m",
                                    "mem_now_mb")}
+            # 그 노드가 맡은 기기 이름 (ds.source 라벨 — cluster_up.sh 가 nodes.json 을 보고 붙인다).
+            # 사람이 「pi7」보다 「robot1」로 알아보므로 배치 화면이 이것으로 이름을 짓는다 (2026-11-26)
+            n["source"] = r["source_name"]
             mem = (self.mem.node(r["name"]) if self.mem is not None else None) or {}
             share = self.mem.service_share(r["name"]) if self.mem is not None else None
             if r["cpu_alloc_m"] and share:

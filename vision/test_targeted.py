@@ -5,6 +5,8 @@
 모델을 적재하지 않는다(CLIP 이 필요한 근거는 빼고 잰다) — 빠르게 도는 시험이다.
 """
 import copy
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -384,3 +386,158 @@ def test_track_evidence_gate_majority_ignores_single_failure():
     for g in (False, False, True):
         d = te2.update([_tedet(80.0, gate=g)])[0]
     assert d["assess"]["suspect"] is None and "aspect" in d["assess"]["gates_failed"]
+
+
+# ---------------------------------------------------------------- 사람이 넣는 단서 ① 글(프롬프트) (2026-11-26)
+def test_prompt_rejects_unusable_text():
+    """조용히 다듬지 않는다 — 왜 못 쓰는지 한 줄로 돌려준다(런처 상태 줄에 그대로 나간다)."""
+    for bad, why in (("", "비었"), ("  ", "비었"), ("ab", "짧"),
+                     ("노란 조끼를 입은 사람", "영어"),            # CLIP 글 인코더는 영어로 배웠다
+                     ("a box {with} braces", "쓸 수 없는 글자"),
+                     ("a vest person" * 20, "깁니다"),
+                     ("123 456", "낱말")):
+        with pytest.raises(cc.ProfileError, match=why):
+            cc.check_prompts(bad)
+    with pytest.raises(cc.ProfileError, match="개까지"):
+        cc.check_prompts(["a red box %d" % i for i in range(cc.PROMPT_MAX_COUNT + 1)])
+
+
+def test_prompt_normalises_and_dedupes():
+    got = cc.check_prompts(["  a person  in a\tyellow vest ", "a person in a yellow vest", "a yellow helmet"])
+    assert got == ["a person in a yellow vest", "a yellow helmet"]
+    assert cc.check_prompts("a red box") == ["a red box"]       # 글 하나도 받는다
+    assert cc.check_prompts(None) == []                         # 안 넣은 것은 오류가 아니다
+
+
+def test_prompt_turns_on_semantic_and_replaces_descriptions():
+    t = cc._direct_target("vest", {"prompt": "a person in a yellow safety vest"})
+    assert t["user_descriptions"] == ["a person in a yellow safety vest"]
+    assert t["descriptions"] == t["user_descriptions"]          # 사람이 적은 글이 자동 문장을 대신한다
+    assert t["_descriptions_default"][0].startswith("a photo of a vest")
+    assert t["cues"]["semantic"] == cc.CUES["semantic"]["role"]
+    # 자동 반대 문장이 사람이 적은 낱말과 부딪히면 그것만 뺀다 — 자기 자신과 다투지 않게
+    assert "a person" not in t["negatives"] and "a wall" in t["negatives"]
+    plain = cc._direct_target("vest", {})
+    assert "user_descriptions" not in plain and "a person" in plain["negatives"]
+
+
+def test_prompt_in_target_arg_and_profile():
+    s = cc.parse_target_arg("vest:prompt=a person in a yellow vest:colour=yellow")
+    assert s["prompt"] == ["a person in a yellow vest"] and s["colours"] == ["yellow"]
+    with pytest.raises(cc.ProfileError, match="영어"):
+        cc.parse_target_arg("vest:prompt=노란 조끼")
+    with pytest.raises(cc.ProfileError, match="모르는 칸"):
+        _resolve({"models": {"targeted": {"targets": [{"name": "vest", "prompts": "a vest"}]}}})
+    with pytest.raises(cc.ProfileError, match="글 단서"):       # 프로필의 틀린 글도 거절한다
+        _resolve({"models": {"targeted": {"targets": [{"name": "vest", "prompt": ""}]}}})
+
+
+@pytest.mark.skipif(not cc.have("yoloe_text", cc.model_files({})), reason="YOLOE 텍스트 가중치 없음")
+def test_profile_prompt_reaches_resolved_target():
+    r = _resolve({"models": {"targeted": {"targets": [
+        {"name": "door", "prompt": "a wooden door with a metal handle"}]}}})
+    t = r["targeted"]["targets"][0]
+    assert t["descriptions"] == ["a wooden door with a metal handle"]
+    assert t["cues"].get("semantic") or "semantic" in t["unavailable"]
+
+
+# ---------------------------------------------------------------- 사람이 넣는 단서 ② 기준 사진 (2026-11-26)
+def _ref_zip(tmp_path, n=3, junk=True):
+    """기준 사진 zip 하나 — 그림 아닌 것과 폴더 밖으로 나가려는 이름을 섞어 둔다."""
+    import zipfile
+    import cv2
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    z = tmp_path / "refs.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for i in range(n):
+            img = np.full((300, 400, 3), 20 + 30 * i, np.uint8)
+            img[50:200, 80:300] = (40, 200, 240)
+            f = src / ("ref%d.png" % i)
+            cv2.imwrite(str(f), img)
+            zf.write(f, "photos/ref%d.png" % i)
+        if junk:
+            zf.writestr("photos/notes.txt", b"not a photo")
+            zf.writestr("../evil.png", b"not a photo either")
+    return z
+
+
+NO_CLIP = {"models": {"targeted": {"files": {"clip": ["models/nope/vision_model_quantized.onnx"]}}}}
+
+
+def test_reference_zip_kept_even_when_weights_missing(tmp_path):
+    """가중치가 없어도 **사진은 남는다** — 뒤에 받으면 그때 만든다. 조용히 비우지 않고 왜 못 했는지 돌려준다."""
+    cc.save_direct_target("cone", target_dir=tmp_path)
+    out = cc.attach_reference_images("cone", [_ref_zip(tmp_path)], target_dir=tmp_path, cfg=NO_CLIP)
+    assert out["state"] == "pending" and "vision_model_quantized.onnx" in out["why"]
+    assert out["files"] == ["01.png", "02.png", "03.png"]       # 이름은 우리가 붙인다 (zip 이름을 믿지 않는다)
+    assert [a for a, _b in out["skipped"]] == ["photos/notes.txt", "evil.png"]
+    tf, ref_dir, npz = cc.ref_paths("cone", tmp_path)
+    assert sorted(p.name for p in ref_dir.glob("*")) == ["01.png", "02.png", "03.png"]
+    assert not npz.exists()
+    t = json.loads(tf.read_text(encoding="utf-8"))
+    assert t["reference_images"]["count"] == 3 and t["reference_images"]["state"] == "pending"
+    assert "ref_match" not in t["cues"]                         # 못 만든 근거는 켜지 않는다
+    # 가중치가 없는 기계에서도 상태는 읽힌다 — **없음(None)과 pending 은 다르다**
+    assert cc.ref_status("cone", tmp_path)["state"] == "pending"
+    cc.save_direct_target("plain", target_dir=tmp_path)
+    assert cc.ref_status("plain", tmp_path) is None
+
+
+_ENC = cc.ref_encoder_file({})
+
+
+@pytest.mark.skipif(not (_ENC and _ENC.exists()), reason="CLIP 비전 인코더 없음")
+def test_reference_zip_embeds_with_runtime_preprocess(tmp_path):
+    cc.save_direct_target("cone", target_dir=tmp_path)
+    out = cc.attach_reference_images("cone", [_ref_zip(tmp_path)], target_dir=tmp_path)
+    assert out["state"] == "ready" and out["why"] is None
+    tf, _d, npz = cc.ref_paths("cone", tmp_path)
+    z = np.load(npz)
+    emb = z["%s/cone" % cc.REF_ENCODER]
+    assert emb.shape == (3, 512) and emb.dtype == np.float32
+    assert abs(float(np.linalg.norm(emb[0])) - 1.0) < 1e-3     # L2 정규화 — 코사인으로 바로 견준다
+    t = json.loads(tf.read_text(encoding="utf-8"))
+    # 식이 붙은 뒤로 기본 역할은 score 다 (target_assess 가 기준 사진과의 닮은 정도를 %로 낸다)
+    assert t["cues"]["ref_match"] == "score" and t["reference_images"]["embeddings"] == npz.name
+    # 같은 사진을 다시 임베딩하면 같은 자리에 온다. 다만 **양자화 ONNX 는 묶음 크기에 따라 조금
+    # 달라진다** — 3장 묶음의 한 줄 대 1장은 코사인 0.990 (잰 값, _embed_refs 주석). 같은 묶음끼리는 1.000
+    one, _prov = cc._embed_refs([_d / "01.png"], _ENC)
+    again, _prov = cc._embed_refs([_d / "01.png"], _ENC)
+    assert float(one[0] @ again[0]) > 0.9999
+    assert 0.98 < float(one[0] @ emb[0]) < 1.0
+
+
+def test_reference_zip_without_images_is_rejected(tmp_path):
+    import zipfile
+    cc.save_direct_target("cone", target_dir=tmp_path)
+    z = tmp_path / "empty.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("readme.txt", b"no photos here")
+    with pytest.raises(cc.ProfileError, match="하나도 못 읽"):
+        cc.attach_reference_images("cone", [z], target_dir=tmp_path, cfg=NO_CLIP)
+    with pytest.raises(cc.ProfileError, match="등록된 대상이 아님"):
+        cc.attach_reference_images("ghost", [z], target_dir=tmp_path, cfg=NO_CLIP)
+    with pytest.raises(cc.ProfileError, match="못 찾음"):
+        cc.attach_reference_images("cone", [tmp_path / "nothing.zip"], target_dir=tmp_path, cfg=NO_CLIP)
+
+
+def test_reference_rebuild_after_weights_arrive(tmp_path):
+    """사진만 보관해 둔 대상 — 가중치가 생기면 `--build-refs` 가 그때 만든다."""
+    cc.save_direct_target("cone", target_dir=tmp_path)
+    cc.attach_reference_images("cone", [_ref_zip(tmp_path, junk=False)], target_dir=tmp_path, cfg=NO_CLIP)
+    again = cc.build_ref_embeddings("cone", tmp_path, NO_CLIP)
+    assert again["state"] == "pending" and again["images"] == 3
+    cc.save_direct_target("plain", target_dir=tmp_path)
+    with pytest.raises(cc.ProfileError, match="보관된 기준 사진이 없"):
+        cc.build_ref_embeddings("plain", tmp_path, NO_CLIP)
+
+
+def test_catalog_carries_prompt_guide_for_launcher():
+    cat = cc.catalog(CFG)
+    g = cat["prompt_guide"]
+    assert 2 <= len(g["lines"]) <= 5 and g["good"] and g["bad"]
+    assert g["limits"]["max_chars"] == cc.PROMPT_MAX_CHARS
+    assert cat["ref_images"]["max_images"] == cc.REF_MAX_IMAGES and cat["ref_images"]["guide"]
+    for t in cat["targets"]:
+        assert t["prompt"] == [] and t["refs"] is None          # 등록 대상에는 아직 사람이 넣은 것이 없다

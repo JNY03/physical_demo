@@ -52,13 +52,14 @@ VERDICTS = ("ok", "degraded", "rejected")
 PRIORITY_CLASSES = {"safety": "ds-safety-high", "mission": "ds-mission", "best_effort": "ds-vision-low"}
 
 #: 기능 칸 — 칸 추가만 한다. 기존 칸의 이름 · 뜻은 바꾸지 않는다
-FUNCTION_KEYS = ("pattern", "criticality", "trigger", "note", "forbid", "stages")
+FUNCTION_KEYS = ("pattern", "criticality", "trigger", "note", "forbid", "stages", "options")
 FUNCTION_REQUIRED = ("pattern", "criticality", "trigger", "note", "stages")
 NEEDS_KEYS = ("arch", "sensors", "accel", "cores")
 #: 자원 칸 — cpu_tasks 와 같은 이름 · 같은 뜻
 RESOURCE_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms", "roles", "placement",
                  "image", "command", "local_command", "env")
-STAGE_KEYS = ("pin", "needs", "deadline_ms", "egress_kb", "state", "optional", "note") + RESOURCE_KEYS
+STAGE_KEYS = ("pin", "needs", "deadline_ms", "egress_kb", "state", "optional", "note",
+              "per_source") + RESOURCE_KEYS
 #: 수로 적는 자원 칸 (없으면 null)
 NUMERIC_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms")
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -149,6 +150,10 @@ def _stage(fn, side, body, what):
           "egress_kb": _opt_num(body, "egress_kb", what),
           "state": _one(body.get("state", "stateless"), STATES, what + ".state"),
           "optional": _bool(body.get("optional", False), what + ".optional"),
+          # 소스(카메라)마다 하나인 단계인가. 적지 않으면 **카메라를 요구하는 기기 단계**가 그렇다 —
+          # 영상 한 줄기마다 그 기기에서 도는 일이 따로 있기 때문이다. SLAM 처럼 기기에 하나뿐인 일은 false 로 적는다
+          "per_source": (None if body.get("per_source") is None
+                         else _bool(body["per_source"], what + ".per_source")),
           "note": str(body.get("note") or ""),
           "roles": sorted(_subset(body.get("roles"), ROLES, what + ".roles")),
           "placement": _one(body.get("placement", "any"), PLACEMENTS, what + ".placement"),
@@ -168,7 +173,7 @@ def _rules(what, fn):
     p, st = fn["pattern"], fn["stages"]
     if p in ("cascade", "split") and set(st) != set(SIDES):
         raise ValueError("%s 는 %s 라서 기기 · 서버 단계가 모두 있어야 한다 (있는 것: %s)"
-                         % (what, p, " · ".join(sorted(st)) or "없음"))
+                         % (what, p, ", ".join(sorted(st)) or "없음"))
     if p == "cascade" and not st["device"]["optional"]:
         raise ValueError("%s 는 cascade 라서 기기 단계가 optional: true 여야 한다 (없으면 품질만 낮춘다)" % what)
     if p == "split" and any(s["optional"] for s in st.values()):
@@ -208,6 +213,9 @@ def _function(name, body):
           "trigger": _one(body["trigger"], TRIGGERS, what + ".trigger"),
           "note": str(body["note"]),
           "forbid": sorted(_subset(body.get("forbid"), SIDES, what + ".forbid")),
+          # 그 기능이 쓸 수 있는 비전 선택지(모델) — 런처가 「기능 → 모델」로 고르게 한다. 없으면 모델 없이 도는 기능이다
+          # (추적처럼 트래커가 ultralytics 안에 있는 것). 이름은 레지스트리 options 의 열쇠다
+          "options": [str(x) for x in (body.get("options") or [])],
           "legacy": False,
           "stages": {}}
     fn["priority_class"] = PRIORITY_CLASSES[fn["criticality"]]
@@ -217,7 +225,7 @@ def _function(name, body):
             fn["stages"][side] = _stage(name, side, stages[side], "%s.stages.%s" % (what, side))
     for side in fn["forbid"]:
         if side in fn["stages"]:
-            raise ValueError("%s 는 %s 단계를 두면 안 된다 (forbid: %s)" % (what, side, " · ".join(fn["forbid"])))
+            raise ValueError("%s 는 %s 단계를 두면 안 된다 (forbid: %s)" % (what, side, ", ".join(fn["forbid"])))
     _rules(what, fn)
     for s in fn["stages"].values():                 # 단계가 혼자서도 읽히게 — 배치 쪽은 단계만 들고 간다
         s.update({"pattern": fn["pattern"], "criticality": fn["criticality"], "trigger": fn["trigger"],
@@ -231,7 +239,7 @@ def _from_cpu_task(name, body):
     stage = _stage(name, "device", body, what)
     stage["unit"] = name
     fn = {"function": name, "pattern": "device_only", "criticality": "best_effort", "trigger": "on_request",
-          "note": stage["note"] or ("%s — 옛 cpu_tasks 작업" % name), "forbid": [], "legacy": True,
+          "note": stage["note"] or ("%s — 옛 cpu_tasks 작업" % name), "forbid": [], "options": [], "legacy": True,
           "priority_class": PRIORITY_CLASSES["best_effort"], "stages": {"device": stage}}
     _rules(what, fn)
     stage.update({"pattern": fn["pattern"], "criticality": fn["criticality"], "trigger": fn["trigger"],
@@ -266,23 +274,53 @@ def load(src=None):
 
 
 # ---------------------------------------------------------------- 펼치기 · 판정
-def expand(funcs, names=None):
+def expand(funcs, names=None, sources=None):
     """기능 이름들 → (배치_단계들, 상주들, 그밖).
 
     배치_단계들  device_only · cascade · split · server_only 의 단계 — 오케스트레이터가 놓는 것
     상주들       resident 의 단계 — 놓는 게 아니라 있는지 보고 없으면 알린다
     그밖         config · pipeline 의 단계 — 같다 (값을 만들어 두거나 받아서 적용하는 흐름)
-    세 목록 모두 같은 모양의 단계 사전이고 기능 이름순 · 기기 → 서버 순이다. 모르는 이름은 ValueError"""
-    picked = sorted(funcs) if names is None else sorted(set(names))
+    세 목록 모두 같은 모양의 단계 사전이고 기능 이름순 · 기기 → 서버 순이다. 모르는 이름은 ValueError
+
+    sources (2026-11-26)
+      소스 이름들을 주면 **기기 단계를 소스마다 하나씩** 만든다 — unit 은 `<기능>.device@<소스>` 이고
+      단계에 `source` 가 붙는다. 카메라마다 그 기기에서 돌 일이 따로 있기 때문이다(카메라 3대면 셋).
+      **서버 단계는 기능마다 하나다** — 여러 소스를 모아 보는 몫이라 소스 수만큼 늘지 않는다.
+      names 가 사전({소스: [기능...]})이면 소스마다 고른 기능이 다른 것으로 본다."""
+    per_source = None
+    if isinstance(names, dict):
+        per_source = {s: sorted(set(v or ())) for s, v in names.items()}
+        picked = sorted({n for v in per_source.values() for n in v})
+        sources = sorted(per_source)
+    else:
+        picked = sorted(funcs) if names is None else sorted(set(names))
+    srcs = sorted(set(sources or ()))
     placeable, residents, others = [], [], []
     for n in picked:
         if n not in funcs:
             raise ValueError("모르는 기능 %r (가능: %s)" % (n, ", ".join(sorted(funcs))))
         fn = funcs[n]
         bucket = placeable if fn["pattern"] in PLACEABLE else (residents if fn["pattern"] in RESIDENT else others)
+        mine = [s for s in srcs if per_source is None or n in per_source.get(s, ())] if srcs else []
         for side in SIDES:
-            if side in fn["stages"]:
-                bucket.append(dict(fn["stages"][side]))
+            if side not in fn["stages"]:
+                continue
+            st = fn["stages"][side]
+            # 소스마다 늘릴 것은 **그 카메라 영상을 보는 단계**뿐이다 — 모터 제어 · SLAM 처럼 기기 하나에
+            # 하나인 일을 카메라 수만큼 늘리면 거짓이다 (needs.sensors 에 camera 가 있는 단계만 늘린다)
+            per_src = st.get("per_source")
+            if per_src is None:
+                per_src = "camera" in ((st.get("needs") or {}).get("sensors") or ())
+            if side == "device" and mine and per_src:
+                for s in mine:                         # 소스마다 하나 — 그 카메라에서 도는 몫이다
+                    one = dict(st)
+                    one["source"] = s
+                    one["unit"] = "%s@%s" % (st["unit"], s)
+                    bucket.append(one)
+            elif side == "device" and per_src and srcs and per_source is not None and not mine:
+                continue                               # 그 기능을 고른 소스가 없다 — 기기 단계도 없다
+            else:
+                bucket.append(dict(st))
     return placeable, residents, others
 
 
@@ -292,6 +330,15 @@ def _pair_key(x):
     if isinstance(x, (tuple, list)) and len(x) == 2:
         return str(x[0]), str(x[1])
     raise ValueError("놓인 단계는 (기능, 단계) 쌍이나 단계 사전이어야 한다 (받은 것: %r)" % (x,))
+
+
+def _unit_key(x):
+    """놓인 것의 unit 이름 — 문자열이면 그대로, 단계 사전이면 그 unit. (기능, 단계) 쌍이면 None (쌍으로만 본다)"""
+    if isinstance(x, dict):
+        return x.get("unit")
+    if isinstance(x, (tuple, list)):
+        return None
+    return str(x)
 
 
 def pairs(stages, placed=None):
@@ -304,28 +351,56 @@ def pairs(stages, placed=None):
     규칙은 하나다: 없는 단계가 optional 이면 degraded(품질만 낮춘다), 아니면 rejected(기능 거절).
     그래서 cascade 는 기기 단계가 빠져도 degraded 고(기기 단계는 optional 이다 — load 가 확인한다),
     split 은 어느 쪽이 빠져도 rejected 다(어느 단계도 optional 일 수 없다)."""
-    have = None if placed is None else {_pair_key(x) for x in placed}
+    # 놓인 것은 unit 이름으로 본다 — 기기 단계가 소스마다 여럿이면 쌍(기능, 단계)만으로는 가릴 수 없다.
+    # 옛 호출(쌍)도 받는다: 그 쌍의 단계는 모두 놓였다고 본다
+    units = coarse = None
+    declared = {st["unit"] for st in stages}
+    if placed is not None:
+        units = {u for u in (_unit_key(x) for x in placed) if u}
+        coarse = {_pair_key(x) for x in placed if isinstance(x, (tuple, list)) and len(x) == 2}
+        # 선언에 없는 이름은 거부한다 — 「reid」처럼 단계를 안 적은 것이 조용히 「안 놓임」이 되지 않게
+        unknown = sorted(u for u in units if u not in declared)
+        if unknown:
+            raise ValueError("놓인 단계 %s 를 모른다 (선언된 것: %s)"
+                             % (", ".join(unknown), ", ".join(sorted(declared))))
     out = {}
     for st in stages:
         g = out.setdefault(st["function"], {"pattern": st.get("pattern"), "criticality": st.get("criticality"),
-                                            "placed": [], "missing": [], "missing_optional": []})
-        if have is None or (st["function"], st["stage"]) in have:
-            g["placed"].append(st["stage"])
+                                            "placed": [], "missing": [], "missing_optional": [],
+                                            "sources": [], "sources_missing": []})
+        ok = placed is None or st["unit"] in units or (coarse and (st["function"], st["stage"]) in coarse)
+        src = st.get("source")
+        if src and src not in g["sources"]:
+            g["sources"].append(src)
+        if ok:
+            if st["stage"] not in g["placed"]:
+                g["placed"].append(st["stage"])
         else:
-            g["missing"].append(st["stage"])
-            if st["optional"]:
+            if src:
+                g["sources_missing"].append("%s(%s)" % (src, st["stage"]))
+            if st["stage"] not in g["missing"]:
+                g["missing"].append(st["stage"])
+            if st["optional"] and st["stage"] not in g["missing_optional"]:
                 g["missing_optional"].append(st["stage"])
     for g in out.values():
+        both = [s for s in g["missing"] if s in g["placed"]]      # 어떤 소스는 놓이고 어떤 소스는 빠졌다
+        for s in both:
+            g["missing"].remove(s)
+            if s in g["missing_optional"]:
+                g["missing_optional"].remove(s)
         need = [s for s in g["missing"] if s not in g["missing_optional"]]
         if not g["placed"]:
             g["verdict"] = "rejected"
             g["reason"] = "놓인 단계가 없음 — 기능 거절 (%s)" % g["pattern"]
         elif need:
             g["verdict"] = "rejected"
-            g["reason"] = "%s 단계가 없음 — 필수 단계라 기능 거절 (%s)" % (" · ".join(need), g["pattern"])
+            g["reason"] = "%s 단계가 없음 — 필수 단계라 기능 거절 (%s)" % (", ".join(need), g["pattern"])
         elif g["missing"]:
             g["verdict"] = "degraded"
-            g["reason"] = "%s 단계가 없음 — optional 이라 품질만 낮춤 (%s)" % (" · ".join(g["missing"]), g["pattern"])
+            g["reason"] = "%s 단계가 없음 — optional 이라 품질만 낮춤 (%s)" % (", ".join(g["missing"]), g["pattern"])
+        elif g["sources_missing"]:
+            g["verdict"] = "degraded"
+            g["reason"] = "일부 소스에서 빠짐: %s (%s)" % (", ".join(sorted(g["sources_missing"])), g["pattern"])
         else:
             g["verdict"] = "ok"
             g["reason"] = "선언한 단계가 모두 놓임 (%s)" % g["pattern"]

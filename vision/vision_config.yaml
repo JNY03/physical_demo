@@ -649,6 +649,11 @@ models:
       hysteresis: 5
       max_missed: 15
     # files: {...}                # 모델 파일 자리를 바꿀 때만 (cue_catalog.DEFAULT_FILES)
+    # 사람이 직접 넣는 단서는 **여기에 적지 않는다** — 대상마다 다르므로 대상 파일에 있다
+    # (vision/assets/targets/<이름>.json). 글(프롬프트)은 `user_descriptions`, 기준 사진은
+    # `reference_images` 와 그 옆의 `<이름>.refs/` · `<이름>.refs.npz` 다. 넣는 길 · 한계 ·
+    # 적는 법은 cue_catalog.py 머리말과 `python vision/cue_catalog.py --json` 의
+    # prompt_guide · ref_images 에 있다 (런처가 그것을 그대로 띄운다)
 
   unidepth:
     repo_path: external/UniDepth

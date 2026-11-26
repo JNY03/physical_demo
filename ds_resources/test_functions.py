@@ -340,3 +340,47 @@ def test_as_cpu_task_refuses_a_stage_without_resources():
     stages = F.expand(F.load(r), ["demo"])[2]
     with pytest.raises(ValueError):
         F.as_cpu_task(stages[0])
+
+
+# ---------------------------------------------------------------- 소스별 기능 (2026-11-26)
+def test_camera_stages_are_made_per_source():
+    """카메라를 보는 기기 단계는 소스마다 하나다 — 카메라 3대면 셋. 서버 단계는 기능마다 하나"""
+    f = F.load()
+    st, _res, _oth = F.expand(f, ["object_detect"], sources=["pi12", "a2"])
+    units = sorted(s["unit"] for s in st)
+    assert units == ["object_detect.device@a2", "object_detect.device@pi12", "object_detect.server"]
+    assert {s["unit"]: s.get("source") for s in st}["object_detect.device@pi12"] == "pi12"
+    assert {s["unit"]: s.get("source") for s in st}["object_detect.server"] is None
+    # per_source: false 인 단계는 늘리지 않는다 (지도는 기기에 하나다)
+    st2, _r, _o = F.expand(f, ["slam"], sources=["pi12", "a2"])
+    assert sorted(s["unit"] for s in st2) == ["slam.device", "slam.server"]
+
+
+def test_functions_can_differ_per_source():
+    """{소스: [기능...]} 이면 소스마다 고른 기능이 다르다"""
+    f = F.load()
+    st, _r, _o = F.expand(f, {"pi12": ["object_detect", "single_cam_track"], "a2": ["object_detect"]})
+    assert sorted(s["unit"] for s in st) == ["object_detect.device@a2", "object_detect.device@pi12",
+                                             "object_detect.server", "single_cam_track.device@pi12",
+                                             "single_cam_track.server"]
+
+
+def test_pairs_tells_which_source_is_missing():
+    """한 소스에서만 빠지면 기능은 살고(degraded) 어느 소스인지 남는다"""
+    f = F.load()
+    st, _r, _o = F.expand(f, ["object_detect"], sources=["pi12", "a2"])
+    placed = [s["unit"] for s in st if s["unit"] != "object_detect.device@a2"]
+    g = F.pairs(st, placed)["object_detect"]
+    assert g["verdict"] == "degraded" and g["sources_missing"] == ["a2(device)"]
+    assert sorted(g["sources"]) == ["a2", "pi12"] and g["missing"] == []
+    # 모든 소스에서 빠지면 예전처럼 단계가 통째로 없는 것이다
+    g2 = F.pairs(st, [s["unit"] for s in st if s["stage"] == "server"])["object_detect"]
+    assert g2["verdict"] == "degraded" and g2["missing"] == ["device"]
+
+
+def test_functions_declare_which_models_they_can_use():
+    """기능마다 쓸 수 있는 선택지(모델) — 런처가 「기능 → 모델」 로 고른다"""
+    f = F.load()
+    assert f["object_detect"]["options"] == ["yoloe", "river", "targeted"]
+    assert f["depth_estimate"]["options"] == ["unidepth", "moge2_aerial"]
+    assert f["single_cam_track"]["options"] == []        # 트래커는 모델이 없다 (ultralytics 안에 있다)

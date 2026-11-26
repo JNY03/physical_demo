@@ -45,6 +45,15 @@ SEMANTIC_T = 100.0        # CLIP logit 배율 (river verify.semantic 과 같다)
 FEATURE_SPAN = 0.05       # 특징 사전 %: 하한 −0.05 → 0, 하한 → 50, 하한 +0.05 → 100 (선언된 자)
 OVD_ASSOC_IOU, OVD_ASSOC_CONTAIN = 0.30, 0.7    # main ASSOCIATION_IOU_THR · CONTAINMENT_THR
 DEFAULT_MIN_EVIDENCE = 0.45
+#: 기준 사진(ref_match) — 사람이 올린 사진들의 CLIP 임베딩과 후보 조각을 견준다.
+#: 하한 −REF_SPAN → 0%, 하한 → 50%, 하한 +REF_SPAN → 100% (특징 사전과 같은 자 모양).
+#: 0.70 은 CLIP ViT-B/32 에서 「같은 물체를 다른 각도에서 찍은 사진」 쯤이다(다른 물체는 대개 0.5 아래).
+#: **문턱을 0.99 같은 값으로 두지 마라** — 양자화 ONNX 는 묶음 크기만 달라져도 코사인이 0.990 까지 흔들린다
+#: (기준 임베딩은 한 번에 재고 런타임은 후보 수만큼 묶어 재므로 늘 그만큼 차이가 난다).
+REF_SIM_MIN = 0.70
+REF_SPAN = 0.10
+#: 사진이 여럿이면 가장 닮은 것 몇 개의 평균으로 본다 — 한 장이 운 좋게 맞은 것에 끌려가지 않게
+REF_TOPK = 3
 LOOKALIKE_FROM, LOOKALIKE_MAX = 0.5, 15.0       # river decision.lookalike 와 같은 모양
 #: 비슷한 이름(중심 명사가 같은 prompt-free 이름, 예: chair ← electric chair)의 확신에 곱하는 값. **선언이다** —
 #: 같은 물건을 다르게 부른 것이지만 그 이름이 정말 그 물건인지는 확신만큼 믿지 않는다
@@ -291,6 +300,34 @@ def shape_pct(poly, box, rng):
 
 
 # ---------------------------------------------------------------- 대상별 준비
+def load_reference_embeddings(t, log=None):
+    """그 대상에 올려 둔 기준 사진의 CLIP 임베딩 (N, D) 또는 None.
+
+    자리: 대상 파일 옆 `<대상>.refs.npz`, 키 `<인코더>/<대상 이름>` (cue_catalog 가 그렇게 저장한다).
+    없거나 깨졌으면 None 을 돌려주고 막지 않는다 — 못 잰 것은 통과가 아니라 `None`(not measured)로 남는다."""
+    info = t.get("reference_images") or {}
+    if info.get("state") != "ready":
+        return None
+    try:
+        base = Path(t.get("_file") or ".").parent
+        npz = base / str(info.get("embeddings") or ("%s.refs.npz" % t["name"]))
+        if not npz.exists():
+            return None
+        key = "%s/%s" % (info.get("encoder") or "clip_b32", t["name"])
+        with np.load(str(npz)) as z:
+            if key not in z:
+                return None
+            arr = np.asarray(z[key], dtype="float32")
+        if arr.ndim != 2 or arr.shape[0] == 0:
+            return None
+        n = np.linalg.norm(arr, axis=1, keepdims=True)
+        return arr / np.where(n == 0, 1.0, n)               # 이미 정규화돼 있지만 한 번 더 (깨진 파일 대비)
+    except Exception as e:  # noqa: BLE001 — 기준 사진을 못 읽어도 판정은 돌아야 한다
+        if log:
+            log("기준 사진 임베딩을 못 읽음 (%s): %s" % (t.get("name"), e))
+        return None
+
+
 class _Prepared:
     """대상 하나의 문장 임베딩을 미리 만들어 둔다 — 장마다 다시 돌지 않는다."""
 
@@ -304,6 +341,8 @@ class _Prepared:
         self.min_score = float(t.get("min_score", 50.0))
         self.min_evidence = float(t.get("min_evidence", DEFAULT_MIN_EVIDENCE))
         self.feat = self.sem = self.colour = self.shape = self.look = None
+        # 기준 사진은 엔진 없이도 읽는다 (파일에서 읽는 것뿐이다). 후보 쪽 임베딩은 clip 이 있어야 생긴다
+        self.refs = load_reference_embeddings(t) if "ref_match" in cues else None
         if clip is None:
             return
         if "dict_features" in cues and t.get("features"):
@@ -410,6 +449,22 @@ class TargetEvidence:
                     l2 = SEMANTIC_T * np.concatenate([te[:len(pos)] @ emb, ce @ emb])
                     e2 = np.exp(l2 - l2.max())
                     d["_lookalike"] = float(e2[len(pos):].sum() / e2.sum())
+        # 기준 사진 — 사람이 올린 사진들과 얼마나 닮았나 (가장 닮은 몇 장의 평균)
+        if "ref_match" in cues:
+            if p.refs is None or emb is None:
+                why = " (small crop)" if small else ("" if p.refs is not None else " (no reference photos)")
+                add("ref_match", None, "not measured" + why)
+            else:
+                sims = p.refs @ emb
+                k = int(min(REF_TOPK, sims.shape[0]))
+                ts = float(np.sort(sims)[-k:].mean())
+                best = float(sims.max())
+                thr = float(t.get("ref_sim_min", REF_SIM_MIN))
+                pct = 0.0 if ts < thr - REF_SPAN else min(100.0, 50.0 + 50.0 * (ts - thr) / REF_SPAN)
+                # 문턱 비교에 아주 작은 여유를 둔다 — 임베딩이 float32 라 「딱 하한」이 0.6999994 로 나온다
+                add("ref_match", max(0.0, pct),
+                    "top%d %.4f (best %.4f, min %.2f, %d photos)" % (k, ts, best, thr, sims.shape[0]),
+                    passed=ts >= thr - 1e-6)
         # 특징 사전 (main dictionary)
         if "dict_features" in cues:
             if p.feat is None or emb is None:

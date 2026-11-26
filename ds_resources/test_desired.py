@@ -101,3 +101,36 @@ def test_write_gives_up_when_lock_is_held(tmp_path):
         ds._unlock(lk)
     out, errs = ds.write(None, p, doc())                                        # Redis 가 없어도 파일만으로 된다
     assert errs == [] and out["version"] == 1 and json.loads(p.read_text(encoding="utf-8"))["version"] == 1
+
+
+# ---------------------------------------------------------------- 기기별 모델 매칭 · 수동 배치 (2026-11-26)
+def _v(**kw):
+    return dict({"enabled": True, "orchestrate": True, "models": ["yoloe", "river"], "profile": {}}, **kw)
+
+
+def test_assign_checks_devices_and_models():
+    assert ds.validate(doc(vision=_v(assign={"pi13": ["yoloe"], "a2": []}))) == []      # a2 는 비전 없음 — 괜찮다
+    assert any("고르지 않은 기기 pi9" in e for e in ds.validate(doc(vision=_v(assign={"pi9": ["yoloe"]}))))
+    assert any("고르지 않은 모델 moge" in e for e in ds.validate(doc(vision=_v(assign={"pi13": ["moge"]}))))
+    assert any("모든 기기를 비웠" in e for e in ds.validate(doc(vision=_v(assign={"pi13": [], "a2": []}))))
+    # 직접 비전(자원 배분 끔)은 프로세스 하나가 모든 기기를 맡는다 — 기기마다 모델을 가를 수 없다
+    assert any("자원 배분을 켠 채로" in e
+               for e in ds.validate(doc(vision=_v(orchestrate=False, assign={"pi13": ["yoloe"]}))))
+    assert ds.validate(doc(vision=_v(orchestrate=False))) == []                          # 매칭이 없으면 그대로 된다
+
+
+def test_manual_place_only_with_orchestration():
+    on = doc(vision=_v(manual={"enabled": True, "place": {"object_detect.device": "pi1"}}))
+    assert ds.validate(on) == [] and ds.manual_place(on) == {"object_detect.device": "pi1"}
+    off = doc(vision=_v(manual={"enabled": False, "place": {"object_detect.device": "pi1"}}))
+    assert ds.manual_place(off) == {}                                   # 꺼 두면 자리를 넘기지 않는다
+    bad = doc(vision=_v(orchestrate=False, manual={"enabled": True, "place": {}}))
+    assert any("수동 배치는 자원 배분" in e for e in ds.validate(bad))
+
+
+def test_component_keys_change_when_match_or_place_changes():
+    a = ds.component_keys(doc(vision=_v()))
+    b = ds.component_keys(doc(vision=_v(assign={"pi13": ["yoloe"]})))
+    c = ds.component_keys(doc(vision=_v(manual={"enabled": True, "place": {"x.device": "pi1"}})))
+    assert a["vision"] != b["vision"] and a["vision"] != c["vision"]     # 바뀌면 비전을 다시 띄운다
+    assert a["server"] == b["server"] == c["server"]                     # 서버는 그대로 둔다

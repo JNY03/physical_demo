@@ -235,12 +235,165 @@ class Controller:
                 self.log("작업 계약을 읽지 못함 (%s) — 기능 배치 없이 옛 경로로만 돈다" % e)
         return self._funcs
 
+    def vision_groups(self, models, assign, sources):
+        """기기별 모델 매칭 → GPU 묶음들. **묶음 하나 = 프로세스 하나**다 (2026-11-26).
+
+        assign  {소스: [모델...]} 그 기기에 올릴 모델. 없는 소스는 고른 모델 전부(옛 동작 그대로),
+                빈 목록은 「그 기기에는 비전을 올리지 않음」이다.
+        모델 조합이 같은 소스끼리 묶는다 — 조합이 다르면 프로세스가 갈리고 GPU 메모리도 따로 든다.
+        → ([{models, sources}...], 비전을 올리지 않는 소스들). 이름순이라 같은 입력이면 같은 묶음이다."""
+        groups, off = {}, []
+        pick = set(models)
+        for s in sorted(sources):
+            want = (assign or {}).get(s)
+            ms = sorted(pick & set(want)) if want is not None else sorted(pick)
+            if not ms:
+                off.append(s)
+                continue
+            groups.setdefault(tuple(ms), []).append(s)
+        return [{"models": list(k), "sources": sorted(v)} for k, v in sorted(groups.items())], off
+
+    def places(self, limits=None, functions=None, sources=None, assign=None, manual=None, profile=None):
+        """수동 배치가 고를 것 — {nodes, units} (읽기만, 아무것도 띄우지 않는다).
+
+        functions 를 주면 **고른 기능만** 소스별로 펼쳐서 돌려준다(그러지 않으면 계약 전체). 그때는 배치까지
+        한 번 돌려 각 작업의 **자동 예정 노드**(auto_node)와 못 놓는 이유(refused)를 함께 적는다 —
+        「자동일 때 어디로 갈지」를 고르기 전에 보여 주려는 것이다. 아무것도 띄우지 않는다.
+
+        nodes  지금 보이는 노드: 이름 · 역할 · 상태 · 특성 · **한도를 거는 쪽인가**(limited — 서버는 아니다)
+        units  놓을 수 있는 작업 단위: 기능 계약의 배치 단계 + 옛 cpu_tasks 별칭. 어디에 둘 수 있는지(roles · pin)와
+               반드시 그 기기에서 해야 하는지(must_device — 그러면 한도가 면제된다)를 함께 낸다"""
+        ok, why, _caps = check_cluster(self.cluster)
+        nodes = []
+        if ok:
+            try:
+                nodes = self.cluster.nodes()
+            except Exception as e:  # noqa: BLE001 — 노드를 못 읽어도 서버 하나는 고를 수 있다
+                ok, why = False, "k3s 확인 실패: %s" % e
+                nodes = []
+        snap = self.with_limits([self.local_node_snapshot()] + [n for n in nodes if n.get("name") != self.local],
+                                limits)
+        units = []
+        contract = self.function_contract()
+        if functions:
+            srcs = None if isinstance(functions, dict) else sorted(sources or ())
+            stages, _res, _oth = fnc.expand(contract, functions, sources=srcs)
+            for st in stages:
+                g = contract[st["function"]]
+                units.append({"unit": st["unit"], "function": st["function"], "stage": st["stage"],
+                              "source": st.get("source"), "pin": st["pin"], "roles": list(st["roles"]),
+                              "options": list(g.get("options") or []),
+                              "pattern": g["pattern"], "criticality": g["criticality"], "optional": st["optional"],
+                              "legacy": g["legacy"], "note": st["note"],
+                              "cpu_m": st["cpu_m"], "mem_mb": st["mem_mb"],
+                              "must_device": placement.must_on_device(st)})
+        else:
+            for fn, g in sorted(contract.items()):
+                if g["pattern"] not in fnc.PLACEABLE:
+                    continue
+                for side, st in sorted(g["stages"].items()):
+                    units.append({"unit": st["unit"], "function": fn, "stage": side, "pin": st["pin"],
+                                  "roles": list(st["roles"]), "pattern": g["pattern"],
+                                  "criticality": g["criticality"], "optional": st["optional"],
+                                  "legacy": g["legacy"], "note": st["note"],
+                                  # 그 단계가 달라는 몫 (계약에 적힌 선언값) — 화면이 「예상 사용」으로 보여 준다
+                                  "cpu_m": st["cpu_m"], "mem_mb": st["mem_mb"],
+                                  "must_device": placement.must_on_device(
+                                      {"pin": st["pin"], "criticality": g["criticality"]})})
+        if functions:
+            # 자동이면 어디로 갈지 — 같은 계산을 한 번 돌려 본다 (띄우지 않는다)
+            try:
+                p = self.prepare(sorted(sources or ()), [], profile, functions=functions, assign=assign,
+                                 manual=manual, limits=limits)
+                where = {u["task"]: u for u in p["plan"]["cpu_units"]}
+                why = {x["item"].split(":", 1)[-1]: x for x in p["plan"]["refused"] if x["item"].startswith("cpu:")}
+                for u in units:
+                    hit = where.get(u["unit"])
+                    if hit:
+                        u["auto_node"] = hit["node"]
+                        u["auto_mode"] = hit.get("limit_mode")
+                    elif u["unit"] in why:
+                        u["auto_why"] = why[u["unit"]]["reason"]
+                        u["auto_code"] = why[u["unit"]]["code"]
+            except Exception as e:  # noqa: BLE001 — 예정 노드를 못 구해도 목록은 낸다
+                self.log("자동 예정 노드를 구하지 못함: %s" % e)
+        # 기능마다 쓸 수 있는 모델(선택지) — 런처가 「기능 → 모델」 로 고르게 한다
+        fnopts = {n: list(g.get("options") or []) for n, g in sorted(contract.items())
+                  if g["pattern"] in fnc.PLACEABLE}
+        # 그 선택지가 어떤 것인가 — 성능(장당 ms) · GPU 어림 · 무엇을 하는 것인지. 레지스트리 하나에서 온다
+        info = {}
+        for key, o in sorted((self.reg.get("options") or {}).items()):
+            cue = o.get("cue_models")                 # 사전({근거: [모델]})이거나 글 하나(규칙만 쓰는 선택지)
+            cue = cue if isinstance(cue, dict) else {}
+            info[key] = {"shown": o.get("shown") or key, "kind": o.get("kind"), "gpu_mb": o.get("gpu_mb"),
+                         "p90_ms": o.get("p90_ms") or {},
+                         "models": sorted({m for ms in cue.values() for m in (ms or [])}),
+                         "prompt": ("free" if key == "yoloe" else ("text" if key in ("targeted",) else None))}
+            for m in info[key]["models"]:
+                spec = (self.reg.get("models") or {}).get(m) or {}
+                info[key].setdefault("notes", {})[m] = {"note": spec.get("note"), "device": spec.get("device"),
+                                                        "files": [str(x) for x in (spec.get("files") or [])],
+                                                        "packages": list(spec.get("packages") or [])}
+        return {"ok": ok, "why": why, "mode": "k3s" if ok else "local", "function_options": fnopts, "model_info": info,
+                # source = 그 노드가 맡은 기기 이름(ds.source · nodes.json). 사람이 노드 이름보다 이것으로 알아본다 —
+                # 이 기기는 data_stream 서버다. 화면에 붙일 말은 읽는 쪽(런처)이 고른다(언어가 있으니)
+                "nodes": [dict({"name": n["name"], "role": n.get("role"), "ready": bool(n.get("ready")),
+                                "stale": bool(n.get("stale")), "limited": not placement.server_node(n, self.local),
+                                "source": (n.get("source") or ("data_stream" if n["name"] == self.local else None)),
+                                "model": (n.get("caps") or {}).get("model"),
+                                "caps": n.get("caps") or {}, "thermal": n.get("thermal") or {}},
+                               **self._node_room(n), **self._node_gpu(n)) for n in snap],
+                "units": units}
+
+    @staticmethod
+    def with_limits(nodes, limits):
+        """노드마다 걸린 한도를 스냅숏에 얹는다 — {노드: {headroom_cpu, headroom_mem, cores_reserved, temp_max,
+        gpu_spare_mb, fps}}. 런처에서 고친다. **서버에도 걸 수 있다** (기본은 「없음」).
+
+        placement.limit_of 가 이 사전을 읽는다. 적지 않은 값은 그 노드의 기본값(상수 · 라벨)이 그대로 쓰인다."""
+        if not limits:
+            return nodes
+        out = []
+        for n in nodes:
+            lim = {k: v for k, v in (limits.get(n["name"]) or {}).items() if v is not None}
+            out.append(dict(n, limits=dict(n.get("limits") or {}, **lim)) if lim else n)
+        return out
+
+    @staticmethod
+    def _node_gpu(n):
+        """그 노드의 GPU 메모리 (지금 nvidia-smi 가 본 값) — GPU 가 없으면 칸이 없다.
+        k3s 쪽 노드는 GPU 를 알리지 않는다(metrics-server 가 GPU 를 모른다) — data_stream 기기만 채워진다."""
+        gs = n.get("gpus") or []
+        if not gs:
+            return {}
+        g = gs[0] or {}
+        try:
+            return {"gpu": {"total_mb": round(float(g.get("mem_total_mb") or 0)),
+                            "used_mb": round(float(g.get("mem_used_mb") or 0)),
+                            "committed": round(float(n.get("gpu_util_committed") or 0), 3)}}
+        except (TypeError, ValueError):
+            return {}
+
+    def _node_room(self, n):
+        """그 노드의 전체 · 지금 쓸 수 있는 몫 (화면에 「자원」으로 보여 준다).
+        한도를 거는 노드는 한도를 뺀 몫, 서버는 한도가 없으니 물리적으로 남은 몫이다 — 배치가 보는 숫자와 같다."""
+        try:
+            waive = not (n["name"] != self.local and n.get("role") != "gpu")
+            cpu, mem = placement._cpu_room(n, waive=waive)
+            return {"alloc": {"cpu_m": round(float(n.get("cpu_alloc_m") or 0)),
+                              "mem_mb": round(float(n.get("mem_alloc_mb") or 0))},
+                    "room": {"cpu_m": round(cpu), "mem_mb": round(mem)}}
+        except (KeyError, TypeError, ValueError):       # 자원 칸이 없는 노드(옛 플러그인) — 숫자 없이 둔다
+            return {}
+
     def prepare(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, task_specs=None, request_id=None,
-                functions=None):
-        """클러스터 확인 → 입력 영상 → 스냅숏 → placement/2. 아무것도 띄우지 않고 기록도 하지 않는다(미리보기와 같은 계산).
+                functions=None, assign=None, manual=None, limits=None):
+        """클러스터 확인 → 입력 영상 → 스냅숏 → placement/3. 아무것도 띄우지 않고 기록도 하지 않는다(미리보기와 같은 계산).
 
         functions: 런처가 고른 **기능 이름들**. 단계로 펼치는 것은 여기서 한다 — 상주(resident)와 설정 · 배포
-        흐름은 배치 목록에서 빠지고 따로 돌려준다(놓는 게 아니라 있는지 보고 알릴 몫이다)."""
+        흐름은 배치 목록에서 빠지고 따로 돌려준다(놓는 게 아니라 있는지 보고 알릴 몫이다).
+        assign:    {소스: [모델...]} 기기별 모델 매칭 (없으면 고른 모델을 모든 기기에).
+        manual:    {단위: 노드 | "none"} 수동 배치 — 배치 계산기가 사람이 고른 자리를 지킨다."""
         ok, why, caps = check_cluster(self.cluster)
         nodes = []
         if ok:
@@ -262,36 +415,47 @@ class Controller:
                 waiting.append(s)
             else:
                 infos[s] = info
-        snapshot = {"nodes": [self.local_node_snapshot()] + [n for n in nodes if n.get("name") != self.local],
+        snapshot = {"nodes": self.with_limits(
+                        [self.local_node_snapshot()] + [n for n in nodes if n.get("name") != self.local], limits),
                     "costs": {}}
-        if infos and models:
-            snapshot["costs"]["+".join(sorted(models))] = self.costs(models, infos, profile)
+        groups, vision_off = (self.vision_groups(models, assign, infos) if (infos and models) else ([], []))
+        for g in groups:
+            snapshot["costs"]["+".join(sorted(g["models"]))] = self.costs(
+                g["models"], {s: infos[s] for s in g["sources"]}, profile)
         fps = {s: float((target_fps or {}).get(s) or max(1.0, infos[s]["fps"] or 10.0)) for s in infos}
         specs = self.cpu_specs(cpu_tasks, task_specs)
         if mode != "k3s" or self.cpu_ex is None:        # k3s 가 없으면 CPU 작업도 data_stream 기기에만
             specs = [dict(t, roles=[r for r in t.get("roles", []) if r == "gpu"]) for t in specs]
         stages, residents, others = [], [], []
         if functions:
-            stages, residents, others = fnc.expand(self.function_contract(), functions)
+            # 기능은 소스마다 다를 수 있다 — {소스: [기능...]} 이면 그대로, 목록이면 고른 소스 전부에 같은 기능.
+            # 카메라를 보는 기기 단계만 소스 수만큼 늘어난다 (functions.expand)
+            srcs = None if isinstance(functions, dict) else sorted(infos)
+            stages, residents, others = fnc.expand(self.function_contract(), functions, sources=srcs)
             if mode != "k3s" or self.cpu_ex is None:     # k3s 가 없으면 기능 단계도 data_stream 기기에만
                 stages = [dict(s, roles=[r for r in (s.get("roles") or []) if r == "gpu"]) for s in stages]
         req = {"request_id": request_id,
-               "gpu": [{"models": models, "sources": sorted(infos), "target_fps": fps, "waiting": sorted(waiting)}]
-               if infos and models else [],
+               "gpu": [{"models": g["models"], "sources": g["sources"],
+                        "target_fps": {s: fps[s] for s in g["sources"]},
+                        "waiting": sorted(set(g["sources"]) & set(waiting))} for g in groups],
                "cpu": specs}
         if stages:
             req["functions"] = stages
+        if manual:
+            req["manual"] = dict(manual)
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
         placed = {s for u in plan["gpu_units"] for s in u["sources"]}
         plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상 없음. 들어오면 바로 처리")
                            for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])
         return {"ok": ok, "why": why, "caps": caps, "mode": mode, "basis": basis, "plan": plan, "snapshot": snapshot,
-                "residents": residents, "others": others}
+                "residents": residents, "others": others, "vision_off": vision_off}
 
-    def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, functions=None):
+    def preview(self, sources, models, profile=None, target_fps=None, cpu_tasks=None, functions=None,
+                assign=None, manual=None, limits=None):
         """런처 「배치 보기」 — prepare + GPU 단위마다 지금 들일 수 있는지(Executor admit, 읽기만)"""
-        p = self.prepare(sources, models, profile, target_fps, cpu_tasks, functions=functions)
+        p = self.prepare(sources, models, profile, target_fps, cpu_tasks, functions=functions, assign=assign,
+                         manual=manual, limits=limits)
         for u in p["plan"]["gpu_units"]:
             c = p["snapshot"]["costs"]["+".join(u["models"])]
             ok, why, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"])
@@ -300,17 +464,23 @@ class Controller:
         return p
 
     def submit(self, sources, models, profile=None, profile_path=None, target_fps=None, cpu_tasks=None,
-               task_specs=None, functions=None):
+               task_specs=None, functions=None, assign=None, manual=None, limits=None):
         rid = "req-" + uuid.uuid4().hex[:10]
         request = {"sources": sorted(sources), "models": sorted(models), "target_fps": target_fps or {},
-                   "cpu_tasks": sorted(cpu_tasks or []), "functions": sorted(functions or [])}
+                   "cpu_tasks": sorted(cpu_tasks or []),
+                   "functions": ({s: sorted(v) for s, v in sorted(functions.items())}
+                                 if isinstance(functions, dict) else sorted(functions or []))}
+        if assign:                                      # 기기별 모델 매칭 · 수동 배치는 있을 때만 적는다(요청 기록도 추가만)
+            request["assign"] = {s: sorted(ms) for s, ms in sorted(assign.items())}
+        if manual:
+            request["manual"] = dict(sorted(manual.items()))
         self._resubmit[rid] = dict(sources=sources, models=models, profile=profile, profile_path=profile_path,
                                    target_fps=target_fps, cpu_tasks=cpu_tasks, task_specs=task_specs,
-                                   functions=functions)
+                                   functions=functions, assign=assign, manual=manual, limits=limits)
         self.state.put_request(rid, dict(request, status="requested", at=self.clock()))
         self.emit("requested", rid, request=request)
         p = self.prepare(sources, models, profile, target_fps, cpu_tasks, task_specs, request_id=rid,
-                         functions=functions)
+                         functions=functions, assign=assign, manual=manual, limits=limits)
         ok, why, mode, basis, plan, snapshot = p["ok"], p["why"], p["mode"], p["basis"], p["plan"], p["snapshot"]
         caps = p.get("caps") or {}
         self.emit("cluster_checked", rid, reason=why or caps.get("why") or "",
@@ -347,7 +517,7 @@ class Controller:
                                   "execution_id": xid}, u["need_mb"], calc)
             where = self.gpu_where(u["node"])
             self.emit("applied", rid, execution_id=xid, mode=mode,
-                      reason="실행: %s · %s → %s (pid %s)%s" % (
+                      reason="실행: %s, %s, %s (pid %s)%s" % (
                           "+".join(u["models"]), _fps_text(u["fps_cap"]), where,
                           (self.state.units().get(uid) or {}).get("pid", "?"), (" — " + why2) if why2 else ""),
                       detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"], "node": u["node"], "where": where})
@@ -369,7 +539,7 @@ class Controller:
         if u["node"] == self.local or self.cpu_ex is None:
             rec.update(status="local", where="data_stream 기기 (런처가 띄우는 기존 방식)")
             self.state.put_unit(uid, rec)
-            self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s → %s (data_stream 기기)" % (u["task"], self.local),
+            self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s, %s (data_stream 기기)" % (u["task"], self.local),
                       detail={"unit_id": uid, "node": u["node"], "note": u.get("reason")}, **_stream_tags(u))
             return uid
         try:
@@ -381,7 +551,7 @@ class Controller:
                       code="cpu_launch_failed", detail={"unit_id": uid}, **_stream_tags(u))
             return uid
         self.state.put_unit(uid, rec)
-        self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s → %s (k3s 파드)" % (u["task"], u["node"]),
+        self.emit("applied", rid, execution_id=xid, mode=mode, reason="실행: CPU 작업 %s, %s (k3s 파드)" % (u["task"], u["node"]),
                   detail={"unit_id": uid, "node": u["node"], "requests": u["requests"], "limits": u["limits"],
                           "priority_class": u["priority_class"]}, **_stream_tags(u))
         return uid
@@ -410,7 +580,7 @@ class Controller:
         new = out["cpu_units"][0]
         nid = self.launch_cpu(u["request_id"], u["execution_id"], "k3s", new, replaces=u["unit_id"])
         return self.emit("replanned", u["request_id"], execution_id=u["execution_id"], mode="k3s",
-                         reason="%s → %s 에서 %s 로" % (reason, u["node"], new["node"]),
+                         reason="%s: %s 에서 %s 로" % (reason, u["node"], new["node"]),
                          detail={"from": u["unit_id"], "to": nid, "from_node": u["node"], "to_node": new["node"]})
 
     def poll_cpu(self):

@@ -37,7 +37,15 @@ def deployment(unit, task, redis_url):
     env = [{"name": "REDIS_URL", "value": redis_url}, {"name": "UNIT_ID", "value": unit["unit_id"]},
            {"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}]
     env += [{"name": k, "value": str(v)} for k, v in sorted((task.get("env") or {}).items())]
-    req, lim = unit["requests"], unit["limits"]
+    req, lim = unit["requests"], unit["limits"] or {}
+    # 한도 면제(placement/3)로 온 일은 limits.cpu_m 이 None 이다 — **CPU 상한 없이** 올린다.
+    # 쓸 수 있는데도 조여 마감을 놓치지 않게 하려는 것이고, 몫은 requests + PriorityClass 가 지킨다.
+    # 메모리 상한은 면제하지 않는다(넘기면 노드가 죽어 그 기기의 제어까지 같이 죽는다).
+    limits = {}
+    if lim.get("cpu_m") is not None:
+        limits["cpu"] = "%dm" % lim["cpu_m"]
+    if lim.get("mem_mb") is not None:
+        limits["memory"] = "%dMi" % lim["mem_mb"]
     return {"apiVersion": "apps/v1", "kind": "Deployment",
             "metadata": {"name": name, "namespace": NAMESPACE, "labels": labels,
                          "annotations": {"ds/request-id": str(unit.get("request_id")),
@@ -50,8 +58,9 @@ def deployment(unit, task, redis_url):
                          "terminationGracePeriodSeconds": 5,
                          "containers": [{"name": "task", "image": task["image"], "command": list(task["command"]),
                                          "env": env,
-                                         "resources": {"requests": {"cpu": "%dm" % req["cpu_m"], "memory": "%dMi" % req["mem_mb"]},
-                                                       "limits": {"cpu": "%dm" % lim["cpu_m"], "memory": "%dMi" % lim["mem_mb"]}}}]}}}}
+                                         "resources": dict({"requests": {"cpu": "%dm" % req["cpu_m"],
+                                                                         "memory": "%dMi" % req["mem_mb"]}},
+                                                           **({"limits": limits} if limits else {}))}]}}}}
 
 
 class K3sCpuExecutor:

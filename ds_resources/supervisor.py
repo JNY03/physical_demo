@@ -411,7 +411,9 @@ class VisionOrch(Component):
         except (OSError, ValueError):
             prof = None
         self.rid = self.k.submit(ds.vision_sources(d), v["models"], prof, str(self.sup.profile_path),
-                                 target_fps=v.get("max_fps") or None)
+                                 target_fps=v.get("max_fps") or None,
+                                 # 기기별 모델 매칭 · 수동 배치 (2026-11-26) — 원하는 상태에 적힌 그대로 넘긴다
+                                 assign=v.get("assign") or None, manual=ds.manual_place(d) or None)
         self.started_at = self.sup.clock()
         req = self.k.state.data["requests"].get(self.rid) or {}
         self.sup.log("vision 요청 %s — %s" % (self.rid, req.get("mode") or ""))
@@ -423,7 +425,7 @@ class VisionOrch(Component):
             self.sup.log("vision %-9s %s" % (e["event"], e["reason"]))
         new = self.k.replan_if_needed(self.rid)          # 빠졌던 입력 대기 소스에 영상이 들어옴 → 다시 배치
         if new:
-            self.sup.log("vision 다시 배치: %s → %s" % (self.rid, new))
+            self.sup.log("vision 다시 배치: %s 에서 %s 로" % (self.rid, new))
             self.rid = new
 
     def exit_reason(self):

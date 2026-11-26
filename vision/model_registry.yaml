@@ -109,6 +109,12 @@ cues:
   calibration:   {label: 거리 검증 범위, label_en: calibration, role: cond, roles: [cond], weight: 0.0, needs: [], requires: [trained], detector: [trained]}
   size_veto:     {label: 크기 거부, label_en: size veto, role: veto, roles: [veto], weight: 0.0, needs: [depth], requires: [size_mm], detector: [yoloe_text, trained]}
   lookalike:     {label: 닮은꼴 감점, label_en: look-alike, role: "on", roles: ["on"], weight: 0.0, needs: [clip], requires: [confusers], detector: [yoloe_text, trained]}
+  # 사람이 올린 기준 사진(zip)의 CLIP 이미지 임베딩과 crop 을 견준다. 임베딩은
+  # cue_catalog.attach_reference_images 가 대상 파일 옆 `<대상>.refs.npz` 에 만든다.
+  # 사람이 올린 기준 사진과 후보 조각을 CLIP 임베딩으로 견준다 (target_assess 의 REF_SIM_MIN · REF_SPAN).
+  # 가장 닮은 몇 장의 평균이 하한(0.70) 이면 50%, +0.10 이면 100%. 못 재면(작은 조각 · 사진 없음) 통과가 아니라 '못 잼'이다.
+  # 문턱을 0.99 로 두지 마라 — 양자화 ONNX 는 묶음 크기만 달라져도 코사인이 0.990 까지 흔들린다.
+  ref_match:     {label: 기준 사진, label_en: reference photos, role: score, roles: [score, gate, "on"], weight: 0.15, needs: [clip], requires: [reference_images], detector: [yoloe_text, trained]}
 
 #: CPU 작업 — 오케스트레이터가 파이(k3s) 또는 data_stream 기기에 둔다 (placement/1)
 #:   cpu_m · mem_mb  requests (limits 는 2배)       roles  둘 수 있는 노드 역할 (gpu = data_stream 기기)
@@ -313,6 +319,7 @@ functions:
         note: 보조 재인코딩 — 저장 · 가시화용
 
   object_detect:
+    options: [yoloe, river, targeted]
     note: 객체 탐지 — 기기에서 int8 320px 로 거르고 서버 고성능 모델이 확인한다
     pattern: cascade
     criticality: mission
@@ -346,6 +353,7 @@ functions:
         note: options.yoloe 가 맡는다 (GPU Executor 가 띄운다 — image · command 로 올리는 작업이 아니다)
 
   zeroshot_detect:
+    options: [targeted]
     note: Zero-shot 객체 탐지 — 기기는 사전 등록 프롬프트 임베딩만, 서버가 동적 프롬프트로 정밀하게
     pattern: cascade
     criticality: mission
@@ -379,6 +387,7 @@ functions:
         note: options.river · targeted 가 맡는다 (YOLOE 텍스트 arm · Grounding DINO)
 
   segmentation:
+    options: [yoloe]
     note: Segmentation — 기기 경량 분할로 거르고 서버 Foundation 모델이 맡는다. 실행체 없음 — 계약만
     pattern: cascade
     criticality: best_effort
@@ -410,6 +419,7 @@ functions:
         command: null
 
   depth_estimate:
+    options: [unidepth, moge2_aerial]
     note: Depth Estimation — 기기는 상대 깊이로 근거리만 보고, 서버가 정밀 거리 · 다중 시점을 맡는다
     pattern: cascade
     criticality: mission
@@ -503,6 +513,7 @@ functions:
         note: 객체 연결 표를 들고 있다 — 옮기면 잃는다
 
   reid:
+    options: [targeted]
     note: ReID — 기기가 경량 임베딩을 보내고 서버가 유사도 · 증거를 융합한다
     pattern: split
     criticality: mission
@@ -534,6 +545,7 @@ functions:
         note: models.reid (LightGlue + SuperPoint · CLIP) 가 맡는다
 
   anomaly_detect:
+    options: [yoloe]
     note: 이상 탐지 — 기기가 1차로 감지하고 서버가 검증한다. 실행체 없음 — 계약만
     pattern: cascade
     criticality: mission
@@ -570,6 +582,7 @@ functions:
     trigger: always
     stages:
       device:
+        per_source: false        # 지도는 기기에 하나다 — 카메라 수만큼 늘리지 않는다
         pin: device
         needs: {sensors: [camera, imu], cores: 2.0}
         deadline_ms: 100
@@ -623,6 +636,7 @@ functions:
         command: null
 
   grounding_explain:
+    options: [targeted]
     note: 근거 설명 — 기기가 측정값 · 특징을 뽑고 서버가 증거를 모아 자연어로 적는다
     pattern: split
     criticality: best_effort
@@ -875,18 +889,21 @@ models:
     source:
     - {path: models/yoloe-11s-seg-pf.pt, url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11s-seg-pf.pt, sha256: 292bdf157a9ec7315f34b567cb93467c5043cd1889a1cc18abbfdeb88d7a948d}
   clip:
-    note: CLIP ViT-B/32 ONNX 양자화본 (글 설명 · 특징 · 색 · 모양 · 닮은꼴)
+    note: CLIP ViT-B/32 ONNX 양자화본 (글 설명 · 특징 · 색 · 모양 · 닮은꼴 · 기준 사진)
     files: [models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx,
             models/clip-vit-base-patch32/onnx/text_model_quantized.onnx,
-            models/clip-vit-base-patch32/onnx/tokenizer_dictionary.json]
+            models/clip-vit-base-patch32/tokenizer.json]
     gpu_mb: 350
     device: gpu
     packages: [onnxruntime-gpu]
     source:
     - {path: models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model_quantized.onnx, sha256: 583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299}
     - {path: models/clip-vit-base-patch32/onnx/text_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/text_model_quantized.onnx, sha256: 73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a}
-    - {path: models/clip-vit-base-patch32/onnx/tokenizer_dictionary.json, sha256: b556ac8c99757ffb677208af34bc8c6721572114111a6e0aaf5fa69ff0b8d842,
-       manual: "main 저장소에서 옮긴 CLIP 토크나이저 — Xenova tokenizer.json 과 어휘는 같고 직렬화 판만 옛것(어느 판에도 이 해시는 없다). 기존 기기에서 복사한다"}
+    # 토크나이저는 받을 수 있는 것으로 바꿨다 (2026-11-26). 전에는 main 기기에서 손으로 옮긴
+    # onnx/tokenizer_dictionary.json(어느 판에도 없는 해시) 이라 새 기기에서는 CLIP 글 근거가 아예 막혔다.
+    # Xenova 의 tokenizer.json 은 어휘가 같다 — 실측: "a photo of a sky blue door" 가 같은 CLIP BPE 번호
+    # [49406 320 1125 539 320 2390 1746 2489 49407] 로 나온다. 옛 사전이 있는 기기는 그대로 두면 된다(안 읽는다).
+    - {path: models/clip-vit-base-patch32/tokenizer.json, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: tokenizer.json, sha256: f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd}
   clip_fp32:
     note: CLIP ViT-B/32 ONNX fp32 — river 위험물 확인 (GPU 19.5 ms)
     files: [models/clip-vit-base-patch32/onnx/vision_model.onnx]

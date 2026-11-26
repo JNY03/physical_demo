@@ -20,7 +20,7 @@ PLAN = {"gpu_units": [{"models": ["yoloe"], "sources": ["pi13"], "node": "wsl", 
 def test_brief_preview_and_run():
     run = cli.brief({"plan": PLAN, "mode": "local", "basis": "saved", "ok": False, "why": "k3s 없음"})
     assert "방식: local (기억한 자원) — k3s 없음" in run and "지금 여유" not in run      # run 에는 들이기 정보가 없다
-    assert "fps 상한 pi13 6.3" in run and "못 함: input:robot1" in run and "CPU cam360_slice → wsl (비교 측정 전)" in run
+    assert "fps 상한 pi13 6.3" in run and "못 함: input:robot1" in run and "CPU cam360_slice: wsl (비교 측정 전)" in run
     p = dict(PLAN, gpu_units=[dict(PLAN["gpu_units"][0], admit={"ok": False, "why": "GPU 메모리 부족", "room_mb": 900})])
     pre = cli.brief({"plan": p, "mode": "k3s", "basis": "live", "ok": True, "why": ""})
-    assert "지금 여유 900 MB → 안 됨: GPU 메모리 부족" in pre
+    assert "지금 여유 900 MB: 안 됨: GPU 메모리 부족" in pre

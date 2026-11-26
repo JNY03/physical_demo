@@ -331,8 +331,9 @@ class FakeCtl:
     def replan_if_needed(self, rid):
         return None
 
-    def submit(self, sources, models, profile, profile_path, target_fps=None):
+    def submit(self, sources, models, profile, profile_path, target_fps=None, assign=None, manual=None):
         self.calls.append(("submit", tuple(sources), tuple(models), (profile or {}).get("profile_version")))
+        self.last_submit = {"assign": assign, "manual": manual}      # 기기별 모델 매칭 · 수동 배치 (2026-11-26)
         rid = "req-%d" % len(self.calls)
         if self.refuse:
             self.state.data["requests"][rid] = {"plan": {"refused": [{"reason": "GPU 메모리 부족"}]}}
@@ -385,3 +386,27 @@ def test_orchestrate_in_process(env):
     s.tick()
     assert ("stop", "req-2") in ctls[-1].calls and ctls[-1].state.closed
     assert isinstance(s.comps["vision"], sv.VisionProc) and len(env.pp.started("vision")) == 1
+
+
+def test_orchestrate_passes_model_match_and_manual_place(env):
+    """기기별 모델 매칭 · 수동 배치는 원하는 상태에서 컨트롤러로 그대로 간다 (2026-11-26)"""
+    ctls = []
+
+    def factory(sup):
+        k = FakeCtl()
+        ctls.append(k)
+        return k, ""
+    env.put(doc(vision={"orchestrate": True, "assign": {"pi13": ["yoloe"], "a2": []},
+                        "manual": {"enabled": True, "place": {"object_detect.device": "pi1"}}}))
+    s = env.make("vision")
+    s.controller_factory = factory
+    s.tick()
+    assert ctls[-1].last_submit == {"assign": {"pi13": ["yoloe"], "a2": []},
+                                    "manual": {"object_detect.device": "pi1"}}
+    # 수동 배치를 끄면 자리를 넘기지 않는다 (적어 둔 것은 그대로 남는다)
+    env.put(doc(vision={"orchestrate": True,
+                        "manual": {"enabled": False, "place": {"object_detect.device": "pi1"}}}))
+    s2 = env.make("vision")
+    s2.controller_factory = factory
+    s2.tick()
+    assert ctls[-1].last_submit == {"assign": None, "manual": None}

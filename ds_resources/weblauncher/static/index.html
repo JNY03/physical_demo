@@ -14,6 +14,8 @@
       <button type="button" role="tab" data-tab="stream" class="on">스트림</button>
       <button type="button" role="tab" data-tab="target">지정 클래스</button>
       <button type="button" role="tab" data-tab="overlay">오버레이</button>
+      <button type="button" role="tab" data-tab="match">모델 매칭</button>
+      <button type="button" role="tab" data-tab="manual">수동 배치</button>
     </nav>
   </header>
 
@@ -57,6 +59,28 @@
     <fieldset class="group" id="overlayGroup">
       <legend>오버레이</legend>
       <div id="overlay"></div>
+    </fieldset>
+  </section>
+
+  <section id="tab-match" class="tab">
+    <fieldset class="group" id="matchGroup">
+      <legend>기기별 모델 매칭</legend>
+      <div class="row muted" id="matchNote"></div>
+      <div id="match"></div>
+      <div class="row"><button type="button" id="matchReset">모두 되돌리기 (고른 모델 전부)</button></div>
+    </fieldset>
+  </section>
+
+  <section id="tab-manual" class="tab">
+    <fieldset class="group" id="manualGroup">
+      <legend>수동 배치</legend>
+      <div class="row">
+        <label><input type="checkbox" id="manual"> 수동으로 자리 고르기</label>
+        <button type="button" id="manualReload">노드 · 작업 다시 읽기</button>
+        <span id="manualNote" class="muted"></span>
+      </div>
+      <div id="nodes"></div>
+      <div id="manualTable"></div>
     </fieldset>
   </section>
 

@@ -20,6 +20,7 @@ API
   PUT  /api/desired       {"ui": 화면 상태, "running": 참/거짓} → 검사 → desired.write. 틀리면 400 {"errors": [...]}
                           (ui 없이 원하는 상태 문서 그대로 보내도 된다)
   POST /api/plan          {"ui"} → {"text", "json"} — 배치 보기 (ds_resources.cli plan 과 같은 계산, 띄우지 않음)
+  GET  /api/places        {"nodes", "units"} — 수동 배치 탭이 고를 노드 · 작업 단위 (읽기만)
   GET  /api/status        원하는 상태 · ds_reported:* · orchestration_stream(execution_id 별 마지막) · 소스 /health · 상태 줄
   POST /api/register_target {"name", "size", "colour"} → 직접 입력 대상을 등록 대상으로 저장 (런처 「등록으로 저장」)
 """
@@ -94,16 +95,28 @@ def default_catalog():
     return cc.catalog(cfg)
 
 
+def _controller(redis_url):
+    from ds_resources import cli
+    a = argparse.Namespace(redis=redis_url, redis_public=redis_url, cluster=os.environ.get("DS_CLUSTER", "auto"))
+    return cli.build(a, writer=False)
+
+
 def default_planner(redis_url):
     """ds_resources.cli plan --json 과 같은 계산을 프로세스 안에서 (읽기만 · 띄우지 않음)"""
-    def plan(sources, models, profile):
+    def plan(sources, models, profile, assign=None, manual=None):
         from ds_resources import cli
-        a = argparse.Namespace(redis=redis_url, redis_public=redis_url,
-                               cluster=os.environ.get("DS_CLUSTER", "auto"))
-        k = cli.build(a, writer=False)
-        p = k.preview(sources, models, profile)
+        k = _controller(redis_url)
+        p = k.preview(sources, models, profile, assign=assign, manual=manual)
         return cli.brief(p), p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"]}
     return plan
+
+
+def default_places(redis_url):
+    """수동 배치 탭이 고를 것 — 지금 보이는 노드와 놓을 수 있는 작업 단위 (읽기만)"""
+    def places():
+        k = _controller(redis_url)
+        return k.places()
+    return places
 
 
 def default_health(port, host="127.0.0.1", timeout=0.5):
@@ -130,11 +143,12 @@ def _ts_age(ts, now):
 # ------------------------------------------------------------ 앱
 class App:
     def __init__(self, r, state_dir, catalog_fn=default_catalog, planner=None, health_fn=default_health,
-                 clock=time.time, target_dir=None):
+                 clock=time.time, target_dir=None, places_fn=None):
         self.r = r
         self.state_dir = Path(state_dir)
         self.path = self.state_dir / "desired.json"
         self.catalog_fn, self.planner, self.health_fn, self.clock = catalog_fn, planner, health_fn, clock
+        self.places_fn = places_fn                   # 수동 배치 탭이 고를 노드 · 작업 (없으면 503)
         self.target_dir = target_dir
         self._cat, self._cat_t = None, 0.0
         self.lock = threading.Lock()                 # 쓰기 · 배치 계산을 한 번에 하나씩
@@ -204,17 +218,37 @@ class App:
         cat = self.catalog()
         ui = pf.normalize_ui((body or {}).get("ui"), cat)
         doc = pf.to_desired(ui, True, cat)
-        srcs, models = ds.vision_sources(doc), doc["vision"]["models"]
+        v = doc["vision"]
+        srcs, models = ds.vision_sources(doc), v["models"]
         if not srcs or not models:
             return 400, {"errors": ["소스와 비전 모델을 고르세요."]}
         if self.planner is None:
             return 503, {"errors": ["배치 계산기가 없습니다."]}
+        # 기기별 모델 매칭 · 수동 배치를 그대로 넘긴다 (실행과 같은 계산). 인자 셋만 받는 옛 계산기도 받는다
+        args = (srcs, models, v["profile"])
+        try:
+            import inspect
+            if len(inspect.signature(self.planner).parameters) >= 5:
+                args += (v.get("assign") or None, ds.manual_place(doc) or None)
+        except (TypeError, ValueError):              # 서명을 못 읽는 것(C 함수 등) — 셋으로
+            pass
         with self.lock:
             try:
-                text, js = self.planner(srcs, models, doc["vision"]["profile"])
+                text, js = self.planner(*args)
             except Exception as e:  # noqa: BLE001
                 return 500, {"errors": ["배치를 계산하지 못했습니다: %s" % e]}
-        return 200, {"text": text, "json": js, "sources": srcs, "models": models}
+        return 200, {"text": text, "json": js, "sources": srcs, "models": models,
+                     "assign": v.get("assign") or {}, "manual": ds.manual_place(doc)}
+
+    def places(self):
+        """수동 배치 탭 — 고를 수 있는 노드와 작업 단위"""
+        if self.places_fn is None:
+            return 503, {"errors": ["노드 · 작업 목록을 읽을 수 없습니다 (배치 계산기 없음)."]}
+        with self.lock:
+            try:
+                return 200, self.places_fn()
+            except Exception as e:  # noqa: BLE001
+                return 500, {"errors": ["노드 · 작업을 읽지 못했습니다: %s" % e]}
 
     def register_target(self, body):
         body = body or {}
@@ -375,6 +409,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, a.get_desired())
             if method == "GET" and path == "/api/status":
                 return self._send(200, a.status())
+            if method == "GET" and path == "/api/places":
+                return self._send(*a.places())
             if method in ("PUT", "POST") and path in ("/api/desired", "/api/plan", "/api/register_target"):
                 try:
                     body = self._body()
@@ -426,7 +462,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     import redis
     r = redis.Redis.from_url(a.redis, socket_connect_timeout=2, socket_timeout=5, decode_responses=True)
-    app = App(r, a.state_dir, planner=default_planner(a.redis))
+    app = App(r, a.state_dir, planner=default_planner(a.redis), places_fn=default_places(a.redis))
     srv = make_server(app, a.host, a.port)
     print("웹 런처: http://%s:%d/  (Redis %s · 상태 %s)%s" % (
         "127.0.0.1" if a.host == "0.0.0.0" else a.host, a.port, a.redis, app.path,

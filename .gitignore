@@ -41,3 +41,16 @@ result_files/
 # 자원 기억 (ds_resources) — 기기마다 다르다
 state/
 .claude/worktrees/
+
+# 런처가 자기 폴더에 쓰는 것 (기기마다 다르다 — 설치된 자리에도 같은 이름으로 생긴다)
+tools/launcher/settings.json
+tools/launcher/launcher.local.json
+tools/launcher/catalog_cache.json
+tools/launcher/profile.json
+tools/launcher/profile_preview.json
+
+# 파이썬 가상환경 (기기마다 다르다 — 이 저장소에서는 다른 자리를 가리키는 심볼릭 링크다)
+venv
+venv/
+.venv
+.venv/

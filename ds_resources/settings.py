@@ -68,6 +68,37 @@ def load_hosts():
     return data if isinstance(data, dict) else {}
 
 
+def user_sources_file():
+    """사람이 런처에서 더한 소스 목록 — config/sources.json (없으면 None). 깃에 올리지 않는다(기기마다 다르다)."""
+    for p in (REPO / "config" / "sources.json", REPO / "sources.local.json"):
+        if p.exists():
+            return p
+    return None
+
+
+def load_user_sources():
+    """{이름: {host, port, path, note}} — 사람이 더한 소스. 파일이 없으면 {}.
+    port 는 **데이터 서버가 열 포트**이고, host 와 path 는 그 기기에서 영상을 가져올 자리다.
+    틀린 JSON 이면 바로 멈춘다(조용히 빈 목록으로 돌지 않게 — load_hosts 와 같은 규칙)."""
+    path = user_sources_file()
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise SystemExit("%s 을 못 읽었습니다: %s" % (path, e))
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for name, v in data.items():
+        if not isinstance(v, dict) or not v.get("host") or not v.get("port"):
+            continue
+        out[str(name)] = {"host": str(v["host"]), "port": int(v["port"]),
+                          "path": str(v.get("path") or "/stream/1"), "note": str(v.get("note") or ""),
+                          "cam_port": int(v.get("cam_port") or 8090)}
+    return out
+
+
 def python():
     """자식 프로세스용 Python — DS_PYTHON > 지금 Python."""
     return os.environ.get("DS_PYTHON") or sys.executable

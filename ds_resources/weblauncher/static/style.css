@@ -57,3 +57,9 @@ dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--pa
          width: min(680px, calc(100vw - 32px)); }
 dialog h2 { font-size: 16px; margin: 0 0 8px; }
 @media (max-width: 520px) { .lab { width: 100%; } .bottom { flex-direction: column; align-items: stretch; } }
+
+/* 모델 매칭 · 수동 배치 (2026-11-26) */
+table.match td:not(:first-child) { text-align: center; }
+table.match td label { justify-content: center; }
+#manualTable select, #match select { min-width: 120px; }
+td.err { color: var(--danger); }

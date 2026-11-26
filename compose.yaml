@@ -1,0 +1,228 @@
+# data_stream 을 컨테이너로 띄운다 (Docker 배포 계획 §3 · §4 · D4).
+#
+#   docker compose --profile core up -d                      데이터 서버 · 감독자 · 웹 런처 (GPU · k3s 없이 돈다)
+#   docker compose --profile core --profile vision-gpu up -d  + GPU 비전 (NVIDIA 컨테이너 툴킷이 있어야 한다)
+#   docker compose --profile core --profile vision-cpu up -d  + CPU 로 되는 비전 조각
+#   docker compose --profile redis up -d redis                Redis 가 이 기기에 아직 없을 때만
+#   docker compose run --rm preflight                         아무것도 띄우지 않고 「무엇이 되는지」만 본다
+#   docker compose -f compose.yaml -f compose.k3s.yaml ...     파이(k3s)까지 쓸 때 (compose.k3s.yaml 참고)
+#
+# 사람이 따라 하는 순서는 docker/README.md 에 있다.
+#
+# 네트워크 (계획 §3): 전부 `network_mode: host` 다. 까닭 둘 —
+#   1) 데이터 서버가 파이(테일넷)에서 직접 당겨 온다.
+#   2) 대역폭 측정은 **파이 파드가 이 기기의 임시 포트로 들어오는 HTTP** 다(orchestrator/k3s_source.py).
+#      bridge 에서는 측정 자체가 안 된다.
+# 그래서 포트는 지금과 같다(10001~10012 · 10080 · 6380) — 가시화와 파이는 주소를 바꾸지 않는다(계획 §11).
+# Docker Desktop(Windows)은 host 모드가 제한적이다 → WSL 안 docker-ce 를 권장 경로로 둔다.
+#
+# 넣지 않는 것: 가중치 · 기기 주소 · 계정. 가중치는 models/ 를 **읽기 전용**으로, 주소는 config/ 를 마운트해 준다.
+
+name: ds                       # 컨테이너 이름을 ds-core-1 처럼 짧고 예측 가능하게. 다른 compose 프로젝트와 섞이지 않는다
+
+# ---------------------------------------------------------------- 공통 조각
+x-ds-env: &ds-env
+  DS_HOME: /ds                                              # 모든 경로의 뿌리 (계획 §6)
+  # 노드 이름 — 기억 파일의 열쇠이고 k3s 노드와 맞춰 보는 이름이다. **컨테이너를 다시 띄워도 같아야 한다.**
+  # host 네트워크에서는 비워 두면 호스트 이름이 되어 지금과 같은 값이다. host 가 아니면 반드시 주세요(안 주면 컨테이너 ID 가 된다).
+  DS_NODE_NAME: ${DS_NODE_NAME:-}
+  DS_PYTHON: /opt/venv/bin/python                            # 비전 등 자식 프로세스를 띄울 Python (컨테이너에는 venv 가 없다)
+  DS_REDIS: ${DS_REDIS:-redis://127.0.0.1:6380/0}            # 지금과 같은 조건의 Redis (계획 §3)
+  DS_STATE_DIR: /ds/state
+  DS_CONFIG_DIR: /ds/config
+  DS_CLUSTER: ${DS_CLUSTER:-auto}                            # auto = kubectl · kubeconfig 가 있을 때만 k3s 를 본다
+  DS_CORES_RESERVED: ${DS_CORES_RESERVED:-}                  # 제어용으로 남길 코어 수 (빈 값 = config/node.json 또는 0)
+  DS_PREFLIGHT: ${DS_PREFLIGHT:-1}                           # 0 = 첫 실행 안내(preflight)를 건너뛴다
+  TZ: ${TZ:-Asia/Seoul}
+  HOME: /tmp                                                 # 컨테이너에는 사람의 홈이 없다. ~ 를 찾는 코드가 /tmp 를 보게 둔다
+  # 기기 주소는 config/hosts.json 으로 준다. 환경변수로 주고 싶으면 .env 에 PD_HOST_PI13=100.x.y.z 처럼 적으세요
+  # (아래 env_file 이 .env 를 읽는다 — 파일이 없어도 된다).
+
+x-ds-volumes: &ds-volumes
+  # state/ 는 **이름 볼륨이 아니라 바인드 마운트**다 (계획 §6). 파일 잠금(flock)은 같은 파일에서만 통하므로,
+  # 옮기는 동안 호스트 venv 프로세스와 컨테이너가 서로의 잠금을 봐야 같은 GPU 를 두 번 띄우지 않는다.
+  - ./state:/ds/state
+  - ./stream_data:/ds/stream_data                            # 받은 것을 저장하는 곳 (호스트에서 바로 열어 본다)
+  - ./models:/ds/models:ro                                   # 가중치 — 읽기 전용 (이미지에 넣지 않는다)
+  - ./external:/ds/external:ro                               # 외부 코드(UniDepth · AerialMetric) — 읽기 전용
+  - ./config:/ds/config:ro                                   # hosts.json · vision_config.local.yaml · kubeconfig(선택)
+
+x-ds-common: &ds-common
+  network_mode: host
+  env_file:
+    - path: .env                                             # 없어도 된다 (DS_NODE_NAME · PD_HOST_* 를 여기 적어도 된다)
+      required: false
+  init: true                                                 # 자식의 자식이 떠돌아도 거둬 간다 (감독자가 프로세스를 띄운다)
+  stop_grace_period: 40s                                     # 감독자가 자식을 SIGINT → SIGTERM → SIGKILL 로 끄는 시간(6+2+1초 ×단계)
+
+x-ds-app: &ds-app                                            # 우리 코드가 도는 서비스 (ds-core · ds-vision-*)
+  <<: *ds-common
+  # **호스트 사용자로 돈다.** 기본값으로 돌면 state/ · stream_data/ 에 root 소유 파일이 쌓여,
+  # 호스트 venv 쪽(지금 방식)이 같은 파일을 못 고치고 잠금도 못 잡는다 — 두 방식이 나란히 도는 동안(계획 §6) 깨진다.
+  # 이 기기 사용자는 1000:1000 이고 ubuntu 베이스 이미지에도 같은 uid 가 있다. 다르면 .env 에 DS_UID · DS_GID 를 적으세요.
+  user: "${DS_UID:-1000}:${DS_GID:-1000}"
+
+services:
+  # -------------------------------------------------------------- core
+  # 데이터 서버(server_stream_multi_source.py) · 360 슬라이스를 감독자가 원하는 상태에 맞춰 띄운다.
+  # 웹 런처는 원하는 상태만 쓰고, 실제를 맞추는 것은 이 감독자다 (계획 §5).
+  core:
+    <<: *ds-app
+    profiles: ["core"]
+    image: ds-core:dev
+    build:
+      context: .
+      dockerfile: docker/core/Dockerfile
+      target: ds-core
+    environment: *ds-env
+    volumes: *ds-volumes
+    # --role core: 데이터 서버 · 슬라이스만. 비전(--role vision)은 torch 가 있는 vision-gpu · vision-cpu 쪽 감독자가 맡는다
+    # (ds-core 에는 torch 가 없다 — 계획 §3 · §5).
+    command: ["python", "-m", "ds_resources.supervisor", "--role", "core"]
+    restart: unless-stopped                                  # 감독자는 「돌 것이 없음」으로 끝나지 않는다 → 재시작 고리가 안 생긴다
+    healthcheck:
+      # 감독자가 살아 있으면 state/reported_core.json 의 ts 를 2초마다 새로 쓴다. 그것이 멈췄으면 아픈 것이다.
+      test: ["CMD", "python", "-c", "import json,time,sys; d=json.load(open('/ds/state/reported_core.json')); sys.exit(0 if time.time()-d['ts'] < 15 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # -------------------------------------------------------------- 웹 런처
+  # 같은 이미지, 다른 프로세스. 한 컨테이너에 두 프로세스를 넣지 않는 까닭: 로그가 섞이지 않고,
+  # 한쪽이 죽어도 다른 쪽이 그대로 돌고, 상태 검사(healthcheck)를 따로 볼 수 있다. host 네트워크라 포트도 그대로다.
+  weblauncher:
+    <<: *ds-app
+    profiles: ["core"]
+    image: ds-core:dev
+    build:
+      context: .
+      dockerfile: docker/core/Dockerfile
+      target: ds-core
+    environment:
+      <<: *ds-env
+      # 127.0.0.1 밖에서 열려면 호스트 이름을 여기 적는다(Host 머리 검사 — 인증이 없으니 아무 이름이나 받지 않는다)
+      DS_WEB_ALLOWED_HOSTS: ${DS_WEB_ALLOWED_HOSTS:-}
+    volumes: *ds-volumes
+    # 기본은 127.0.0.1 — 이 기기에서만 열린다. 믿는 망(테일넷)에서 열려면 DS_WEB_HOST=0.0.0.0 (인증 없음, 계획 §5)
+    command: ["python", "-m", "ds_resources.weblauncher", "--host", "${DS_WEB_HOST:-127.0.0.1}", "--port", "${DS_WEB_PORT:-10080}"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:${DS_WEB_PORT:-10080}/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # -------------------------------------------------------------- 비전 (GPU)
+  # 베이스 이미지를 먼저 한 번 만들어야 한다 (torch 를 받아 오래 걸린다):
+  #   docker build -t ds-vision-gpu-base:dev --target ds-vision-gpu-base docker/vision-gpu
+  vision-gpu:
+    <<: *ds-app
+    profiles: ["vision-gpu"]
+    image: ds-vision-gpu:dev
+    build:
+      context: .
+      dockerfile: docker/vision-gpu/Dockerfile.app
+      target: ds-vision-gpu
+      args:
+        BASE: ${DS_VISION_GPU_BASE:-ds-vision-gpu-base:dev}
+    environment:
+      <<: *ds-env
+      HF_HOME: /ds/hf_cache
+      HF_HUB_OFFLINE: "1"                                    # 가중치는 models/ 에 있는 것만 쓴다 (받으러 나가지 않는다)
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./state:/ds/state
+      - ./stream_data:/ds/stream_data
+      - ./models:/ds/models:ro
+      - ./external:/ds/external:ro
+      - ./config:/ds/config:ro
+      - hf_cache:/ds/hf_cache                                # transformers · tokenizers 가 쓰는 캐시 (가중치는 models/)
+    command: ["python", "-m", "ds_resources.supervisor", "--role", "vision"]
+    restart: unless-stopped
+    # GPU: 호스트에 NVIDIA 컨테이너 툴킷이 있어야 한다. 없으면 여기서 「could not select device driver」로 멈춘다
+    # (그때도 core 프로필은 그대로 돈다 — docker/README.md 「GPU 가 없을 때」).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time,sys; d=json.load(open('/ds/state/reported_vision.json')); sys.exit(0 if time.time()-d['ts'] < 15 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s                                      # torch · 모델 적재가 끝날 시간
+
+  # -------------------------------------------------------------- 비전 (CPU)
+  # torch 없이 onnxruntime 으로 되는 것만 (CLIP ONNX 단서 검증 · ONNX 깊이 추적). GPU 가 없는 기기의 길이다.
+  vision-cpu:
+    <<: *ds-app
+    profiles: ["vision-cpu"]
+    image: ds-vision-cpu:dev
+    build:
+      context: .
+      dockerfile: docker/core/Dockerfile
+      target: ds-vision-cpu
+    environment:
+      <<: *ds-env
+      HF_HOME: /ds/hf_cache
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - ./state:/ds/state
+      - ./stream_data:/ds/stream_data
+      - ./models:/ds/models:ro
+      - ./external:/ds/external:ro
+      - ./config:/ds/config:ro
+      - hf_cache:/ds/hf_cache
+    command: ["python", "-m", "ds_resources.supervisor", "--role", "vision"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time,sys; d=json.load(open('/ds/state/reported_vision.json')); sys.exit(0 if time.time()-d['ts'] < 15 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # -------------------------------------------------------------- Redis (없을 때만)
+  # 이 기기에는 이미 Redis 가 127.0.0.1:6380 에 떠 있다(mission-runtime-data-stream-redis). 그러면 이 서비스는 띄우지 않는다.
+  # 같은 포트를 두 번 열 수 없고, 가시화 · 파이가 보는 것은 그 하나여야 한다. 그래서 프로필을 따로 뒀다.
+  # 조건은 지금과 같다(계획 §3): :6380 · 비밀번호 없음 · 저장 안 함 · 넘치면 오래 안 쓴 키부터 버림.
+  redis:
+    <<: *ds-common
+    profiles: ["redis"]
+    image: redis:7-alpine
+    # bind: 기본은 이 기기만. 다른 기기(가시화 · 파이)가 읽어야 하면 DS_REDIS_BIND="127.0.0.1 100.x.y.z" 처럼
+    # 테일넷 주소를 더한다 — 비밀번호가 없으니 그 망을 믿을 때만.
+    command: ["redis-server", "--port", "6380", "--bind", "${DS_REDIS_BIND:-127.0.0.1}",
+              "--maxmemory", "${DS_REDIS_MAXMEMORY:-4gb}", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # -------------------------------------------------------------- 안내만 (한 번 돌고 끝난다)
+  # 아무것도 띄우지 않고 이 기기에서 무엇이 되고 무엇이 왜 안 되는지만 찍는다:
+  #   docker compose run --rm preflight
+  preflight:
+    <<: *ds-app
+    profiles: ["tools"]
+    image: ds-core:dev
+    build:
+      context: .
+      dockerfile: docker/core/Dockerfile
+      target: ds-core
+    environment:
+      <<: *ds-env
+      DS_PREFLIGHT: "0"                                      # 두 번 찍지 않게 (아래 명령이 그 일을 한다)
+    volumes: *ds-volumes
+    command: ["python", "-m", "ds_resources.cli", "preflight"]
+    restart: "no"
+
+volumes:
+  hf_cache:

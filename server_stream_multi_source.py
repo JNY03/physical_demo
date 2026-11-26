@@ -248,6 +248,13 @@ SOURCES = {"cam360": 10001, "drone": 10002, "robot1": 10003, "ep-001": 10004,
            "realsense": 10005, "cam360_slice": 10006, "a2": 10007,
            "pi11": 10008, "pi12": 10009, "pi13": 10011,
            "drone2": 10012}
+#: 사람이 런처에서 더한 소스 (config/sources.json) — 이름 → 이 서버가 열 포트.
+#: 주소와 경로는 아래 load_default_hosts 가 함께 읽는다. 기기를 더하려고 이 파일을 고치지 않게 하려는 것이다
+#: (2026-11-26). 받는 길은 기존 기기와 같다 — http://<주소>:8090/stream/<n> MJPEG.
+USER_SOURCES = settings.load_user_sources()
+for _n, _v in USER_SOURCES.items():
+    SOURCES.setdefault(_n, int(_v["port"]))
+
 ALIASES = {"cam360": "cam360", "camera": "cam360", "360": "cam360",
            "drone": "drone", "drone2": "drone2", "x500-002": "drone2", "robot1": "robot1",
            "ep-001": "ep-001", "ep": "ep-001", "ep1": "ep-001", "robomaster": "ep-001", "pi1": "ep-001",
@@ -289,6 +296,8 @@ def load_default_hosts():
              "pi11": None,           # pi11 (picam_mjpeg.py 8090 · 브로커 없음)
              "pi12": None,           # pi12 (picam_mjpeg.py 8090 · 브로커 없음)
              "pi13": None}           # pi13 (picam_mjpeg.py 8090 · 브로커 없음)
+    for n, v in USER_SOURCES.items():             # 사람이 더한 소스의 주소 (config/sources.json)
+        hosts[n] = v["host"]
     data = settings.load_hosts()                  # 실제 주소 파일 (깃에 올리지 않음)
     hosts.update((k, data[k]) for k in hosts if data.get(k))
     for k in hosts:

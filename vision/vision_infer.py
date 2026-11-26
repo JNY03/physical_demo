@@ -735,6 +735,15 @@ class LabelStabilizer:
             d["cls"] = t["cls"].get(t["name"], d["cls"])
 
 
+#: features.track 로 켤 때의 기본값. 지정 클래스 · river 와 같은 작동점(번호만 붙이고 거르지 않는다)에
+#: **이름 유지(hyst-2)** 를 더한다 — 런처에서 이 기능을 켜는 까닭이 「탐지가 장마다 바뀐다」이기 때문이다.
+#: 2026-11-26 pi12 실측: 끄면 라벨 목록이 31% 의 장에서 바뀌었다(close-up ↔ sky). hyst-2 는 지금 이름을 두고
+#: 다른 이름이 2장 연속 이겨야 바꾼다. 라벨 자료에서는 macro F1 −0.046 이라 기본값으로 켜지 않는다 —
+#: 켜는 것은 사람이 고를 때뿐이고, vision_config 의 stabilize.<모델> 값이 있으면 그쪽이 이긴다.
+TRACK_ON = {"backend": "bytetrack", "on_untracked": "keep", "keep_boxes": "detection",
+            "reset_gap_s": 2.0, "label_policy": "hyst-2"}
+
+
 def stabilize_cfg(cfg, model):
     """`stabilize` 의 바탕값 위에 `stabilize.<model>` 을 얹는다.
 
@@ -744,7 +753,12 @@ def stabilize_cfg(cfg, model):
     """
     sc = cfg.get("stabilize") or {}
     base = {k: v for k, v in sc.items() if not isinstance(v, dict)}
-    return {**base, **(sc.get(model) or {})}
+    out = {**base, **(sc.get(model) or {})}
+    # 런처 기능 「추적」(features.track) — 그 모델에 stabilize 블록이 없어도 켠다. 가중치가 필요 없고
+    # (트래커는 ultralytics 안에 있다) 번호만 붙이는 층이라 박스는 탐지기 것을 그대로 낸다
+    if (cfg.get("_features") or {}).get("track") and not out.get("enabled"):
+        out = {**TRACK_ON, **out, "enabled": True}
+    return out
 
 
 class Stabilizer:

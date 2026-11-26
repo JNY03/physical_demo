@@ -1,0 +1,57 @@
+# k3s(파이까지) 레이어 — compose.yaml **위에 얹는** 덮어쓰기 파일 (Docker 배포 계획 §3 · D8).
+#
+#   docker compose -f compose.yaml -f compose.k3s.yaml --profile core up -d
+#   docker compose -f compose.yaml -f compose.k3s.yaml --profile core --profile vision-gpu up -d
+#
+# 이것이 하는 일은 셋뿐이다.
+#   1) 이미지를 `-k3s` 변형으로 바꾼다 — 같은 코드 + `orchestrator/` + kubectl (계획 §3:
+#      ds-orchestrator 라는 별도 컨테이너를 두지 않는다. k3s 플러그인은 데이터 서버의 기록기와
+#      오케스트레이터 **안에서** 경로 문자열로 불리는 것이므로, 따로 도는 서비스가 대신할 수 없다).
+#   2) kubeconfig 를 가리킨다 (파일 자체는 compose.yaml 의 ./config 마운트로 이미 들어온다).
+#   3) 파이 파드가 닿는 Redis 주소(DS_REDIS_PUBLIC)를 준다 — 127.0.0.1 은 파이에서 이 기기가 아니다.
+#
+# 먼저 준비할 것:
+#   - config/kubeconfig  (k3s 서버의 /etc/rancher/k3s/k3s.yaml 을 복사하고 server: 주소를 이 기기 주소로)
+#   - .env 또는 셸에 DS_REDIS_PUBLIC=redis://<이 기기 테일넷 주소>:6380/0
+#   - 파이가 당길 수 있는 이미지 레지스트리 (계획 §10-3 — 아직 결정 사항)
+# 이것을 얹지 않으면 kubectl 이 없어 `backends.k3s_available()` 이 거짓이 되고, 지금처럼 이 기기 안(local)에서만 돈다.
+
+services:
+  core:
+    image: ds-core:dev-k3s
+    build:
+      target: ds-core-k3s
+    environment:
+      KUBECONFIG: /ds/config/kubeconfig          # backends.py: KUBECONFIG > ~/.kube/config
+      DS_CLUSTER: auto                           # kubectl 과 kubeconfig 가 둘 다 있을 때만 k3s 를 본다
+    command: ["python", "-m", "ds_resources.supervisor", "--role", "core",
+              "--redis-public", "${DS_REDIS_PUBLIC:?파이 파드가 닿는 Redis 주소를 주세요 — 예: DS_REDIS_PUBLIC=redis://100.x.y.z:6380/0}"]
+
+  # 웹 런처도 같은 이미지로 바꾼다 — 「배치 보기」가 파이 노드를 보려면 kubectl · orchestrator/ 가 있어야 한다
+  weblauncher:
+    image: ds-core:dev-k3s
+    build:
+      target: ds-core-k3s
+    environment:
+      KUBECONFIG: /ds/config/kubeconfig
+      DS_CLUSTER: auto
+
+  vision-gpu:
+    image: ds-vision-gpu:dev-k3s
+    build:
+      target: ds-vision-gpu-k3s
+    environment:
+      KUBECONFIG: /ds/config/kubeconfig
+      DS_CLUSTER: auto
+    command: ["python", "-m", "ds_resources.supervisor", "--role", "vision",
+              "--redis-public", "${DS_REDIS_PUBLIC:?파이 파드가 닿는 Redis 주소를 주세요 — 예: DS_REDIS_PUBLIC=redis://100.x.y.z:6380/0}"]
+
+  # 「무엇이 되는지」도 k3s 판으로 본다 — kubectl 이 있어야 preflight 가 k3s 를 「있음」으로 읽는다
+  preflight:
+    image: ds-core:dev-k3s
+    build:
+      target: ds-core-k3s
+    environment:
+      KUBECONFIG: /ds/config/kubeconfig
+
+# vision-cpu 는 바꾸지 않는다 — 파이에 올리는 CPU 작업(ds-cpu-task-*)은 k3s 가 제 이미지로 당긴다(계획 §3).

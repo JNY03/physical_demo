@@ -16,7 +16,11 @@ version 은 쓸 때마다 1 씩 오른다. 칸은 추가만 한다(schema 이름
       "slice":  {"enabled": false, "u": null, "v": -30},
       "vision": {"enabled": true, "orchestrate": true, "models": ["yoloe"],
                  "profile": {...},                       # 지금 런처의 profile.json 과 같은 모양 (profile_version 은 감독자가 단다)
-                 "max_fps": {}},                         # 선택 — 기기별 상한
+                 "max_fps": {},                          # 선택 — 기기별 상한
+                 "assign": {"pi13": ["yoloe"], "a2": []}, # 기기별 모델 매칭 (2026-11-26) — 적지 않은 기기는 models 전부,
+                                                          # 빈 목록은 그 기기에 비전을 올리지 않음
+                 "manual": {"enabled": false,             # 수동 배치 — 사람이 작업마다 노드를 고른다
+                            "place": {"object_detect.device": "pi1"}}},   # 단위 → 노드 | "none"(올리지 않음)
       "ui": {...}                                        # 선택 — 웹 런처 화면 상태. 감독자는 보지 않는다
     }
 """
@@ -36,7 +40,8 @@ SLICE_NEEDS = "cam360"
 DEFAULT = {"schema": SCHEMA, "version": 0, "updated_at": 0.0, "by": "", "running": False,
            "server": {"sources": [], "robot_cam": 1},
            "slice": {"enabled": False, "u": None, "v": -30},
-           "vision": {"enabled": False, "orchestrate": True, "models": [], "profile": {}, "max_fps": {}}}
+           "vision": {"enabled": False, "orchestrate": True, "models": [], "profile": {}, "max_fps": {},
+                      "assign": {}, "manual": {"enabled": False, "place": {}}}}
 
 
 def normalize(d):
@@ -70,6 +75,9 @@ def validate(d):
         ts = ((v.get("profile") or {}).get("models") or {}).get("targeted", {}).get("targets")
         if ts is not None and len(ts) == 0:
             errs.append("지정 클래스 탐지에는 대상이 하나 이상 필요합니다.")
+    if v["enabled"]:
+        errs += _assign_errs(d, v)
+        errs += _manual_errs(v)
     s = d["slice"]
     if s["enabled"] and SLICE_NEEDS not in srcs:
         errs.append("360 슬라이스는 cam360 소스도 켜야 합니다.")
@@ -79,6 +87,50 @@ def validate(d):
         except (TypeError, ValueError):
             errs.append("슬라이스 u 는 숫자로 적으세요.")
     return errs
+
+
+def _assign_errs(d, v):
+    """기기별 모델 매칭 검사 — 아는 기기 · 고른 모델만 적을 수 있고, 아무 기기도 안 남으면 안 된다"""
+    a = v.get("assign") or {}
+    if not isinstance(a, dict):
+        return ["vision.assign 은 {기기: [모델...]} 사전"]
+    errs = []
+    srcs, models = set(vision_sources(d)), set(v.get("models") or [])
+    for s, ms in sorted(a.items()):
+        if s not in srcs:
+            errs.append("기기별 모델 매칭에 고르지 않은 기기 %s" % s)
+        elif not isinstance(ms, list) or not all(isinstance(m, str) for m in ms):
+            errs.append("%s 에 맞출 모델은 목록으로 적으세요." % s)
+        else:
+            bad = sorted(set(ms) - models)
+            if bad:
+                errs.append("%s 에 고르지 않은 모델 %s — 모델을 먼저 고르세요." % (s, ", ".join(bad)))
+    if a and not errs and all(not (a.get(s, models)) for s in srcs):
+        errs.append("기기별 모델 매칭에서 모든 기기를 비웠습니다 — 하나 이상은 모델을 맞추세요.")
+    # 직접 비전(자원 배분 끔)은 프로세스 하나가 모든 기기를 맡는다 — 기기마다 다른 모델을 올릴 수 없다
+    if a and not v.get("orchestrate") and any(sorted(a.get(s, models)) != sorted(models) for s in srcs):
+        errs.append("기기별 모델 매칭은 자원 배분을 켠 채로 씁니다 (직접 비전은 기기마다 모델을 가를 수 없습니다).")
+    return errs
+
+
+def _manual_errs(v):
+    """수동 배치 검사 — 자원 배분을 켠 채로만 쓸 수 있다(배치 계산기가 그 자리를 지킨다)"""
+    m = v.get("manual") or {}
+    if not isinstance(m, dict):
+        return ["vision.manual 은 {enabled, place} 사전"]
+    place = m.get("place") or {}
+    if not isinstance(place, dict) or not all(isinstance(k, str) and isinstance(x, str) for k, x in place.items()):
+        return ["vision.manual.place 는 {작업: 노드} 사전"]
+    if m.get("enabled") and not v.get("orchestrate"):
+        return ["수동 배치는 자원 배분을 켠 채로 씁니다."]
+    return []
+
+
+def manual_place(d):
+    """수동 배치가 켜져 있으면 {단위: 노드}, 아니면 빈 사전 — 컨트롤러에 그대로 넘긴다"""
+    v = normalize(d)["vision"]
+    m = v.get("manual") or {}
+    return dict(m.get("place") or {}) if m.get("enabled") else {}
 
 
 def vision_sources(d):
@@ -98,7 +150,10 @@ def component_keys(d):
     slc = {"u": d["slice"].get("u"), "v": d["slice"].get("v")} if d["slice"]["enabled"] else None
     v = d["vision"]
     vis = ({"models": sorted(v["models"]), "sources": vision_sources(d), "orchestrate": bool(v["orchestrate"]),
-            "max_fps": v.get("max_fps") or {}} if v["enabled"] else None)
+            "max_fps": v.get("max_fps") or {},
+            # 기기별 모델 매칭 · 수동 배치가 바뀌면 묶음(프로세스)과 자리가 바뀐다 — 다시 띄워야 한다
+            "assign": {s: sorted(ms) for s, ms in sorted((v.get("assign") or {}).items())},
+            "manual": manual_place(d)} if v["enabled"] else None)
     return {"server": _key(srv), "slice": _key(slc) if slc is not None else None,
             "vision": _key(vis) if vis is not None else None}
 

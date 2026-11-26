@@ -158,19 +158,52 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
 - **구역**: 웹 화면에서 빈 곳을 끌면 그 기기의 탐지를 그 안으로 제한한다(분할 마스크의 50% 이상이 안에 있어야 남는다).
   구역마다 ✕, 위쪽 '구역 모두 지우기'. 창구는 `GET/POST/DELETE /control/roi` (Redis `vision_roi:<소스>`).
 
-#### 바탕화면 「데이터 스트림 실행」 런처 (2026-11-23)
+#### 바탕화면에 런처 깔기 (2026-11-26)
 
-- `C:\Users\khw67\DataStreamLauncher\launcher.ps1` · 이전 판 `launcher.ps1.bak_261123`.
-- 저장소 사본 `tools/launcher/launcher.ps1`(UTF-8 BOM — PowerShell 5.1 이 한글을 읽으려면 필요). 고치면 이것을
-  `C:\Users\khw67\DataStreamLauncher\` 에 복사한다. 바로가기: `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File launcher.ps1`
-- 탭: 스트림(소스 · 로봇 캠 · 슬라이스 · 비전 모델) · 지정 클래스(지정 클래스 탐지를 고를 때만) · 오버레이(고른 모델에 되는 것만).
+- `powershell -NoProfile -ExecutionPolicy Bypass -File tools\launcher\install_desktop.ps1`
+  → `%USERPROFILE%\DataStreamLauncher\` 에 **이 저장소의 런처 둘**(`launcher.ps1` · `web_launcher.cmd`)을 복사하고
+  바탕화면에 바로가기 둘(**데이터 스트림 실행** · **데이터 스트림 웹 런처**)을 만든다. 새 런처를 만들지 않는다.
+- 그 기기 값(배포판 · 저장소 자리 · profile.json 자리)은 `launcher.local.json` 에만 적는다 — 저장소 파일은 고치지 않는다.
+  다시 깔아도 `settings.json` · `profile.json` 은 그대로다(`-Force` 를 주면 `launcher.local.json` 도 다시 쓴다).
+- **실행 바탕은 리눅스다.** 이 저장소는 fcntl 파일 잠금(`state` · 원하는 상태) · `/proc` 읽기 · `setsid`/`killpg` ·
+  셸 스크립트(`tools/ds_run.sh` · `ds_stop.sh`) · `nvidia-smi` · `kubectl` 에 기댄다 — Windows 파이썬으로는 돌지 않는다.
+  바로가기는 그 바탕을 부르는 얇은 조각이다: WinForms 런처는 `wsl.exe` 로 창을 띄우고, 웹 런처 바로가기는 주소만 연다.
+  GPU 는 WSL2 의 CUDA 를 그대로 쓴다(이 기기 실측: RTX 3060 12 GB).
+- 네이티브 리눅스 · 컨테이너에서는 바로가기가 필요 없다 — `python -m ds_resources.weblauncher`(+ `ds_resources.supervisor`)
+  를 그대로 띄우고 브라우저로 연다. Docker 바탕도 같다(compose 로 띄우고 `web_launcher.cmd` 로 주소만 연다).
+
+#### 바탕화면 「데이터 스트림 실행」 런처 (2026-11-23 · 단계 화면 2026-11-26)
+
+- `%USERPROFILE%\DataStreamLauncher\launcher.ps1` (위 설치 스크립트가 복사한다). 저장소 사본 `tools/launcher/launcher.ps1`
+  (UTF-8 BOM — PowerShell 5.1 이 한글을 읽으려면 필요). 고치면 설치 스크립트를 다시 돌려 복사한다.
+- **고르는 순서 그대로 다섯 단계다.** 탭을 눌러 바로 가도 되고 아래 **← 이전 · 다음 →** 로 한 단계씩 가도 된다.
+
+  | 단계 | 고르는 것 |
+  |---|---|
+  | **소스** | 소스 — **지금 닿는 것만 고를 수 있다**(안 닿는 것은 흐려지고 풍선말에 까닭). cam360 옆 「세부 설정」(슬라이스 켜기 · u), robot1 옆 「cam 번호」, 「연결 재확인」, 「소스 추가」 |
+  | **기능** | 인지 켜기 · **기능 소스별 배치**(세로 기능, 가로 켠 소스. 기능마다 쓸 모델을 고르고, 소스 칸으로 어느 소스에 올릴지 고른다. 모델이 없는 기능은 아래쪽에 흐려지고 「받기」가 붙는다) · 「추가」(확장 기능 — 객체 재식별 · 추적) · 「모델 추가」 · 「탐지 시험」 · **근거 표**(기능 · 근거 · 역할 · 모델 · 예상 GPU MB) |
+  | **지정 클래스** | 대상 · 대상별 근거 · 거리 측정 — **지정 클래스 탐지를 골랐을 때만** 열리고, 「다음」이 아니면 건너뛴다 |
+  | **오버레이** | 고른 기능마다 라벨 · 탐지 개수 · 카드 등 (쓸 수 있는 것만). 「오버레이 미리보기」로 저장된 장에 그려 본다 |
+  | **배치** | 자원 배분 · 배치 보기 · **자동/수동**. 노드마다 CPU · 메모리 · GPU 막대와 범례(어느 소스의 어느 기능이 얼마나 쓰는지), 노드별 「자원 한도」. 수동이면 작업마다 `자동 · 노드 이름 · 올리지 않음` 중에서 고른다 — **고를 수 있는 기기는 소스에서 켠 것뿐이다** |
+
+- **한국어 / English** — 아래 가운데 상자에서 바꾼다. **화면 글만** 바뀐다. 모델 이름(yoloe) · 근거 이름(탐지기 · 글 설명) ·
+  대상 이름(person)은 카탈로그(`vision/cue_catalog.py`)가 주는 그대로다 — 거기까지 옮기려면 비전 쪽에 영문 칸을 더해야 한다.
+  고른 언어는 `settings.json` 의 `lang` 에 남아 다시 열면 그대로다.
+- 근거 표의 예상 GPU 는 카탈로그의 `gpu_mb_base` · `gpu_mb_option` · `gpu_mb_targeted` 를 그대로 읽은 **어림값**이다
+  (실제 필요량은 오케스트레이터가 실측 · 추정으로 다시 잡는다 — 「배치 보기」가 보여 준다).
 - **실행 뒤에도 열려 있다.** 바꾸면 1초 뒤 반영: 대상 · 근거 · 거리 · 오버레이는 `profile.json` 만(비전이 실행 중에 바꾼다,
-  새 모델은 미리 적재하는 동안 옛 설정으로), 비전 모델 → 비전 창만, 소스 · 로봇 캠 → 서버와 비전, 슬라이스 → 슬라이스 창만.
-  틀린 지정이면 옛 설정을 유지하고 아래 상태 줄에 이유가 나온다.
+  새 모델은 미리 적재하는 동안 옛 설정으로), 기능 · 켜기 · **기기별 기능** · **수동 자리** → 비전 창만, 소스 · 로봇 캠 → 서버와 비전,
+  슬라이스 → 슬라이스 창만. 틀린 지정이면 옛 설정을 유지하고 아래 상태 줄에 이유가 나온다.
 - 창마다 이름표(`tools/ds_run.sh`, `/tmp/ds_launcher/`)가 붙는다. ✕ 로 닫으면 확인한 뒤 전부 끈다.
   런처가 비정상으로 꺼져도 창은 남고, 다시 열면 '실행 중' 으로 이어받는다. 손으로 끄기: `tools/ds_stop.sh <이름>`, 목록: `tools/ds_status.sh`.
+- **소스 추가** — 소스 탭의 「소스 추가」를 누르면 이름 · 주소 · 카메라 포트 · 경로를 적는 창이 뜬다. 「연결 시험」이 그 주소를
+  열어 **JPEG 한 장이 오는지** 보고 크기와 해상도를 적어 준다(실측: pi12 `1280x720, 33599 바이트, 90 ms`). 되는 것만 「넣기」로
+  `config/sources.json` 에 적히고, 소스 줄에 바로 나타난다. 기기를 아직 안 켰으면 「기기를 아직 켜지 않았습니다」를 켜고 넣는다.
+  같은 일을 글로: `venv/bin/python tools/source_add.py --test --host 100.1.2.3` · `--save --name pi14 --host 100.1.2.3` · `--list` · `--remove pi14`.
+  **더한 소스는 데이터 스트림을 다시 시작해야 들어온다** — 서버 포트가 하나 늘어나니(10013부터) 가시화 쪽에도 그 포트를 알려 준다.
 - 로봇 캠 번호는 robot1 에만 쓰인다(ep-001 · a2 · pi11~13 은 카메라가 하나). 슬라이스 u 를 비우면 마지막 u, v 는 −30 고정.
-- 시험: `$env:DS_LAUNCHER_SELFTEST=1` 로 실행하면 창 없이 선택을 바꿔 보고 프로필을 찍는다.
+- 시험: `$env:DS_LAUNCHER_SELFTEST=1` 로 실행하면 창 없이 선택을 코드로 바꿔 보고 결과를 JSON 으로 찍는다
+  (프로필 · 단계 이동 · 한영 전환 · 기기별 기능 · 수동 자리 · 컨트롤이 화면 밖으로 나가지 않는지까지).
 
 #### 웹 런처 (2026-11-25, Docker 계획 D7)
 
@@ -183,7 +216,11 @@ python vision/cue_catalog.py --check 프로필.json                        # 프
   인증이 없으므로 `Host` 헤더를 검사한다: `localhost` · `127.0.0.1` · `::1` · 이 기기 이름 · `DS_WEB_ALLOWED_HOSTS`(쉼표 구분)
   만 받고 그 밖은 403(포트는 무시). 아무 웹페이지가 `POST /api/plan` · `/api/register_target` 을 부르는 것과 DNS rebinding 을 막는다.
   테일넷 이름 · 컨테이너 이름으로 열려면 `DS_WEB_ALLOWED_HOSTS=wsl.tail1234.ts.net` 처럼 넣는다.
-- Windows 바로가기: `tools/launcher/web_launcher.cmd [URL]` — 브라우저만 연다(주소: 인자 → `DS_WEB_LAUNCHER_URL` → `http://localhost:10080/`).
+- Windows 바로가기: `tools/launcher/web_launcher.cmd [URL]` — **브라우저만 연다**(주소: 인자 → `DS_WEB_LAUNCHER_URL` → `http://localhost:10080/`).
+  서버(`python -m ds_resources.weblauncher`)와 감독자(`python -m ds_resources.supervisor --role all`)는 따로 떠 있어야 한다 —
+  웹 런처는 원하는 상태만 쓰고, 실제로 띄우는 것은 감독자다.
+- 탭 다섯 — 스트림 · 지정 클래스 · 오버레이 · 모델 매칭 · 수동 배치. WinForms 런처와 같은 규칙이다.
+  수동 배치 탭은 `GET /api/places` (노드 · 놓을 수 있는 작업)를 읽어 고르게 한다.
 
 #### 스캔 탐지 창구 `/scan/*` (2026-11-24)
 

@@ -7,6 +7,17 @@
       시작할 때 지난 실행이 남긴 작업을 정리한다(GPU 를 두 번 쓰지 않게).
   python -m ds_resources.cli status [--json]
       실행 상태 파일을 읽기만 한다.
+  python -m ds_resources.cli places [--json]
+      수동 배치가 고를 수 있는 것 — 지금 보이는 노드와 놓을 수 있는 작업 단위. 읽기만 한다.
+  python -m ds_resources.cli preflight [--json]
+      이 기기에서 무엇이 되고 무엇이 왜 안 되는지 — 자원 · 둘레(docker · k3s · Redis) · 가중치를 읽고
+      기능마다 된다/안 된다와 고치는 길을 적는다. 아무것도 깔거나 띄우지 않는다.
+
+기기별 모델 매칭 · 수동 배치 (2026-11-26)
+  --assign pi13=yoloe a2=yoloe,river robot1=       기기마다 올릴 모델 (적지 않은 기기는 --models 전부,
+                                                  빈 값은 그 기기에 비전을 올리지 않음)
+  --pin object_detect.device=pi1 relay=none        작업 단위를 사람이 고른 노드에 (none 은 올리지 않음).
+                                                  고른 자리는 한도를 면제하지만 센서 · 가속기 · arch 는 지킨다
 
 k3s: --cluster auto(기본)는 kubectl 과 kubeconfig 가 있을 때만 orchestrator.k3s_source 를 경로 문자열로 불러온다.
 k3s 가 없는 사용자는 아무것도 안 해도 local(data_stream 기기 GPU)로 돈다. --cluster none 이면 k3s 를 보지 않는다.
@@ -63,6 +74,20 @@ def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
+def kv_pairs(items, what):
+    """["pi13=yoloe,river", "a2="] → {"pi13": ["yoloe", "river"], "a2": []}. 틀린 모양이면 SystemExit"""
+    out = {}
+    for x in items or []:
+        if "=" not in x:
+            raise SystemExit("%s 는 기기=값 모양으로 적으세요 (받은 것: %r)" % (what, x))
+        k, _, v = x.partition("=")
+        k = k.strip()
+        if not k:
+            raise SystemExit("%s 에 이름이 없습니다 (받은 것: %r)" % (what, x))
+        out[k] = [y.strip() for y in v.split(",") if y.strip()]
+    return out
+
+
 def load_profile(path):
     if not path or not Path(path).exists():
         return None
@@ -82,16 +107,24 @@ def brief(p):
         lines.append("파이 CPU 작업: 막힘 — %s" % (caps.get("why") or "이유 모름"))
     for u in plan["gpu_units"]:
         a = u.get("admit")
-        lines.append("GPU %s · %s → %s" % ("+".join(u["models"]), " ".join(u["sources"]), u["node"]))
+        lines.append("GPU %s, %s: %s" % ("+".join(u["models"]), " ".join(u["sources"]), u["node"]))
         need = "  필요 %d MB (%s)" % (u["need_mb"], "실측" if u["need_basis"] == "measured" else "레지스트리 추정")
         if a is not None:                               # 미리보기에만 있다 (run 은 실행 직전에 따로 확인한다)
-            need += " · 지금 여유 %s MB → %s" % (a.get("room_mb", "?"), "들일 수 있음" if a.get("ok")
+            need += ", 지금 여유 %s MB: %s" % (a.get("room_mb", "?"), "들일 수 있음" if a.get("ok")
                                                  else ("안 됨: " + (a.get("why") or "")))
         lines.append(need)
         lines.append("  fps 상한 " + ", ".join("%s %.1f" % kv for kv in sorted(u["fps_cap"].items()))
-                     + " · GPU 사용률 %.0f%%" % (100 * u["gpu_util"]))
+                     + ", GPU 사용률 %.0f%%" % (100 * u["gpu_util"]))
+    for s in p.get("vision_off") or []:
+        lines.append("비전 없음: %s — 기기별 모델 매칭에서 비워 둠" % s)
     for u in plan["cpu_units"]:
-        lines.append("CPU %s → %s%s" % (u["task"], u["node"], (" (%s)" % u["reason"]) if u.get("reason") else ""))
+        mark = []
+        if u.get("placement_by") == "manual":
+            mark.append("수동")
+        if u.get("limit_mode") == "none":
+            mark.append("한도 없음" + (" (%s)" % ", ".join(u["waived"]) if u.get("waived") else ""))
+        lines.append("CPU %s: %s%s%s" % (u["task"], u["node"], (" [%s]" % ", ".join(mark)) if mark else "",
+                                          (" (%s)" % u["reason"]) if u.get("reason") else ""))
     for d in plan["degraded"]:
         lines.append("낮춤: %s — %s" % (d["item"], d["reason"]))
     for d in plan.get("waiting", []):
@@ -129,13 +162,21 @@ def submit_with_retry(k, submit, nothing_running, stopped=lambda: False, sleep=t
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="자원 기반 비전 오케스트레이터")
-    ap.add_argument("cmd", choices=("plan", "run", "status"))
+    ap.add_argument("cmd", choices=("plan", "run", "status", "places", "preflight"))
     ap.add_argument("--sources", nargs="*", default=[])
     ap.add_argument("--models", nargs="*", default=[])
     ap.add_argument("--cpu-tasks", nargs="*", default=[])
     ap.add_argument("--profile")
     ap.add_argument("--functions", nargs="*", default=[],
-                    help="기능 이름들 (vision/model_registry.yaml functions). 단계로 펼쳐 기기 · 서버에 나눠 놓는다")
+                    help="기능 이름들 (vision/model_registry.yaml functions). 단계로 펼쳐 기기와 서버에 나눠 놓는다. "
+                         "소스마다 다르게 주려면 pi12=object_detect,single_cam_track 처럼 적는다")
+    ap.add_argument("--assign", nargs="*", default=[], metavar="기기=모델[,모델]",
+                    help="기기별 모델 매칭 (적지 않은 기기는 --models 전부, 빈 값은 비전 없음)")
+    ap.add_argument("--pin", nargs="*", default=[], metavar="작업=노드",
+                    help="수동 배치 — 그 작업을 고른 노드에 (none 은 올리지 않음)")
+    ap.add_argument("--limit", nargs="*", default=[], metavar="노드=cpu:0.2,mem:0.1,cores:1,temp:80,gpu:300",
+                    help="노드별 한도 — 비워 둘 비율(cpu, mem), 비울 코어(cores), 온도 한계(temp), "
+                         "GPU 예비 MB(gpu), fps 상한(fps). 서버에도 걸 수 있다(기본은 없음)")
     ap.add_argument("--cluster", default=os.environ.get("DS_CLUSTER", "auto"), help="auto | none | 모듈:클래스")
     ap.add_argument("--redis", default="redis://127.0.0.1:6380/0")
     ap.add_argument("--redis-public", help="파이 파드가 닿는 Redis 주소 (기본: 이 기기 테일넷 주소 :6380)")
@@ -150,6 +191,12 @@ def main(argv=None):
         except (OSError, subprocess.SubprocessError, IndexError):
             a.redis_public = a.redis
 
+    if a.cmd == "preflight":
+        from ds_resources import preflight as pf
+        rep = pf.report()
+        print(json.dumps(rep, ensure_ascii=False, indent=1) if a.json else pf.text(rep))
+        return 0 if rep["summary"]["usable"] else 1
+
     if a.cmd == "status":
         st = StateFile(STATE, writer=False)
         units = st.units()
@@ -161,10 +208,58 @@ def main(argv=None):
                                                  u.get("reason", "")))
         return 0
 
+    limits = {}
+    for node, bits in kv_pairs(a.limit, "--limit").items():
+        one = {}
+        for b in bits:
+            k, _, v = b.partition(":")
+            key = {"cpu": "headroom_cpu", "headroom": "headroom_cpu", "headroom_cpu": "headroom_cpu",
+                   "mem": "headroom_mem", "headroom_mem": "headroom_mem",
+                   "cores": "cores_reserved", "cores_reserved": "cores_reserved",
+                   "temp": "temp_max", "temp_max": "temp_max",
+                   "gpu": "gpu_spare_mb", "gpu_spare_mb": "gpu_spare_mb", "fps": "fps"}.get(k.strip())
+            if not key:
+                raise SystemExit("--limit 는 cpu:0.2, mem:0.1, cores:1, temp:80, gpu:300, fps:10 중에서 적으세요 "
+                                 "(받은 것: %r)" % b)
+            try:
+                one[key] = int(float(v)) if key == "cores_reserved" else float(v)
+            except ValueError:
+                raise SystemExit("--limit %s 의 값이 수가 아닙니다: %r" % (key, v))
+        if one:
+            limits[node] = one
+    limits = limits or None
+    # --functions 는 평평한 목록이거나 소스별(pi12=a,b)이다 — 섞어 쓰지 않는다
+    funcs = a.functions
+    if any("=" in x for x in funcs):
+        if not all("=" in x for x in funcs):
+            raise SystemExit("--functions 는 모두 소스별(pi12=object_detect)이거나 모두 기능 이름이어야 합니다")
+        funcs = kv_pairs(funcs, "--functions")
+    assign = kv_pairs(a.assign, "--assign") or None
+    manual = {k: (v[0] if v else "none") for k, v in kv_pairs(a.pin, "--pin").items()} or None
+
+    if a.cmd == "places":
+        k = build(a, writer=False)
+        pl = k.places(limits, functions=funcs or None, sources=a.sources, assign=assign, manual=manual,
+                      profile=load_profile(a.profile))
+        if a.json:
+            print(json.dumps(pl, ensure_ascii=False, indent=1))
+        else:
+            print("방식: %s%s" % (pl["mode"], (" — " + pl["why"]) if pl["why"] else ""))
+            for n in pl["nodes"]:
+                print("노드 %-22s %-7s %-12s 한도 %s" % (n["name"], n["role"] or "",
+                      "쓸 수 있음" if (n["ready"] and not n["stale"]) else ("stale" if n["stale"] else "안 됨"),
+                      "있음" if n["limited"] else "없음 (서버)"))
+            for u in pl["units"]:
+                print("작업 %-28s %-12s %-11s %s%s" % (u["unit"], u["pattern"], u["criticality"],
+                      ("pin " + u["pin"]) if u["pin"] != "none" else (", ".join(u["roles"]) or "아무 곳"),
+                      ", 한도 면제" if u["must_device"] else ""))
+        return 0
+
     profile = load_profile(a.profile)
     if a.cmd == "plan":
         k = build(a, writer=False)
-        p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks, functions=a.functions)
+        p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks, functions=funcs,
+                      assign=assign, manual=manual, limits=limits)
         print(json.dumps(p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"], "caps": p.get("caps") or {}},
                          ensure_ascii=False)
               if a.json else brief(p))
@@ -187,7 +282,8 @@ def main(argv=None):
 
     # 바로 앞 프로세스가 GPU 메모리를 아직 반납하는 중일 수 있다 — 배치표든 admit 이든 gpu_mem 이면 다시
     rid = submit_with_retry(k, lambda: k.submit(a.sources, a.models, profile, a.profile, cpu_tasks=a.cpu_tasks,
-                                                       functions=a.functions),
+                                                       functions=funcs, assign=assign, manual=manual,
+                                                       limits=limits),
                             nothing_running, stopped=lambda: stop["flag"])
     req = k.state.data["requests"].get(rid) or {}
     log("요청 %s — %s" % (rid, (req.get("mode") or "")))
@@ -200,7 +296,7 @@ def main(argv=None):
                 log("%-9s %s" % (e["event"], e["reason"]))
             new = k.replan_if_needed(rid)                # 빠졌던 입력 대기 소스에 영상이 들어옴 → 다시 배치
             if new:
-                log("다시 배치: %s → %s" % (rid, new))
+                log("다시 배치: %s 에서 %s 로" % (rid, new))
                 rid = new
                 continue
             if nothing_running(rid) and not k.pending_sources(rid):

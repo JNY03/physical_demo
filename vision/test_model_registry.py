@@ -38,7 +38,7 @@ def test_files_cover_old_keys():
 
 def test_cues_shape():
     assert list(cc.CUES)[:3] == ["class", "free_arm", "semantic"]
-    assert len(cc.CUES) == 18
+    assert len(cc.CUES) == 19                         # +ref_match (사람이 올린 기준 사진, 2026-11-26)
     c = cc.CUES["size_veto"]
     assert c["roles"] == ("veto",) and c["needs"] == ["depth"] and c["detector"] == ("yoloe_text", "trained")
     assert cc.CUE_EN["free_arm"] == "wider candidates" and cc.CUE_EN["track"] == "track"

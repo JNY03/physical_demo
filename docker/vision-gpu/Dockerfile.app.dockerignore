@@ -1,0 +1,42 @@
+# docker/vision-gpu/Dockerfile.app 로 빌드할 때 **보낼 것**을 고른다 (docker/core/Dockerfile.dockerignore 와 같은 내용).
+# (BuildKit 은 `<Dockerfile>.dockerignore` 가 있으면 저장소 루트의 .dockerignore 대신 이것을 본다.)
+# 두 벌을 두는 까닭: 두 빌드의 컨텍스트가 저장소 루트로 같아서, 한쪽만 줄이면 다른 쪽이 몇 GB 를 복사한다.
+#
+# 컨텍스트는 저장소 루트다. 아래를 빼지 않으면 빌드가 시작하기도 전에 몇 GB 를 복사한다:
+#   .git 253 MB · models 991 MB · external 62 MB · stream_data 1.7 GB.
+# 가중치 · 수집 데이터 · 상태는 **이미지에 넣지 않고** 실행 때 마운트한다(계획 §6).
+
+.git
+.gitignore
+.pytest_cache
+**/__pycache__
+**/*.pyc
+
+# 심볼릭 링크 하나지만 보낼 이유가 없다 (컨테이너는 /opt/venv 를 쓴다)
+venv
+.venv
+
+# 가중치 · 외부 코드 · 수집 데이터 · 상태 — 전부 마운트
+models
+external
+stream_data
+state
+result_files
+hf_cache
+
+# 기기마다 다른 설정(주소 · kubeconfig)은 넣지 않는다. 예시만 넣어 보여 준다
+config/*
+!config/*.example.*
+
+# 문서 · 사진 · 실험 출력
+*.md
+*.jpg
+*.png
+*.zip
+*.log
+*.frm
+*.npy
+e2p/e2p_sweep_out
+360camera_work
+picam_work
+realsense_work

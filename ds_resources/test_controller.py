@@ -89,7 +89,7 @@ def test_local_fallback_event_sequence_and_fps_cap(tmp_path):
     assert fb["mode"] == "local" and fb["basis"] == "saved"
     plan = json.loads([x for x in r.rows if x["event"] == "planned"][0]["plan"])
     u = plan["gpu_units"][0]
-    assert u["need_mb"] == round(1300 * 1.2) and plan["algorithm"] == "placement/2"
+    assert u["need_mb"] == round(1300 * 1.2) and plan["algorithm"] == "placement/3"
     unit = list(k.state.units().values())[0]
     assert unit["request_id"] == rid and unit["execution_id"].startswith("exe-")
     cmd = k.ex.procs[unit["unit_id"]].cmd
@@ -482,7 +482,7 @@ def test_cascade_without_the_device_stage_runs_degraded_as_server_only(tmp_path)
     """캐스케이드의 기기 단계가 못 놓이면 기능은 살고 품질만 낮아진다 — 기록에 quality 가 남는다"""
     k, r, rid = func_setup(tmp_path, ["det"])
     plan = (k.state.data["requests"][rid]).get("plan")
-    assert plan["algorithm"] == "placement/2"
+    assert plan["algorithm"] == "placement/3"
     assert plan["functions"]["det"]["verdict"] == "degraded"
     assert plan["functions"]["det"]["quality"] == "server_only"
     # 서버 단계는 실제로 놓였고, 그 단위 기록 · applied 기록에 기능 · 단계 · 품질이 함께 남는다
@@ -511,3 +511,54 @@ def test_old_path_is_untouched_by_the_functions_contract(tmp_path):
     plan = (k.state.data["requests"][rid]).get("plan")
     assert "functions" not in plan
     assert [u["task"] for u in plan["cpu_units"]] == ["probe"]
+
+
+# ================================================================ 기기별 모델 매칭 · 수동 배치 (2026-11-26)
+def test_vision_groups_bundle_devices_by_their_model_set(tmp_path):
+    """묶음 하나 = 프로세스 하나. 조합이 같은 기기끼리 묶이고, 비운 기기는 비전에서 빠진다"""
+    k, _r, _c = make(tmp_path)
+    groups, off = k.vision_groups(["yoloe", "river"], {"pi13": ["yoloe"], "a2": ["yoloe"], "pi11": []},
+                                  ["pi13", "a2", "pi11", "pi12"])
+    assert off == ["pi11"]
+    assert groups == [{"models": ["river", "yoloe"], "sources": ["pi12"]},     # 안 적은 기기는 고른 모델 전부
+                      {"models": ["yoloe"], "sources": ["a2", "pi13"]}]        # 같은 조합이면 한 묶음
+    # 매칭이 없으면 지금까지와 똑같다 — 고른 모델 전부를 모든 기기에 (묶음 하나)
+    assert k.vision_groups(["yoloe"], None, ["pi13", "a2"]) == ([{"models": ["yoloe"], "sources": ["a2", "pi13"]}], [])
+
+
+def test_submit_with_match_makes_one_unit_per_model_set(tmp_path):
+    k, r, _c = make(tmp_path)
+    r.add_frames("pi13")
+    r.add_frames("a2")
+    rid = k.submit(["pi13", "a2"], ["yoloe"], assign={"a2": []})
+    plan = json.loads([x for x in r.rows if x["event"] == "planned"][0]["plan"])
+    assert [u["sources"] for u in plan["gpu_units"]] == [["pi13"]]              # a2 는 비전에서 빠졌다
+    req = k.state.data["requests"][rid]
+    assert req["assign"] == {"a2": []}                                         # 요청 기록에 남는다
+    devices = [u["devices"] for u in k.ex.active_units().values()]
+    assert devices == [["pi13"]]                                               # 띄운 프로세스도 그 기기만 맡는다
+
+
+def test_places_lists_nodes_and_placeable_units(tmp_path):
+    k, _r, _c = make(tmp_path)
+    from ds_resources import functions as fnc
+    k._funcs = fnc.load(FUNCS)
+    pl = k.places()
+    names = [n["name"] for n in pl["nodes"]]
+    assert names == ["wsl"] and pl["nodes"][0]["limited"] is False             # 서버에는 한도가 없다
+    units = {u["unit"]: u for u in pl["units"]}
+    assert "det.server" in units and units["det.server"]["pattern"] == "cascade"
+    assert all("roles" in u and "pin" in u for u in pl["units"])
+
+
+def test_with_limits_puts_the_launcher_values_on_the_snapshot(tmp_path):
+    """런처에서 조절한 노드별 한도가 스냅숏에 얹힌다 — 배치는 그 값으로 몫을 센다"""
+    k, _r, _c = make(tmp_path)
+    nodes = [{"name": "pi1", "role": "robot", "caps": {"sensors": ["camera"]}},
+             {"name": "pi7", "role": "robot", "caps": {}}]
+    out = k.with_limits(nodes, {"pi1": {"headroom_cpu": 0.35, "cores_reserved": 2, "temp_max": None}})
+    by = {n["name"]: n for n in out}
+    assert by["pi1"]["limits"] == {"headroom_cpu": 0.35, "cores_reserved": 2}   # None 은 「안 적음」이라 빠진다
+    assert by["pi1"]["caps"]["sensors"] == ["camera"]             # 있던 특성은 그대로
+    assert "limits" not in by["pi7"]                              # 적지 않은 노드는 건드리지 않는다
+    assert k.with_limits(nodes, None) is nodes

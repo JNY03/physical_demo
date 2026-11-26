@@ -372,6 +372,90 @@ def run(items, do_fetch, log=print):
     return rows, code
 
 
+# ---------------------------------------------------------------- 손으로 넣기 (런처 업로드)
+def place_slots(dest=None, home=None):
+    """레지스트리가 바라는 **파일 자리** → [{model, name, path, sha256}].
+
+    이름(basename)으로 찾는다 — 사람이 가져오는 파일은 보통 이름이 같다(yoloe-11l-seg-pf.pt 등).
+    git 저장소(external/…)와 HF 캐시 폴더는 파일 하나로 메울 수 없어 뺀다."""
+    out = []
+    for m in sorted(cc._REG["models"]):
+        for it in items_for([m], home=home, dest=dest):
+            if it["kind"] in ("git", "hf_dir", "nosource") or not it.get("dest"):
+                continue
+            d = Path(it["dest"])
+            out.append({"model": it["model"], "name": d.name, "path": str(d), "sha256": it.get("sha256"),
+                        "kind": it["kind"]})
+    return out
+
+
+def place_files(paths, dest=None, home=None, force=False, log=print):
+    """고른 파일(.zip 이면 그 안의 파일들)을 레지스트리 자리에 넣는다 → {ok, placed, skipped, errors}.
+
+    왜 이름으로 찾나: 레지스트리가 「어느 자리에 무슨 이름의 파일」인지 이미 적고 있다. 사람은 그 파일을
+    어디서든 가져올 수 있으니(다른 기기 · USB · 사내 저장소), 받는 길을 늘리는 대신 **놓는 길**을 연다.
+    sha256 이 적혀 있는데 다르면 넣지 않는다 — 조용히 틀린 가중치로 도는 것이 가장 나쁘다(force 로만 덮는다)."""
+    import shutil
+    import tempfile
+    import zipfile
+    slots = place_slots(dest, home)
+    by_name = {}
+    for s in slots:
+        by_name.setdefault(s["name"], []).append(s)
+    placed, skipped, errors = [], [], []
+    files = []
+    tmp = None
+    for raw in paths:
+        f = Path(raw)
+        if not f.exists():
+            errors.append({"file": str(f), "why": "파일이 없습니다"})
+            continue
+        if f.suffix.lower() == ".zip":
+            try:
+                tmp = tmp or tempfile.mkdtemp(prefix="ds-weights-")
+                with zipfile.ZipFile(f) as z:
+                    for n in z.namelist():
+                        if n.endswith("/"):
+                            continue
+                        got = z.extract(n, tmp)
+                        files.append(Path(got))
+            except (OSError, zipfile.BadZipFile) as e:
+                errors.append({"file": str(f), "why": "zip 을 열지 못했습니다: %s" % e})
+            continue
+        files.append(f)
+    for f in files:
+        cands = by_name.get(f.name) or []
+        if not cands:
+            errors.append({"file": f.name,
+                           "why": "어느 모델의 파일인지 모릅니다 — 레지스트리가 바라는 이름이어야 합니다",
+                           "expect": sorted(by_name)[:40]})
+            continue
+        for s in cands:
+            d = Path(s["path"])
+            want = s.get("sha256")
+            if want:
+                got = sha256_file(f)
+                if got != want:
+                    errors.append({"file": f.name, "model": s["model"],
+                                   "why": "sha256 이 레지스트리와 다릅니다 (받은 %s… · 바라는 %s…)"
+                                          % (got[:12], want[:12])})
+                    continue
+            if d.exists() and not force:
+                skipped.append({"model": s["model"], "path": str(d), "why": "이미 있습니다"})
+                continue
+            try:
+                d.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, d)
+            except OSError as e:
+                errors.append({"file": f.name, "model": s["model"], "why": "복사 실패: %s" % e})
+                continue
+            placed.append({"model": s["model"], "path": str(d), "verified": bool(want)})
+            log("넣음: %s → %s" % (f.name, d))
+    if tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return {"ok": bool(placed) and not errors, "placed": placed, "skipped": skipped, "errors": errors}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="가중치 · 외부 코드 받기와 sha256 검증 (vision/model_registry.yaml source)")
     g = ap.add_mutually_exclusive_group()
@@ -385,7 +469,28 @@ def main(argv=None):
     ap.add_argument("--hf-cache", metavar="폴더", help="HF 캐시 (기본 HF_HUB_CACHE · HF_HOME/hub · ~/.cache/huggingface/hub)")
     ap.add_argument("--include", nargs="+", help="--hash 폴더에서 셀 파일")
     ap.add_argument("--json", action="store_true", help="결과를 JSON 으로")
+    ap.add_argument("--place", nargs="+", metavar="파일", help="손으로 가져온 가중치를 레지스트리 자리에 넣는다 "
+                                                              "(.zip 이면 그 안의 파일들). 런처 「가중치 넣기」")
+    ap.add_argument("--slots", action="store_true", help="레지스트리가 바라는 파일 이름 · 자리 목록")
+    ap.add_argument("--force", action="store_true", help="--place: 이미 있는 파일도 덮는다")
     a = ap.parse_args(argv)
+    if a.slots:
+        rows = place_slots(a.dest)
+        print(json.dumps(rows, ensure_ascii=False, indent=1) if a.json
+              else "\n".join("%-16s %-44s %s" % (r["model"], r["name"], r["path"]) for r in rows))
+        return 0
+    if a.place:
+        res = place_files(a.place, dest=a.dest, force=a.force, log=(lambda *_: None) if a.json else print)
+        if a.json:
+            print(json.dumps(res, ensure_ascii=False))
+        else:
+            for x in res["placed"]:
+                print("넣음   %s → %s%s" % (x["model"], x["path"], " (sha256 확인)" if x["verified"] else ""))
+            for x in res["skipped"]:
+                print("건너뜀 %s — %s" % (x["path"], x["why"]))
+            for x in res["errors"]:
+                print("못 넣음 %s — %s" % (x.get("file"), x["why"]))
+        return 0 if res["ok"] else 1
 
     if a.hash:
         p = Path(a.hash).expanduser()
