@@ -19,6 +19,8 @@ TABLE = {
     "video_preprocess": ("device_only", "mission"),
     "object_detect": ("cascade", "mission"),
     "zeroshot_detect": ("cascade", "mission"),
+    "targeted_detect": ("cascade", "mission"),           # 2026-11-26 사용자: 도메인 전용은 모델이 아니라 기능
+    "river_detect": ("cascade", "mission"),
     "segmentation": ("cascade", "best_effort"),
     "depth_estimate": ("cascade", "mission"),
     "single_cam_track": ("device_only", "mission"),
@@ -174,7 +176,7 @@ def test_bad_function_name():
 def test_registry_carries_the_whole_table():
     f = F.load()
     assert set(TABLE) <= set(f)
-    assert len([k for k, v in f.items() if not v["legacy"]]) == len(TABLE) == 24   # 표 23줄, 경로 계획만 둘
+    assert len([k for k, v in f.items() if not v["legacy"]]) == len(TABLE) == 26   # 표 23줄, 경로 계획만 둘, 도메인 전용 기능 둘
     for name, (pattern, crit) in TABLE.items():
         assert (f[name]["pattern"], f[name]["criticality"]) == (pattern, crit), name
         assert f[name]["note"] and f[name]["stages"], name
@@ -381,6 +383,8 @@ def test_pairs_tells_which_source_is_missing():
 def test_functions_declare_which_models_they_can_use():
     """기능마다 쓸 수 있는 선택지(모델) — 런처가 「기능 → 모델」 로 고른다"""
     f = F.load()
-    assert f["object_detect"]["options"] == ["yoloe", "river", "targeted"]
+    assert f["object_detect"]["options"] == ["yoloe"]              # 모델만 — 도메인 전용(targeted · river)은 기능
+    assert f["zeroshot_detect"]["options"] == ["yoloe"]
+    assert f["targeted_detect"]["options"] == ["targeted"] and f["river_detect"]["options"] == ["river"]
     assert f["depth_estimate"]["options"] == ["unidepth", "moge2_aerial"]
     assert f["single_cam_track"]["options"] == []        # 트래커는 모델이 없다 (ultralytics 안에 있다)

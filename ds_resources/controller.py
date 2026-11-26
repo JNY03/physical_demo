@@ -324,8 +324,13 @@ class Controller:
         info = {}
         for key, o in sorted((self.reg.get("options") or {}).items()):
             cue = o.get("cue_models")                 # 사전({근거: [모델]})이거나 글 하나(규칙만 쓰는 선택지)
+            if cue == "targeted":                     # targeted 는 cues 구역 전체가 근거 목록 — 탐지기 + 근거가 쓰는 모델
+                cue = {k: list(c.get("needs") or []) + list(c.get("detector") or [])
+                       for k, c in (self.reg.get("cues") or {}).items() if isinstance(c, dict)}
             cue = cue if isinstance(cue, dict) else {}
+            # domain: 도메인 전용 파이프라인(targeted · river) — 모델이 아니라 기능이다. 런처는 모델 칸에 이름 대신 쓰는 모델을 적는다
             info[key] = {"shown": o.get("shown") or key, "kind": o.get("kind"), "gpu_mb": o.get("gpu_mb"),
+                         "domain": bool(o.get("domain")),
                          "p90_ms": o.get("p90_ms") or {},
                          "models": sorted({m for ms in cue.values() for m in (ms or [])}),
                          "prompt": ("free" if key == "yoloe" else ("text" if key in ("targeted",) else None))}
@@ -514,6 +519,7 @@ class Controller:
                 continue
             uid = self.ex.launch({"devices": u["sources"], "models": u["models"], "profile_path": profile_path,
                                   "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
+                                  **({"limit_mode": u["limit_mode"]} if u.get("limit_mode") else {}),
                                   "execution_id": xid}, u["need_mb"], calc)
             where = self.gpu_where(u["node"])
             self.emit("applied", rid, execution_id=xid, mode=mode,
@@ -732,7 +738,8 @@ class Controller:
                 self.state.update_unit(uid, sources_up=sorted((prev_up | came) - down))
             live = (prev_up | came) - down
             warm = now - float(u.get("running_at") or now) < WARMUP_S     # 적재 직후 첫 장들은 느리다 — 저하로 보지 않는다
-            low = [] if warm else [s for s, cap in (u.get("fps_cap") or {}).items()
+            # 처리량 예산이 없는 서버 단위(limit_mode none)의 fps 상한은 입력 fps 일 뿐 약속이 아니다 — 저하로 보지 않는다
+            low = [] if warm or u.get("limit_mode") == "none" else [s for s, cap in (u.get("fps_cap") or {}).items()
                    if s in live and (streams.get(s) or {}).get("fps") is not None and streams[s]["fps"] < DEGRADED_RATIO * cap]
             since = u.get("low_since")
             if low and since is None:

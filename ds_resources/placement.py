@@ -4,7 +4,8 @@
 
 GPU 작업  선택지 묶음 하나 = 프로세스 하나(그 요청의 소스를 모두 맡는다). role=gpu · ready · stale 아닌 노드에만.
           메모리   need_mb ≤ 여유(total − used − reserved) − SPARE_MB       (Executor 가 실행 직전에 다시 잰다)
-          처리량   Σ 소스(목표 fps × p90 ms / 1000) ≤ GPU_BUDGET (GPU 하나에 도는 모든 프로세스 합)
+          처리량   노드에 한도 gpu_budget 이 걸렸을 때만(서버 기본은 없음 — 정책 몫이다, 2026-11-26):
+                   Σ 소스(목표 fps × p90 ms / 1000) ≤ gpu_budget (GPU 하나에 도는 모든 프로세스 합, 권장 GPU_BUDGET)
                    넘치면 소스별 fps 를 같은 비율로 낮추고(FPS_FLOOR 아래로는 안 낮춤), 그래도 넘치면
                    소스를 이름 역순으로 빼며 이유를 남긴다. GPU 노드가 없으면 파이로 옮기지 않고 거절한다.
 CPU 작업  둘로 갈린다 — eligible(하드 조건: 어기면 후보가 아니다, 코드가 남는다) 과 score(소프트: 클수록 좋다).
@@ -177,11 +178,26 @@ def place_gpu(request, nodes, costs, out):
     # 남는 몫은 그대로 둔다 — 같은 입력이면 같은 배치표여야 하고, 입력이 바뀌면 어차피 다시 배치한다
     share = float(request.get("share") or 1.0)
     p90 = costs["p90_ms"]
-    room = max(0.0, GPU_BUDGET - util[node["name"]])
+    # 처리량 예산은 **정책 몫**이다 — 서버(role gpu)는 사람이 gpu_budget 을 걸었을 때만 지킨다 (2026-11-26 실측:
+    # cam360 targeted 는 1 fps 로도 0.85 를 넘어 통째로 거절됐다). 물리 한계(GPU 메모리)는 위에서 그대로 봤다
+    gpu_budget = limit_of(node, "gpu_budget", None)
+    if gpu_budget is None:
+        fps = {s: float(request.get("target_fps", {}).get(s, 10.0)) for s in srcs}
+        load = sum(fps[s] * p90[s] / 1000.0 for s in srcs)
+        ledger[node["name"]][0] += need
+        ledger[node["name"]][1] += load
+        out["gpu_units"].append({"unit": "gpu:%s" % "+".join(models), "node": node["name"], "models": models,
+                                 "sources": srcs, "fps_cap": fps, "need_mb": round(need),
+                                 "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load, 3),
+                                 "limit_mode": "none", "reason": "한도 면제: 서버 — GPU 처리량 예산 없음 (fps 낮춤 · 빼기 없음)",
+                                 **({"exclusive": True} if exclusive else {})})
+        return
+    GPU_BUDGET_ = float(gpu_budget)
+    room = max(0.0, GPU_BUDGET_ - util[node["name"]])
     floor_need = sum(FPS_FLOOR * p90[s] / 1000.0 for s in srcs)
     # 몫은 **무른 상한**이다: 남은 예산이 바닥 fps 만큼은 되면 몫을 넘겨서라도 살린다. 그러지 않으면
     # 무거운 모델 묶음이 「제 몫으로는 바닥 fps 도 못 돈다」며 통째로 빠진다(예산은 남아 있는데도)
-    budget = max(min(GPU_BUDGET * share, room), min(floor_need, room))
+    budget = max(min(GPU_BUDGET_ * share, room), min(floor_need, room))
     waiting = set(request.get("waiting") or ())
     target = {s: float(request.get("target_fps", {}).get(s, 10.0)) for s in srcs}
     load = lambda f: sum(f[s] * p90[s] / 1000.0 for s in f)  # noqa: E731
@@ -229,6 +245,7 @@ def limit_of(node, key, default):
       cores_reserved                그 기기가 제 일에 쓸 코어 수
       temp_max                      이 온도를 넘으면 새 일을 두지 않는다
       gpu_spare_mb                  GPU 에 남겨 둘 메모리
+      gpu_budget                    GPU 처리량 예산 (Σ fps × p90 초, 예: 0.85). 없으면 서버는 예산 없이 목표 fps 그대로
       fps                           그 노드 소스의 fps 상한 (부르는 쪽이 target_fps 로 쓴다)
 
     런처에서 노드마다 고친다. **서버도 걸 수 있다** — 기본이 「없음」일 뿐이다."""

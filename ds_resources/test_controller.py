@@ -155,7 +155,7 @@ def test_running_needs_frames_and_fresh_input(tmp_path):
 def test_degraded_after_sustained_low_fps(tmp_path):
     k, r, c = make(tmp_path)
     r.add_frames("pi13", n=100)                                       # 10 fps
-    k.submit(["pi13"], ["yoloe"], target_fps={"pi13": 5.0})
+    k.submit(["pi13"], ["yoloe"], target_fps={"pi13": 5.0}, limits={k.local: {"gpu_budget": 0.85}})  # 예산을 건 서버
     u = list(k.state.units().values())[0]
     key = "vision_telemetry:h:%d" % u["pid"]
     r.kv[key] = json.dumps({"streams": {"pi13": {"frames": 30, "fps": 5.0}}})
@@ -431,7 +431,7 @@ def test_unbudgeted_waiting_source_triggers_replan_when_it_comes_online(tmp_path
         return {"need_mb": 2000, "basis": "measured", "estimate_mb": 1700, "needs": [], "p90_ms": p90,
                 "p90_basis": {s: "registry" for s in sources}, "cfg_hash": "h"}
     k.costs = costs
-    rid = k.submit(["robot1", "a2", "drone"], ["targeted"])
+    rid = k.submit(["robot1", "a2", "drone"], ["targeted"], limits={k.local: {"gpu_budget": 0.85}})  # 예산을 건 서버
     units = list(k.state.units().values())
     assert [u["devices"] for u in units] == [["robot1"]] and "failed" not in r.events()
     assert sorted(k.pending_sources(rid)) == ["a2", "drone"]

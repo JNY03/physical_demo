@@ -20,6 +20,10 @@ COSTS = {"yoloe": {"need_mb": 1560, "basis": "estimate", "p90_ms": {"pi13": 100.
          "river": {"need_mb": 3360, "basis": "estimate", "p90_ms": {"pi13": 600.0, "a2": 800.0}}}
 
 
+#: 사람이 처리량 예산을 건 서버 — 서버 기본은 예산 없음 (2026-11-26)
+BUDGET = {"gpu_budget": pl.GPU_BUDGET}
+
+
 def req(*gpu, cpu=()):
     return {"request_id": "r1", "gpu": list(gpu), "cpu": list(cpu)}
 
@@ -45,7 +49,7 @@ def test_same_input_same_plan():
 
 
 def test_throughput_full_scales_fps_by_p90_then_refuses():
-    out = pl.plan(req(G(["yoloe"], ["pi13", "a2"], {"pi13": 5.0, "a2": 5.0})), {"nodes": [gpu_node()], "costs": COSTS},
+    out = pl.plan(req(G(["yoloe"], ["pi13", "a2"], {"pi13": 5.0, "a2": 5.0})), {"nodes": [gpu_node(limits=BUDGET)], "costs": COSTS},
                   "h", "wsl")                                        # 5×0.10 + 5×0.14 = 1.2 > 0.85 → 같은 비율로 낮춤
     u = out["gpu_units"][0]
     assert u["gpu_util"] <= pl.GPU_BUDGET + 1e-3 and not out["refused"]
@@ -53,7 +57,7 @@ def test_throughput_full_scales_fps_by_p90_then_refuses():
     assert {d["item"] for d in out["degraded"]} == {"gpu:yoloe:a2", "gpu:yoloe:pi13"}
     # 바닥 fps 로도 안 들어가는 경우 — p90 이 큰 소스부터 뺀다 (2026-11-25: 이름순이던 것을 바꿈)
     heavy = {"river": {"need_mb": 3360, "p90_ms": {"pi13": 600.0, "a2": 700.0}}}    # 둘 1.3 > 0.85, pi13 혼자 0.6
-    out = pl.plan(req(G(["river"], ["pi13", "a2"], {"pi13": 1.0, "a2": 1.0})), {"nodes": [gpu_node()], "costs": heavy},
+    out = pl.plan(req(G(["river"], ["pi13", "a2"], {"pi13": 1.0, "a2": 1.0})), {"nodes": [gpu_node(limits=BUDGET)], "costs": heavy},
                   "h", "wsl")
     assert [r["item"] for r in out["refused"]] == ["gpu:river:a2"]
     assert out["gpu_units"][0]["sources"] == ["pi13"]
@@ -64,7 +68,7 @@ def test_waiting_sources_are_dropped_before_live_ones_and_fps_rescaled():
     costs = {"targeted": {"need_mb": 2000, "p90_ms": {"robot1": 420.0, "drone": 1300.0, "a2": 1300.0}}}
     g = G(["targeted"], ["robot1", "drone", "a2"], {"robot1": 30.0, "drone": 10.0, "a2": 10.0})
     g["waiting"] = ["drone", "a2"]
-    out = pl.plan(req(g), {"nodes": [gpu_node()], "costs": costs}, "h", "wsl")
+    out = pl.plan(req(g), {"nodes": [gpu_node(limits=BUDGET)], "costs": costs}, "h", "wsl")
     u = out["gpu_units"][0]
     assert u["sources"] == ["robot1"] and not out["refused"]
     assert u["fps_cap"]["robot1"] == 2.02                     # 남은 것끼리 다시 나눔: 0.85 / 0.42 내림
@@ -88,7 +92,7 @@ def test_scaling_never_rounds_over_budget():
     # 실측 버그: pi13 60 fps × p90 135 ms → 비율 0.1049… → 6.296 이 6.30 으로 올라가 0.8505 > 0.85 로 소스가 빠졌다
     costs = {"yoloe": {"need_mb": 1560, "p90_ms": {"pi13": 135.0}}}
     for f in (60.0, 10.0, 7.0, 33.3):
-        out = pl.plan(req(G(["yoloe"], ["pi13"], {"pi13": f})), {"nodes": [gpu_node()], "costs": costs}, "h", "wsl")
+        out = pl.plan(req(G(["yoloe"], ["pi13"], {"pi13": f})), {"nodes": [gpu_node(limits=BUDGET)], "costs": costs}, "h", "wsl")
         assert not out["refused"], f
         assert out["gpu_units"][0]["gpu_util"] <= pl.GPU_BUDGET
 
@@ -623,7 +627,7 @@ def test_gpu_budget_is_shared_between_bundles_but_keeps_a_heavy_one_alive():
     """기기별 모델 매칭으로 묶음이 둘이 되면 처리량 예산을 소스 수로 나눈다 —
     먼저 온 묶음이 다 쓰지 않게. 다만 제 몫으로 바닥 fps 도 못 도는 무거운 묶음은 남은 예산으로 살린다"""
     two = req(G(["yoloe"], ["pi13"], {"pi13": 10.0}), G(["yoloe"], ["a2"], {"a2": 10.0}))
-    out = pl.plan(two, {"nodes": [gpu_node()], "costs": COSTS}, "h", "wsl")
+    out = pl.plan(two, {"nodes": [gpu_node(limits=BUDGET)], "costs": COSTS}, "h", "wsl")
     caps = {s: u["fps_cap"][s] for u in out["gpu_units"] for s in u["fps_cap"]}
     assert set(caps) == {"pi13", "a2"}                           # 둘 다 산다 (예전에는 먼저 온 쪽이 다 먹었다)
     assert sum(u["gpu_util"] for u in out["gpu_units"]) <= pl.GPU_BUDGET + 1e-6
@@ -673,3 +677,18 @@ def test_gpu_spare_can_be_set_per_node():
     tight = dict(node, limits={"gpu_spare_mb": 1000.0})
     out2 = pl.plan(req(G(["yoloe"], ["pi13"])), {"nodes": [tight], "costs": costs}, "h", "wsl")
     assert not out2["gpu_units"] and out2["refused"][0]["code"] == "gpu_mem"
+
+
+def test_server_without_gpu_budget_runs_heavy_sources_at_target_fps():
+    # 2026-11-26 실측: cam360 targeted 가 1 fps 로도 예산 0.85 를 넘어 거절 — 서버는 처리량 예산이 정책 몫이라 면제
+    costs = {"targeted": {"need_mb": 2000, "basis": "measured", "p90_ms": {"cam360": 1800.0, "robot1": 420.0}}}
+    g = G(["targeted"], ["cam360", "robot1"], {"cam360": 5.0, "robot1": 20.0})
+    out = pl.plan(req(g), {"nodes": [gpu_node()], "costs": costs}, "h", "wsl")
+    u = out["gpu_units"][0]
+    assert not out["refused"] and not out["degraded"] and u["limit_mode"] == "none" and "한도 면제" in u["reason"]
+    assert u["sources"] == ["cam360", "robot1"] and u["fps_cap"] == {"cam360": 5.0, "robot1": 20.0}
+    out = pl.plan(req(g), {"nodes": [gpu_node(limits=BUDGET)], "costs": costs}, "h", "wsl")
+    assert out["degraded"] and "limit_mode" not in out["gpu_units"][0]     # 사람이 걸면 예전 규칙
+    big = {"targeted": {"need_mb": 9000, "basis": "measured", "p90_ms": {"cam360": 1800.0}}}
+    out = pl.plan(req(G(["targeted"], ["cam360"])), {"nodes": [gpu_node()], "costs": big}, "h", "wsl")
+    assert out["refused"][0]["code"] == "gpu_mem"                           # 물리 한계(GPU 메모리)는 그대로

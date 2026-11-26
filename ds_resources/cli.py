@@ -114,7 +114,8 @@ def brief(p):
                                                  else ("안 됨: " + (a.get("why") or "")))
         lines.append(need)
         lines.append("  fps 상한 " + ", ".join("%s %.1f" % kv for kv in sorted(u["fps_cap"].items()))
-                     + ", GPU 사용률 %.0f%%" % (100 * u["gpu_util"]))
+                     + (" (입력 fps, 한도 면제: 서버는 처리량 예산 없음)" if u.get("limit_mode") == "none"
+                        else ", GPU 사용률 %.0f%%" % (100 * u["gpu_util"])))
     for s in p.get("vision_off") or []:
         lines.append("비전 없음: %s — 기기별 모델 매칭에서 비워 둠" % s)
     for u in plan["cpu_units"]:

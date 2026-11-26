@@ -107,11 +107,10 @@ def probe_one(src, ports, hosts, r, timeout):
             out["state"] = "down"
             out["why"] = "%s:%d 에 닿지 않음" % (host, cam)
         return out
-    if age is not None:
-        out["state"] = "down"
-        out["why"] = "마지막 장이 %.0f초 전 (지금은 안 들어옴)" % age
-        return out
-    out["why"] = "이 소스의 주소를 모름 (그 기기가 서버로 밀어 넣는 방식일 수 있음)"
+    # 주소가 없는 소스는 기기가 서버로 밀어 넣는다(cam360 · cam360_slice) — 데이터 서버가 꺼져 있으면 장이 올 수 없으니
+    # 오래된 장은 「안 닿음」의 증거가 아니다. down 으로 막으면 서버를 켜기 전에는 영영 못 고른다 (2026-11-26 실측)
+    out["why"] = "서버로 밀어 넣는 소스 — 데이터 서버를 켜면 들어옴" + (
+        " (마지막 장 %.0f초 전)" % age if age is not None else "")
     return out
 
 

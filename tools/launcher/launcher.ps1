@@ -374,6 +374,8 @@ $Str = @{
 # 모르는 키는 키 그대로 보여 준다(계약에 기능이 늘어도 화면은 깨지지 않는다).
 $FnName = @{
     object_detect      = @{ ko = "물체 탐지";            en = "Object detection";        why_ko = "영상에서 물체를 찾는다";                 why_en = "find objects in the video" }
+    targeted_detect    = @{ ko = "지정 물체 탐지";       en = "Target-class detection";  why_ko = "정한 대상을 근거로 찾아 판정한다";      why_en = "find the chosen targets and judge them by cues" }
+    river_detect       = @{ ko = "하천 부유물 탐지";     en = "River debris detection";  why_ko = "물에 떠내려가는 물체를 학습 없이 찾는다"; why_en = "find floating debris without training" }
     zeroshot_detect    = @{ ko = "처음 보는 물체 탐지";  en = "Zero-shot detection";      why_ko = "배우지 않은 물체도 말로 찾는다";        why_en = "find unseen objects from a prompt" }
     segmentation       = @{ ko = "영역 분할";            en = "Segmentation";             why_ko = "물체의 윤곽을 딴다";                    why_en = "cut out the object outline" }
     single_cam_track   = @{ ko = "추적 (한 카메라)";     en = "Tracking (one camera)";    why_ko = "같은 물체에 번호를 달아 따라간다";      why_en = "keep an id on the same object" }
@@ -1384,6 +1386,19 @@ function Fn-Options($fn) {
     if ($null -eq $script:FnOpts) { return @() }
     return @($script:FnOpts.$fn)
 }
+function Option-Domain($o) {
+    # 도메인 전용 파이프라인인가 (레지스트리 options.<키>.domain) — 그러면 모델이 아니라 기능이다
+    if ($null -eq $script:ModelInfo) { return $false }
+    $i = $script:ModelInfo.$o
+    return ($null -ne $i -and [bool]$i.domain)
+}
+function Option-ModelsText($o) {
+    # 도메인 전용 기능이 실제로 쓰는 모델 — 근거마다 고른 모델의 모음. 모르면 「근거 모델」
+    $i = $(if ($null -ne $script:ModelInfo) { $script:ModelInfo.$o } else { $null })
+    $ms = @(if ($null -ne $i) { @($i.models) } else { @() })
+    if ($ms.Count) { return ($ms -join ", ") }
+    return $(if ($script:Lang -eq "en") { "cue models" } else { "근거 모델" })
+}
 function Fn-Model($fn) {
     $opts = @(Fn-Options $fn)
     if ($opts.Count -eq 0) { return $null }
@@ -1653,7 +1668,15 @@ function Build-Match {
             $pick.Add_CheckedChanged({ On-FnPick $this })
             $modelTip.SetToolTip($pick, (Fn-Tip $fn))
             $opts = @(Fn-Options $fn)
-            if ($opts.Count -gt 0) {
+            $dom = @($opts | Where-Object { Option-Domain $_ })
+            if ($opts.Count -gt 0 -and $dom.Count -eq $opts.Count) {
+                # 도메인 전용 기능(지정 물체 탐지 · 하천 부유물 탐지 …) — 고를 모델이 아니다. 실제로 쓰는 모델을 적는다
+                $lb = New-Label $matchPanel (Option-ModelsText $opts[0]) $x0 ($y + 3)
+                $lb.AutoSize = $false
+                $lb.Width = 112
+                $lb.AutoEllipsis = $true
+                $modelTip.SetToolTip($lb, (Option-Tip $opts[0]))
+            } elseif ($opts.Count -gt 0) {
                 $cb = New-Object System.Windows.Forms.ComboBox
                 $cb.DropDownStyle = "DropDownList"
                 $cb.Location = New-Object System.Drawing.Point($x0, $y)
@@ -2474,8 +2497,13 @@ function Load-Functions {
     $script:FnList = @($all | Sort-Object @{ Expression = { -not (Fn-Usable $_) } }, @{ Expression = { $_ } })
     if ($script:FnSrc.Count -eq 0 -and @($s.models).Count -gt 0) {
         # 옛 설정(모델 체크)에서 옮겨 온다 — 고르던 모델을 물체 탐지에 얹고 켠 소스 전부에 붙인다
-        $first = @(@($s.models) | Where-Object { @(Fn-Options "object_detect") -contains $_ })[0]
-        if ($first) { $script:FnModel["object_detect"] = $first; $script:FnSrc["object_detect"] = @(On-All) }
+        # 도메인 전용(targeted · river)은 그 기능으로 (2026-11-26: 모델이 아니라 기능)
+        foreach ($m in @($s.models)) {
+            $fnOf = @($script:FnOpts.PSObject.Properties.Name | Where-Object { @(Fn-Options $_) -contains $m } |
+                      Sort-Object @{ Expression = { $_ -ne "object_detect" } }, @{ Expression = { $_ } })[0]
+            if ($m -eq "targeted") { $fnOf = "targeted_detect" } elseif ($m -eq "river") { $fnOf = "river_detect" }
+            if ($fnOf -and -not $script:FnSrc[$fnOf]) { $script:FnModel[$fnOf] = $m; $script:FnSrc[$fnOf] = @(On-All) }
+        }
     }
 }
 function Load-Places {
@@ -2986,8 +3014,8 @@ function Self-Test {
     $r.orchestrate = $orchOn.Checked
     $r.orch_args = Orch-Args (Current-Config)
     $visOn.Checked = $true
-    Pick-Function "object_detect" "yoloe" @((On-All)[0])
-    Pick-Function "zeroshot_detect" "targeted" @((On-All)[0])
+    Pick-Function "object_detect" "yoloe" @(@(On-All)[0])
+    Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
     $r.target_tab_enabled = $tTarget.Controls[0].Enabled
     # 사용자 설정에 기대지 않는다 — 아래 단계가 쓰는 대상을 직접 켠다 (저장된 대상이 person · chair 뿐이면 door 근거
     # 컨트롤이 없어 시험이 깨졌다, 2026-11-24)
@@ -3023,7 +3051,7 @@ function Self-Test {
     if ($featChecks["reid"]) { $featChecks["reid"].Checked = $true }
     $r.config = Current-Config
     $r.profile = Build-Profile
-    Pick-Function "zeroshot_detect" "targeted" @()
+    Pick-Function "targeted_detect" "targeted" @()
     $r.target_tab_enabled_after_off = $tTarget.Controls[0].Enabled
     # 「배치 보기」 는 profile.json · 프로필 버전에 손대지 않는다 (M11 R4)
     $snap = { if (Test-Path $ProfileFile) { [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ProfileFile)) } else { "missing" } }
@@ -3076,11 +3104,11 @@ function Self-Test {
     $srcChecks["pi14"].Checked = $false
     # ---- 단계 이동 · 한/영 (2026-11-26)
     $r.steps_ko = @(0..($tabs.TabPages.Count - 1) | ForEach-Object { $tabs.TabPages[$_].Text })
-    Pick-Function "zeroshot_detect" "targeted" @()
+    Pick-Function "targeted_detect" "targeted" @()
     Go-Step 1
     Step-Move 1
     $r.next_skips_targets = $tabs.SelectedIndex            # 지정 클래스를 안 골랐으면 3단계를 건너뛴다 (2 → 3)
-    Pick-Function "zeroshot_detect" "targeted" @((On-All)[0])
+    Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
     Go-Step 1
     Step-Move 1
     $r.next_into_targets = $tabs.SelectedIndex             # 골랐으면 3단계(인덱스 2)로
@@ -3111,7 +3139,7 @@ function E2E-Test {
     foreach ($n in $Sources) { $srcChecks[$n].Checked = ($n -eq $src) }
     $sliceOn.Checked = $false
     $visOn.Checked = $true
-    Pick-Function "zeroshot_detect" "targeted" @((On-All)[0])
+    Pick-Function "targeted_detect" "targeted" @(@(On-All)[0])
     foreach ($n in (Target-Names)) { if ($script:TargetChecks[$n]) { $script:TargetChecks[$n].Checked = ($n -eq "person" -or $n -eq "chair") } }
     $distOn.Checked = $true
     Start-All
@@ -3126,7 +3154,7 @@ function E2E-Test {
     $f = Get-ChildItem -Path $Here -Filter "status_*.json" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     "vision status: " + (Get-Content $f.FullName -Raw -Encoding UTF8)
     "still running: " + ((Running-Names) -join ",")
-    Pick-Function "object_detect" "yoloe" @((On-All)[0])
+    Pick-Function "object_detect" "yoloe" @(@(On-All)[0])
     Apply-Changes
     Start-Sleep -Seconds 5
     "after adding yoloe (vision restarted): " + ((Running-Names) -join ",")

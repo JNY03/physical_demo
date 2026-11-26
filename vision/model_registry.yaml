@@ -52,6 +52,7 @@ options:
   river:
     shown: river
     kind: detect
+    domain: true                        # 도메인 전용 — 모델이 아니라 기능(river_detect)이다. 모델은 cue_models
     gpu_mb: 2400
     p90_ms: {s: 1230, m: 1210, l: 1590, xl: 1610}
     cue_models:                         # 판정 무게는 vision/assets/hazard_cues.json decision.weights
@@ -65,6 +66,7 @@ options:
   targeted:
     shown: 지정 클래스 탐지
     kind: detect
+    domain: true                        # 도메인 전용 — 모델이 아니라 기능(targeted_detect)이다. 모델은 cues.*.needs
     gpu_mb: 0
     p90_ms: {s: 420, m: 650, l: 900, xl: 1300}      # l · xl 은 잰 적 없음 (m 에서 어림)
     cue_models: targeted                # = 아래 cues 구역 (needs 가 모델 키)
@@ -319,7 +321,7 @@ functions:
         note: 보조 재인코딩 — 저장 · 가시화용
 
   object_detect:
-    options: [yoloe, river, targeted]
+    options: [yoloe]                    # 모델 선택지 — 모델이 늘면 여기에 더한다. 도메인 전용은 따로 기능으로
     note: 객체 탐지 — 기기에서 int8 320px 로 거르고 서버 고성능 모델이 확인한다
     pattern: cascade
     criticality: mission
@@ -353,7 +355,7 @@ functions:
         note: options.yoloe 가 맡는다 (GPU Executor 가 띄운다 — image · command 로 올리는 작업이 아니다)
 
   zeroshot_detect:
-    options: [targeted]
+    options: [yoloe]
     note: Zero-shot 객체 탐지 — 기기는 사전 등록 프롬프트 임베딩만, 서버가 동적 프롬프트로 정밀하게
     pattern: cascade
     criticality: mission
@@ -384,7 +386,75 @@ functions:
         roles: [gpu]
         image: null
         command: null
-        note: options.river · targeted 가 맡는다 (YOLOE 텍스트 arm · Grounding DINO)
+        note: options.yoloe 가 맡는다 (GPU Executor 가 띄운다)
+
+  targeted_detect:
+    options: [targeted]                 # 도메인 전용 기능 — 모델은 근거(cues)마다 고른다(yoloe_text · yoloe_free · clip · depth …)
+    note: 지정 물체 탐지 — 정한 대상을 근거(이름 · 글 설명 · 기준 사진 · 모양 · 재질 · 거리)로 판정한다
+    pattern: cascade
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 2.0}
+        deadline_ms: 1000
+        frame_kb: 120
+        egress_kb: 0.05
+        fps: 1
+        proc_ms: 700
+        cpu_m: 1200
+        mem_mb: 512
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 2000
+        frame_kb: 120
+        egress_kb: 4
+        cpu_m: 500
+        mem_mb: 3072
+        roles: [gpu]
+        image: null
+        command: null
+        note: options.targeted 가 맡는다 (GPU Executor 가 띄운다)
+
+  river_detect:
+    options: [river]                    # 도메인 전용 기능 — 모델은 cue_models(yoloe_text · yoloe_free · clip · depth)
+    note: 하천 부유물 탐지 — 물에 떠내려가는 물체를 학습 없이 찾는다
+    pattern: cascade
+    criticality: mission
+    trigger: on_request
+    stages:
+      device:
+        optional: true
+        needs: {sensors: [camera], cores: 2.0}
+        deadline_ms: 1000
+        frame_kb: 120
+        egress_kb: 0.05
+        fps: 1
+        proc_ms: 700
+        cpu_m: 1200
+        mem_mb: 512
+        roles: [robot, sensor, small, gpu]
+        placement: measured
+        image: null
+        command: null
+        note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체 없음 — 계약만
+      server:
+        needs: {accel: gpu}
+        deadline_ms: 2000
+        frame_kb: 120
+        egress_kb: 4
+        cpu_m: 500
+        mem_mb: 3072
+        roles: [gpu]
+        image: null
+        command: null
+        note: options.river 가 맡는다 (GPU Executor 가 띄운다)
 
   segmentation:
     options: [yoloe]
