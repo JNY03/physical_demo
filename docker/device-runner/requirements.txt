@@ -1,0 +1,13 @@
+# ds-device-runner 의존성 — 기기 단계 실행체와 CPU 실행기가 쓰는 것만 (torch · ultralytics 없음).
+# **pip install --no-deps** 로 깐다(Dockerfile) — 의존성을 여기에 다 적는다. 쓰지 않는 무거운 것을 빼려는 것이다:
+#   onnxruntime 의 sympy(+mpmath, 약 70 MB — 기호 모양 추론 도구만 쓴다) · ncnn 의 tqdm · requests · portalocker (모델 동물원 내려받기만 쓴다)
+# 버전은 requirements/core.txt · vision-cpu.txt 와 같다. 모두 linux/arm64(manylinux_2_28) · linux/amd64 휠이 있다 (Python 3.12).
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+onnxruntime==1.24.1
+flatbuffers==25.12.19             # onnxruntime
+protobuf==7.36.2                  # onnxruntime
+packaging==26.3                   # onnxruntime
+ncnn==1.0.20261020
+redis==8.1.0
+PyYAML==6.0.3                     # 레지스트리 · vision_config 읽기, NCNN 폴더의 metadata.yaml

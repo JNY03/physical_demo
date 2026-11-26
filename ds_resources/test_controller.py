@@ -562,3 +562,53 @@ def test_with_limits_puts_the_launcher_values_on_the_snapshot(tmp_path):
     assert by["pi1"]["caps"]["sensors"] == ["camera"]             # 있던 특성은 그대로
     assert "limits" not in by["pi7"]                              # 적지 않은 노드는 건드리지 않는다
     assert k.with_limits(nodes, None) is nodes
+
+
+# ---------------------------------------------------------------- 기기 단계 실행체 (ds-device-runner, 2026-11-26)
+DEV_FUNCS = {"functions": {
+    "det": {"pattern": "cascade", "criticality": "mission", "trigger": "on_activity", "note": "기기 거름 → 서버 탐지",
+            "stages": {"device": {"cpu_m": 1600, "mem_mb": 512, "roles": ["small"], "optional": True, "fps": 2,
+                                  "needs": {"sensors": ["camera"]},
+                                  "image": "{registry}/ds-device-runner:abc1234",
+                                  "command": ["python", "/ds/vision/device_stage.py", "--source", "{source}",
+                                              "--model", "{slot.detector}", "--fps", "{fps}"],
+                                  "slots": {"detector": {"label": "기기 탐지기", "needs": ["detect"], "size": "small",
+                                                         "optional": True, "default": "tiny_det"}}},
+                       "server": {"cpu_m": 500, "mem_mb": 2048, "roles": ["gpu"]}}}}}
+
+
+def dev_setup(tmp_path):
+    from ds_resources import functions as fnc
+    k, r, c = make(tmp_path)
+    k.cluster, k.cpu_ex = Nodes(), FakeCpu()
+    k.cluster.n["pi13"]["source"] = "pi13"                              # ds.source 라벨 — 그 카메라가 달린 노드
+    k._funcs = fnc.load(DEV_FUNCS)
+    k.submit([], [], functions={"pi13": ["det"]}, manual={"det.device@pi13": "pi13"})
+    return k
+
+
+def test_device_stage_launch_carries_image_command_and_slot_pick(tmp_path):
+    """기능의 기기 단계가 파이에 놓이면 실행기에 image · command(자리표시 그대로) · 고른 슬롯 모델 · 소스가 실려 간다.
+    cpu_tasks 에 없는 이름이라도 실행기가 단위의 spec 으로 파드를 만들 수 있게"""
+    k = dev_setup(tmp_path)
+    got = [u for u in k.cpu_ex.launched if u["task"] == "det.device@pi13"]
+    assert got, [u["task"] for u in k.cpu_ex.launched]
+    u = got[0]
+    assert u["node"] == "pi13"
+    assert u["spec"]["image"] == "{registry}/ds-device-runner:abc1234"
+    assert u["spec"]["command"][-4:] == ["--model", "{slot.detector}", "--fps", "{fps}"]   # 채우는 것은 실행기 몫
+    assert u["args"] == {"function": "det", "stage": "device", "source": "pi13", "fps": 2, "cpu_m": 1600,
+                         "mem_mb": 512, "slots": {"detector": "tiny_det"}, "source_node": "pi13"}
+    assert k.state.units()[u["unit_id"]]["args"]["slots"] == {"detector": "tiny_det"}   # 기록에도 남는다
+
+
+def test_profile_pick_wins_over_slot_default(tmp_path):
+    k = dev_setup(tmp_path)
+    k._slot_pick = {"det": {"device": {"detector": "other_det"}}}       # 프로필 functions.det.device.detector
+    assert k.stage_launch("det.device@pi13")["args"]["slots"] == {"detector": "other_det"}
+
+
+def test_server_stage_and_unknown_unit_carry_nothing_extra(tmp_path):
+    k = dev_setup(tmp_path)
+    assert k.stage_launch("det.server") == {}                           # 서버 단계는 image 가 없다
+    assert k.stage_launch("no.such@x") == {}

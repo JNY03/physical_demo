@@ -217,6 +217,13 @@ cpu_tasks:
 #:     roles (둘 수 있는 노드 역할: gpu · robot · sensor · small) · placement (any | measured) ·
 #:     image · command · env (k3s 파드) · local_command (data_stream 기기에서 돌릴 때)
 #:   실행체가 아직 없으면 image: null · command: null 이고 note 에 「실행체 없음 — 계약만」이라고 적는다
+#:   기기 단계 실행체 (2026-11-26) — 고른 작은 모델을 파이 CPU 로 돌리는 공용 이미지 ds-device-runner
+#:     (vision/device_stage.py · docker/device-runner). image 의 {registry} 는 파이가 당기는 사설 레지스트리
+#:     (DS_REGISTRY 또는 이 기기 테일넷 IP:5000), 태그는 빌드한 커밋의 git 짧은 해시다.
+#:     command 의 자리표시는 k3s CPU 실행기가 채운다 (orchestrator/k3s_executor.py fill_command):
+#:       {source} {function} {stage} {fps} {cpu_m} {mem_mb} {unit_id} {node} · {slot.<역할>} = 그 단계 역할 슬롯에
+#:       고른 모델 (프로필 functions.<기능>.device.<역할> → 없으면 기본값). 슬롯이 비면 파드를 띄우지 않는다.
+#:     결과는 Redis device_stage:<소스>:<기능>, 하트비트는 cpu_telemetry:<UNIT_ID>.
 #:
 #: 패턴이 지키는 규칙 (functions.py load 가 ValueError 로 거부한다)
 #:   cascade      두 단계 모두 있어야 하고 기기 단계는 optional: true (없으면 품질만 낮춘다)
@@ -376,9 +383,9 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: null
-        command: null
-        note: 1~5 fps · 1~2 스레드. 파이마다 성능이 달라 placement 는 measured — 비교 측정 전에는 옮기지 않는다. 실행체 없음 — 계약만
+        image: "{registry}/ds-device-runner:95c423e"
+        command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.detector}", --fps, "{fps}", --imgsz, "320"]
+        note: 1~5 fps · 1~2 스레드. 파이마다 성능이 달라 placement 는 measured — 비교 측정 전에는 옮기지 않는다. 실행체는 ds-device-runner (vision/device_stage.py) — 슬롯 detector 에 고른 모델을 돌린다
         slots:
           detector: {label: 기기 탐지기, label_en: on-device detector, needs: [detect], size: small, optional: true}
       server:
@@ -414,9 +421,9 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: null
-        command: null
-        note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체 없음 — 계약만
+        image: "{registry}/ds-device-runner:95c423e"
+        command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.detector}", --fps, "{fps}", --imgsz, "320"]
+        note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체는 ds-device-runner (vision/device_stage.py) — 슬롯 detector 에 고른 모델을 돌린다
         slots:
           detector: {label: 기기 탐지기, label_en: on-device detector, needs: [detect, open_vocab], size: small, optional: true}
       server:
@@ -503,7 +510,7 @@ functions:
 
   segmentation:
     options: [yoloe]
-    note: Segmentation — 기기 경량 분할로 거르고 서버 Foundation 모델이 맡는다. 실행체 없음 — 계약만
+    note: Segmentation — 기기 경량 분할로 거르고 서버 Foundation 모델이 맡는다. 기기 단계 실행체는 ds-device-runner (vision/device_stage.py)
     pattern: cascade
     criticality: best_effort
     trigger: on_request
@@ -520,8 +527,8 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: null
-        command: null
+        image: "{registry}/ds-device-runner:95c423e"
+        command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.segmenter}", --fps, "{fps}", --imgsz, "320"]
         slots:
           segmenter: {label: 기기 분할 모델, label_en: on-device segmenter, needs: [segment], size: small, optional: true}
       server:
@@ -556,9 +563,9 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: null
-        command: null
-        note: 상대 깊이 · 근거리 판단만 — 거리값으로 쓰지 않는다. 실행체 없음 — 계약만
+        image: "{registry}/ds-device-runner:95c423e"
+        command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.depth}", --fps, "{fps}", --imgsz, "320"]
+        note: 상대 깊이 · 근거리 판단만 — 거리값으로 쓰지 않는다. 실행체는 ds-device-runner (vision/device_stage.py) — 슬롯 depth 에 고른 모델을 돌린다
         slots:
           depth: {label: 기기 깊이 모델, label_en: on-device depth, needs: [depth_relative], size: small, optional: true}
       server:

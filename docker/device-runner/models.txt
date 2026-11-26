@@ -1,0 +1,15 @@
+# ds-device-runner 에 넣을 모델 — 한 줄에 하나 (stage.py 가 읽는다). 이미지 크기가 곧 파이가 받는 크기다.
+#   <모델 키>      vision/model_registry.yaml models.<키> 의 files 전부 + 매개변수 안의 models/… 경로
+#   models/<경로>  그 파일 · 폴더만 (키의 files 중 일부 — 예: 320 판만 — 를 넣을 때)
+# 넣을 모델은 기기 슬롯(size: small · runs_on: cpu_arm64)에 뜨는 것만. 실행기 파일(vision/runners/*.py)은
+# 언제나 다 들어간다 — 여기에는 가중치만 고른다. 고친 뒤: 커밋 → bash docker/device-runner/build.sh --push
+#
+# object_detect · segmentation 기기 슬롯 — yolo26n_seg_cpu (320 판만; 기기 단계 명령이 --imgsz 320)
+models/yolo26n-seg/yolo26n-seg_320.onnx
+# zeroshot_detect 기기 슬롯 — yoloe26n_vocab_cpu (어휘를 굳힌 320 판 + 어휘 목록)
+models/yoloe-26n-seg/yoloe-26n-seg-vocab_320.onnx
+models/yoloe-26n-seg/yoloe-26n-seg-vocab.txt
+# depth_estimate 기기 슬롯 — da3_small_cpu (상대 깊이, 약 105 MB)
+da3_small_cpu
+# 넣지 않음: mobileclip_s0_cpu (embed — reid · multi_cam_track 기기 단계는 아직 이 실행체에 연결하지 않았다),
+#            dav2_small_cpu (da3 와 같은 자리, 하나만), *_640 판
