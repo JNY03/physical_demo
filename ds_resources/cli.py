@@ -12,6 +12,10 @@
   python -m ds_resources.cli preflight [--json]
       이 기기에서 무엇이 되고 무엇이 왜 안 되는지 — 자원 · 둘레(docker · k3s · Redis) · 가중치를 읽고
       기능마다 된다/안 된다와 고치는 길을 적는다. 아무것도 깔거나 띄우지 않는다.
+      issues: 기기 단위로 지금 고칠 것 [{id, level, title, detail, fix}] (런처 시작 점검 배너).
+  python -m ds_resources.cli fix <id> [--dry-run]
+      다시 점검해서 그 id 의 고치기 명령(fix.argv)을 저장소 루트에서 돌리고 결과 JSON 을 찍는다
+      (KUBECONFIG 가 없으면 ~/.kube/config). 밖에서 받은 명령은 돌리지 않는다.
 
 기기별 모델 매칭 · 수동 배치 (2026-11-26)
   --assign pi13=yoloe a2=yoloe,river robot1=       기기마다 올릴 모델 (적지 않은 기기는 --models 전부,
@@ -163,7 +167,9 @@ def submit_with_retry(k, submit, nothing_running, stopped=lambda: False, sleep=t
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="자원 기반 비전 오케스트레이터")
-    ap.add_argument("cmd", choices=("plan", "run", "status", "places", "preflight"))
+    ap.add_argument("cmd", choices=("plan", "run", "status", "places", "preflight", "fix"))
+    ap.add_argument("target", nargs="?", help="fix: 고칠 점검 id (preflight issues[].id)")
+    ap.add_argument("--dry-run", action="store_true", help="fix: 돌리지 않고 무엇을 돌릴지만")
     ap.add_argument("--sources", nargs="*", default=[])
     ap.add_argument("--models", nargs="*", default=[])
     ap.add_argument("--cpu-tasks", nargs="*", default=[])
@@ -184,6 +190,13 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--poll", type=float, default=3.0)
     a = ap.parse_args(argv)
+    if a.cmd == "fix":
+        from ds_resources import preflight as pf
+        if not a.target:
+            ap.error("fix 에는 id 가 필요합니다 (preflight --json 의 issues[].id)")
+        res = pf.run_fix(a.target, dry_run=a.dry_run)
+        print(json.dumps(res, ensure_ascii=False, indent=1))
+        return 0 if res["ok"] else 1
     if not a.redis_public:
         import subprocess
         try:
