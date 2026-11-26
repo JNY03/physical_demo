@@ -290,7 +290,8 @@ def place_gpu(request, nodes, costs, out):
         ledger[node["name"]][1] += load
         held.setdefault(node["name"], []).append((rank, need))
         out["gpu_units"].append({"unit": "gpu:%s" % "+".join(models), "node": node["name"], "models": models,
-                                 "sources": srcs, "fps_cap": fps, "need_mb": round(need),
+                                 **({"device_models": request["device_models"]} if request.get("device_models") else {}),
+                             "sources": srcs, "fps_cap": fps, "need_mb": round(need),
                                  "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load, 3),
                                  "limit_mode": "none", "reason": "한도 면제: 서버 — GPU 처리량 예산 없음 (fps 낮춤 · 빼기 없음)",
                                  **({"exclusive": True} if exclusive else {}), **prio})
@@ -333,6 +334,7 @@ def place_gpu(request, nodes, costs, out):
     ledger[node["name"]][1] += load(fps)
     held.setdefault(node["name"], []).append((rank, need))
     out["gpu_units"].append({"unit": "gpu:%s" % "+".join(models), "node": node["name"], "models": models,
+                             **({"device_models": request["device_models"]} if request.get("device_models") else {}),
                              "sources": sorted(fps), "fps_cap": fps, "need_mb": round(need),
                              "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load(fps), 3),
                              **({"exclusive": True} if exclusive else {}), **prio})

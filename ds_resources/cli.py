@@ -181,6 +181,36 @@ def submit_with_retry(k, submit, nothing_running, stopped=lambda: False, sleep=t
     return rid
 
 
+def per_source_models(funcs, models, profile=None):
+    """{소스: [기능]} → {소스: [모델]} — 그 소스의 기능들이 쓰는 서버 주 모델(프로필 슬롯이 이기고 없으면 기본값) 중
+    --models 안의 것. 주 모델이 없는 기능(물체 추적 · 재식별 등)은 다른 기능의 탐지를 받아 쓰므로 더하지 않는다.
+    어느 소스든 모델을 하나도 못 정하면 None (예전처럼 --models 전부)."""
+    from ds_resources import functions as fnc
+    from ds_resources import slots as slt
+    reg = fnc._registry(None)
+    table = fnc.load(reg)
+    picks = slt.check_picks(reg, table, ((profile or {}).get("functions") or {}))
+    want = set(models)
+    out = {}
+    for src, fns in funcs.items():
+        got = []
+        for fn in fns:
+            if fn not in table:
+                continue
+            sel = slt.effective(reg, table, picks, {fn})
+            slots_ = ((table[fn]["stages"].get("server") or {}).get("slots")) or []
+            if not slots_:
+                continue
+            v = ((sel.get(fn) or {}).get("server") or {}).get(slots_[0]["role"])
+            v = v[0] if isinstance(v, list) and v else v
+            if v in want and v not in got:
+                got.append(v)
+        if not got:
+            return None
+        out[src] = sorted(got)
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="자원 기반 비전 오케스트레이터")
     ap.add_argument("cmd", choices=("plan", "run", "status", "places", "preflight", "fix"))
@@ -278,6 +308,24 @@ def main(argv=None):
             raise SystemExit("--function-params 는 JSON 이어야 합니다: %s" % e)
         if not isinstance(fparams, dict):
             raise SystemExit("--function-params 는 {기능: {이름: 값}} 사전이어야 합니다")
+
+    # 소스별 기능(pi12=a,b)을 받았으면 — 요청하지 않은 소스에 같은 일을 하지 않게 (2026-11-27 실측: robot1 에만 켠
+    # 거리 추정 · 물체 추적이 pi12 에서도 돌았다)
+    #   ① --assign 이 없으면 소스마다 그 소스의 기능이 쓰는 서버 주 모델만 올린다 (--models 안에서)
+    #   ② 소스를 가리는 기능(object_track · reid)에는 매개변수 sources 로 켠 소스를 실어 보낸다
+    if isinstance(funcs, dict) and funcs:
+        by_fn = {}
+        for src, fns in funcs.items():
+            for fn in fns:
+                by_fn.setdefault(fn, []).append(src)
+        if assign is None and a.models:
+            auto = per_source_models(funcs, a.models, load_profile(a.profile))
+            if auto:
+                assign = auto
+        fparams = dict(fparams or {})
+        for fn in ("object_track", "reid", "multi_cam_track"):
+            if fn in by_fn and "sources" not in (fparams.get(fn) or {}):
+                fparams[fn] = dict(fparams.get(fn) or {}, sources=sorted(by_fn[fn]))
 
     def with_params(prof):
         """프로필 function_params 위에 --function-params 를 덮는다 (기능마다)"""

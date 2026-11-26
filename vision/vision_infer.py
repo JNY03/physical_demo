@@ -3652,7 +3652,8 @@ def infer_frame(bgr, base, header, device, save_detect, depth_models, runners, c
     pose = []                                           # 한 장에 한 번만 찾는다 (depth 모델이 여럿이어도)
     out = _infer_depth(out, dets, stab, bgr, base, header, device, depth_models, runners, cfg, pose_fn,
                        fusion, vis, ocfg, locator, fov, pose, w)
-    if track is not None:                               # 물체 추적 — 입력 탐지 결과를 이 장의 담기에서 받는다
+    if track is not None and (getattr(track, "sources", None) is None or device in track.sources):
+        # 물체 추적 — 입력 탐지 결과를 이 장의 담기에서 받는다. 켠 소스(function_params.object_track.sources)에서만
         import object_track as ot
         rec = track.step(share, device, base, bgr, frame_ts(header))
         if rec is not None:
@@ -4427,9 +4428,13 @@ class LiveRunner:
         h, w = bgr.shape[:2]
         base = {"n": header.get("n"), "frame": rel, "source": dv, "run": run_dir.name if run_dir else None,
                 "image_wh": [w, h], "live": True}
+        # 기기마다 돌릴 모델 (--device-models). 없으면 이 프로세스의 모델 전부 — 예전 그대로
+        dmods = (self.cfg.get("_device_models") or {}).get(dv)
+        mods = [m for m in self.models if m in dmods] if dmods else list(self.models)
+        runs = self.runners if not dmods else {k: v for k, v in self.runners.items() if k in mods}
         results = infer_frame(bgr, base, header, dv,
-                              {m for m in DETECT_MODELS if m in self.models},
-                              [m for m in self.models if m in DEPTH_MODELS], self.runners, self.cfg,
+                              {m for m in DETECT_MODELS if m in mods},
+                              [m for m in mods if m in DEPTH_MODELS], runs, self.cfg,
                               lambda ts: self.pose(dv, ts))
         done_ms = int(time.time() * 1000)
         pipe = self.r.pipeline(transaction=False)
@@ -4882,6 +4887,9 @@ def main():
     ap.add_argument("--list", action="store_true", help="기기·실행 폴더·프레임 수만 보여 주고 끝낸다")
     g = ap.add_argument_group("지정 클래스 탐지 · 오버레이 (탐지대상_런처_계획_261123.md)")
     g.add_argument("--profile", metavar="파일", help="프로필 JSON (런처가 만든다). live 에서는 바뀌면 바로 반영")
+    ap.add_argument("--device-models", nargs="+", metavar="기기=모델[,모델]",
+                    help="live 기기마다 돌릴 모델 (--models 는 이 프로세스에 올릴 합집합). 적지 않은 기기는 --models 전부. "
+                         "오케스트레이터가 소스별 기능에서 만든다 (2026-11-27)")
     ap.add_argument("--max-fps", nargs="+", metavar="기기=fps",
                     help="live 기기별 처리 상한 (config live.max_fps 를 덮는다). 오케스트레이터 배치표의 fps 상한")
     g.add_argument("--target", action="append", metavar="대상",
@@ -4913,6 +4921,15 @@ def main():
             except ValueError:
                 raise SystemExit("--max-fps 는 기기=fps 꼴: %r" % item)
         cfg.setdefault("live", {})["max_fps"] = mf
+    if args.device_models:                                 # 기기마다 돌릴 모델 (2026-11-27)
+        dm = {}
+        for item in args.device_models:
+            dv, _, v = item.partition("=")
+            ms = [m.strip() for m in v.split(",") if m.strip()]
+            if not dv.strip() or not ms:
+                raise SystemExit("--device-models 는 기기=모델[,모델] 꼴: %r" % item)
+            dm[dv.strip()] = ms
+        cfg["_device_models"] = dm
     data_root = Path(args.data_root).expanduser().resolve() if args.data_root else cfg["data_root"]
     defaults = cfg.get("defaults", {}) or {}
     devices = normalize(args.devices or defaults.get("devices", list(DEVICES)), DEVICES, DEVICE_ALIASES, "기기")
@@ -5048,6 +5065,8 @@ def main():
             tr = load_runner(tsel["tracker"], spec, "cpu", (cfg.get("models") or {}).get(tsel["tracker"]))
             cfg["_track"] = ot.ObjectTrackStep(tsel["tracker"], tr, tsel["function"], tsel["model"],
                                                (cfg.get("overlay") or {}).get("min_conf"))
+            _tsrc = ((raw.get("function_params") or {}).get("object_track") or {}).get("sources")
+            cfg["_track"].sources = set(_tsrc) if _tsrc else None     # 없으면 이 프로세스의 소스 전부 (예전 그대로)
             log("물체 추적: %s ← %s (%s) — 결과 vision_stream:<기기>:track" % (tsel["tracker"], tsel["function"],
                                                                          tsel["model"]))
             # 재식별 범위 (reid · multi_cam_track — scope source | group). 트랙마다 임베딩 → 갤러리

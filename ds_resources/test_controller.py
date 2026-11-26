@@ -515,13 +515,14 @@ def test_old_path_is_untouched_by_the_functions_contract(tmp_path):
 
 # ================================================================ 기기별 모델 매칭 · 수동 배치 (2026-11-26)
 def test_vision_groups_bundle_devices_by_their_model_set(tmp_path):
-    """묶음 하나 = 프로세스 하나. 조합이 같은 기기끼리 묶이고, 비운 기기는 비전에서 빠진다"""
+    """묶음 하나 = 프로세스 하나. 조합이 달라도 한 프로세스에 합집합을 올리고 기기마다 돌릴 것(device_models)을 준다
+    (2026-11-27 — 갈라 띄우면 같은 모델을 두 번 올려 GPU 에 안 들어갔다). 비운 기기는 비전에서 빠진다"""
     k, _r, _c = make(tmp_path)
     groups, off = k.vision_groups(["yoloe", "river"], {"pi13": ["yoloe"], "a2": ["yoloe"], "pi11": []},
                                   ["pi13", "a2", "pi11", "pi12"])
     assert off == ["pi11"]
-    assert groups == [{"models": ["river", "yoloe"], "sources": ["pi12"]},     # 안 적은 기기는 고른 모델 전부
-                      {"models": ["yoloe"], "sources": ["a2", "pi13"]}]        # 같은 조합이면 한 묶음
+    assert groups == [{"models": ["river", "yoloe"], "sources": ["a2", "pi12", "pi13"],
+                       "device_models": {"a2": ["yoloe"], "pi12": ["river", "yoloe"], "pi13": ["yoloe"]}}]
     # 매칭이 없으면 지금까지와 똑같다 — 고른 모델 전부를 모든 기기에 (묶음 하나)
     assert k.vision_groups(["yoloe"], None, ["pi13", "a2"]) == ([{"models": ["yoloe"], "sources": ["a2", "pi13"]}], [])
 

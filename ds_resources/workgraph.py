@@ -98,14 +98,21 @@ def check_params(funcs, params, functions=None, sources=None):
             raise ValueError("function_params.%s 는 {이름: 값} 사전" % fn)
         decl = funcs[fn].get("params") or {}
         for k in vals:
+            if k == "sources":                           # 예약 칸 — 오케스트레이터가 채우는 「이 기능을 켠 소스」
+                continue
             if k not in decl:
                 raise ValueError("function_params.%s.%s — 그런 매개변수가 없다 (있는 것: %s)"
                                  % (fn, k, ", ".join(decl) or "없음"))
     for fn, g in funcs.items():
         decl = g.get("params") or {}
+        vals = params.get(fn) or {}
+        if "sources" in vals:                            # 예약 칸 sources — 소스 목록이면 그대로 싣는다 (2026-11-27)
+            sv = vals["sources"]
+            if isinstance(sv, (str, bytes)) or not isinstance(sv, (list, tuple)):
+                raise ValueError("function_params.%s.sources 는 소스 목록" % fn)
+            out.setdefault(fn, {})["sources"] = sorted(dict.fromkeys(str(x) for x in sv))
         if not decl:
             continue
-        vals = params.get(fn) or {}
         on = sorted(s for s, fs in (per or {}).items() if fn in fs)
         if per is not None and not on and fn not in params:
             continue
@@ -144,7 +151,7 @@ def check_params(funcs, params, functions=None, sources=None):
             if got[k] is not None and len(got[k]) < d["min"]:
                 raise ValueError("%s 는 소스가 %d개 이상이어야 한다 (받은 것: %s)"
                                  % (what, d["min"], ", ".join(got[k]) or "없음"))
-        out[fn] = got
+        out[fn] = dict(out.get(fn) or {}, **got)
     return out
 
 

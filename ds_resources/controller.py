@@ -298,13 +298,15 @@ class Controller:
         return self._funcs
 
     def vision_groups(self, models, assign, sources):
-        """기기별 모델 매칭 → GPU 묶음들. **묶음 하나 = 프로세스 하나**다 (2026-11-26).
+        """기기별 모델 매칭 → GPU 묶음들. **묶음 하나 = 프로세스 하나**다.
 
         assign  {소스: [모델...]} 그 기기에 올릴 모델. 없는 소스는 고른 모델 전부(옛 동작 그대로),
                 빈 목록은 「그 기기에는 비전을 올리지 않음」이다.
-        모델 조합이 같은 소스끼리 묶는다 — 조합이 다르면 프로세스가 갈리고 GPU 메모리도 따로 든다.
-        → ([{models, sources}...], 비전을 올리지 않는 소스들). 이름순이라 같은 입력이면 같은 묶음이다."""
-        groups, off = {}, []
+        소스마다 모델이 달라도 **한 프로세스로 묶는다** (2026-11-27) — 갈라 띄우면 같은 모델(예: 지정 물체 탐지 약 5 GB)을
+        프로세스마다 다시 올려 6 GB GPU 에 둘째가 들어가지 못했다(실측). 묶음에는 모델 합집합을 올리고
+        device_models {소스: [모델]} 로 기기마다 돌릴 것만 돌린다 (vision_infer --device-models).
+        → ([{models, sources, device_models?}...], 비전을 올리지 않는 소스들). 이름순이라 같은 입력이면 같은 묶음이다."""
+        per, off = {}, []
         pick = set(models)
         for s in sorted(sources):
             want = (assign or {}).get(s)
@@ -312,8 +314,14 @@ class Controller:
             if not ms:
                 off.append(s)
                 continue
-            groups.setdefault(tuple(ms), []).append(s)
-        return [{"models": list(k), "sources": sorted(v)} for k, v in sorted(groups.items())], off
+            per[s] = ms
+        if not per:
+            return [], off
+        union = sorted({m for ms in per.values() for m in ms})
+        g = {"models": union, "sources": sorted(per)}
+        if any(ms != union for ms in per.values()):
+            g["device_models"] = {s: per[s] for s in sorted(per)}
+        return [g], off
 
     def gpu_priority(self, models, sources, functions):
         """GPU 묶음이 맡은 기능의 우선순위 → {criticality, trigger, functions} 또는 {} (옛 요청 — 배치가 mission 으로 본다).
@@ -546,6 +554,7 @@ class Controller:
                 stages = [dict(s, roles=[r for r in (s.get("roles") or []) if r == "gpu"]) for s in stages]
         req = {"request_id": request_id,
                "gpu": [{"models": g["models"], "sources": g["sources"],
+                        **({"device_models": g["device_models"]} if g.get("device_models") else {}),
                         "target_fps": {s: fps[s] for s in g["sources"]},
                         "waiting": sorted(set(g["sources"]) & set(waiting)),
                         # 맡은 기능의 우선순위 (기능 없이 온 옛 요청이면 칸이 없다 — 배치가 mission 으로 본다)
@@ -635,6 +644,7 @@ class Controller:
             c = snapshot["costs"]["+".join(u["models"])]
             spec = {"devices": u["sources"], "models": u["models"], "profile_path": profile_path,
                     "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
+                    **({"device_models": u["device_models"]} if u.get("device_models") else {}),
                     **({"limit_mode": u["limit_mode"]} if u.get("limit_mode") else {}),
                     **{k: u[k] for k in ("rank", "criticality", "trigger") if u.get(k) is not None},
                     # 기능 매개변수(추적 입력 · 재식별 범위)는 프로필 파일에도 있지만 cli --function-params 로만 준 것도 간다

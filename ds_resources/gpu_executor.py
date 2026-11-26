@@ -246,6 +246,8 @@ class GpuExecutor:
             cmd += ["--profile", unit["profile_path"]]
         if unit.get("function_params"):                     # 추적 입력 · 재식별 범위 (work/1) — 프로필 칸을 덮는다
             cmd += ["--function-params", json.dumps(unit["function_params"], ensure_ascii=False, sort_keys=True)]
+        if unit.get("device_models"):                       # 기기마다 돌릴 모델 (한 프로세스에 합집합을 올린다)
+            cmd += ["--device-models", *["%s=%s" % (d, ",".join(ms)) for d, ms in sorted(unit["device_models"].items())]]
         if unit.get("fps_cap"):                             # 배치표의 기기별 fps 상한을 실제로 건다
             cmd += ["--max-fps", *["%s=%g" % (d, f) for d, f in sorted(unit["fps_cap"].items())]]
         return cmd
