@@ -1398,6 +1398,7 @@ models:
     provides: [detect, segment, open_vocab]
     runs_on: [gpu]
     runner: yoloe26:FreeRunner
+    config: {weight: models/yoloe-26l-seg-pf.pt, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics)
     p90_ms: {s: 150, m: 90, l: 110, xl: 170}
     source:
@@ -1411,6 +1412,7 @@ models:
     provides: [detect, segment, open_vocab]
     runs_on: [gpu]
     runner: yoloe26:FreeRunner
+    config: {weight: models/yoloe-26s-seg-pf.pt, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics)
     p90_ms: {s: 110, m: 100, l: 100, xl: 110}
     source:
@@ -1424,6 +1426,7 @@ models:
     provides: [detect, segment, open_vocab]
     runs_on: [gpu]
     runner: yoloe26:TextRunner
+    config: {weight: models/yoloe-26l-seg.pt, text_encoder_dir: models, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics) · MobileCLIP2 (Apple)
     p90_ms: {s: 110, m: 100, l: 80, xl: 90}
     source:
@@ -1438,6 +1441,7 @@ models:
     provides: [detect, segment, open_vocab]
     runs_on: [gpu]
     runner: yoloe26:TextRunner
+    config: {weight: models/yoloe-26s-seg.pt, text_encoder_dir: models, imgsz: 640, half: true}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics) · MobileCLIP2 (Apple)
     p90_ms: {s: 60, m: 70, l: 70, xl: 70}
     source:
@@ -1461,6 +1465,7 @@ models:
     runs_on: [cpu_arm64, cpu_x86]
     size: small
     runner: yolo26n_ncnn:Runner
+    config: {model: models/yolo26n_ncnn/yolo26n_ncnn_320, threads: 4, conf: 0.25}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics)
     p90_ms: {s: 50, m: 55, l: 50, xl: 45}
     source:
@@ -1484,6 +1489,7 @@ models:
     provides: [track]
     runs_on: [gpu, cpu_x86, cpu_arm64]
     runner: botsort:Runner
+    config: {reset_gap_s: 2.0, on_untracked: keep, keep_boxes: detection}       # 실행기 기본값 (load_runner 가 넘긴다)
     license: AGPL-3.0 (Ultralytics)
     p90_ms: {s: 8, m: 12, l: 22, xl: 30}
   yolo26n_reid:

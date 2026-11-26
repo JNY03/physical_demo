@@ -13,3 +13,5 @@ models/yoloe-26n-seg/yoloe-26n-seg-vocab.txt
 da3_small_cpu
 # 넣지 않음: mobileclip_s0_cpu (embed — reid · multi_cam_track 기기 단계는 아직 이 실행체에 연결하지 않았다),
 #            dav2_small_cpu (da3 와 같은 자리, 하나만), *_640 판
+# object_detect 기기 슬롯 — yolo26n_ncnn (NCNN 320 판, 2026-11-27 추가)
+models/yolo26n_ncnn/yolo26n_ncnn_320

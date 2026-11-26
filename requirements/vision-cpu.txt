@@ -22,4 +22,4 @@ anyio==4.15.1
 click==8.5.0
 tqdm==4.70.1
 typing_extensions==4.16.0
-# 선택: ncnn==1.0.20261020  — vision/runners/yolo_seg_cpu.py backend: ncnn 일 때만 (기본은 onnxruntime. arm64 휠 있음)
+ncnn==1.0.20261020        # yolo26n_ncnn · yolo_seg_cpu(backend: ncnn) — 2026-11-27 (arm64 휠 있음). 이전: 선택 (기본은 onnxruntime. arm64 휠 있음)
