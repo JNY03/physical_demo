@@ -155,26 +155,72 @@ def _weight_state(models, dest=None):
     return out
 
 
-def features(mach, funcs, catalog=None, dest=None):
+def _slot_choices(funcs, reg=None):
+    """{(기능, 단계, 역할): (슬롯, [선택지 키])} — 역할 슬롯마다 고를 수 있는 것 (ds_resources/slots.py)"""
+    from ds_resources import functions as fnc
+    from ds_resources import slots as slt
+    try:
+        reg = fnc._registry(None) if reg is None else reg
+        table = slt.parts(reg)
+    except Exception:  # noqa: BLE001 — 레지스트리를 못 읽으면 슬롯은 안 본다(옛 options 로만)
+        return {}
+    out = {}
+    for name, g in funcs.items():
+        for side, st in g["stages"].items():
+            for sl in st.get("slots") or []:
+                out[(name, side, sl["role"])] = (sl, slt.choices(sl, side, st, table))
+    return out
+
+
+def features(mach, funcs, catalog=None, dest=None, reg=None):
     """기능마다 된다 · 안 된다 · 왜 · 어떻게.
 
     funcs    functions.load() 결과 (레지스트리 하나에서 온다 — 기능이 늘면 여기도 같이 는다)
-    catalog  cue_catalog 의 선택지 모음 (모델 이름 · 가중치 유무). 없으면 가중치는 fetch_models 로만 본다"""
-    want = sorted({o for g in funcs.values() for o in (g.get("options") or [])})
+    catalog  cue_catalog 의 선택지 모음 (모델 이름 · 가중치 유무). 없으면 가중치는 fetch_models 로만 본다
+    역할 슬롯(slots/1): 꼭 있어야 하는 단계의 **필수 슬롯**에 쓸 수 있는 모델이 하나도 없으면 그 기능은 안 된다.
+    옛 options 에서 온 model 슬롯은 아래 1) 이 예전 문구 그대로 본다"""
+    slot_ch = _slot_choices(funcs, reg)
+    want = sorted({o for g in funcs.values() for o in (g.get("options") or [])}
+                  | {k for (_fn, _side, _r), (_sl, ch) in slot_ch.items() for k in ch})
     wstate = _weight_state(want, dest)
     rows = []
     for name, g in sorted(funcs.items()):
         opts = list(g.get("options") or [])
         needs, why = [], []
         usable = True
-        # 1) 가중치 — 그 기능이 쓸 수 있는 선택지 중 하나라도 되면 된다
+        # 1) 가중치 — 그 기능이 쓸 수 있는 선택지 중 하나라도 되면 된다.
+        #    옛 options 가 들어간 model 슬롯은 options 와 함께 본다 — 슬롯에 새로 뜬 모델이 되면 그것으로도 된다
+        slot_ok = []
+        for side, st in sorted(g["stages"].items()):
+            for sl in st.get("slots") or []:
+                if sl["role"] == "model":
+                    _sl, ch = slot_ch.get((name, side, sl["role"]), (sl, []))
+                    slot_ok += [k for k in ch if wstate.get(k, (None, ""))[0]]
         if opts:
-            ok_opts = [o for o in opts if wstate.get(o, (None, ""))[0]]
+            ok_opts = [o for o in opts if wstate.get(o, (None, ""))[0]] + slot_ok
             if not ok_opts:
                 usable = False
                 needs.append("weights")
                 miss = "; ".join("%s: %s" % (o, wstate.get(o, (None, "모름"))[1] or "없음") for o in opts)
                 why.append("쓸 수 있는 모델이 없음 — %s" % miss)
+        # 1b) 역할 슬롯 — 꼭 있어야 하는 단계의 필수 슬롯마다 쓸 수 있는 모델이 하나는 있어야 한다
+        for side, st in sorted(g["stages"].items()):
+            for sl in st.get("slots") or []:
+                if opts and sl["role"] == "model":
+                    continue                              # 위 1) 이 본다 (옛 문구 그대로)
+                _sl, ch = slot_ch.get((name, side, sl["role"]), (sl, []))
+                good = [k for k in ch if wstate.get(k, (None, ""))[0]]
+                if sl["optional"] or st["optional"] or good:
+                    continue
+                usable = False
+                needs.append("weights")
+                if not ch:
+                    why.append("%s 단계 %s(%s) 에 맞는 모델이 레지스트리에 없음 — 능력 %s 를 provides 로 적은 모델을 등록하세요"
+                               % (side, sl["label"], sl["role"], ", ".join(sl["needs"]) or "-"))
+                else:
+                    why.append("%s 단계 %s(%s) 에 쓸 수 있는 모델이 없음 — %s" % (
+                        side, sl["label"], sl["role"],
+                        "; ".join("%s: %s" % (k, wstate.get(k, (None, "모름"))[1] or "없음") for k in ch)))
         # 2) 서버 단계에 GPU 가 필요한가
         gpu_stage = any((s.get("needs") or {}).get("accel") == "gpu" for s in g["stages"].values())
         if gpu_stage and mach.get("gpu") is False:
@@ -192,8 +238,8 @@ def features(mach, funcs, catalog=None, dest=None):
             needs.append("kubectl")
         # 4) 실행체가 아직 없는 계약
         # 모델 선택지(options)가 있는 기능은 GPU Executor 가 비전 프로세스로 띄운다 — image · command 가 없어도 돈다
-        runnable = bool(opts) or any(s.get("image") or s.get("command") or s.get("local_command")
-                                     for s in g["stages"].values())
+        runnable = bool(opts) or bool(slot_ok) or any(s.get("image") or s.get("command") or s.get("local_command")
+                                                      for s in g["stages"].values())
         rows.append({"key": name, "shown": name, "pattern": g["pattern"], "criticality": g["criticality"],
                      "options": opts, "usable": bool(usable), "runnable": bool(runnable),
                      "why": " / ".join(why), "needs": sorted(set(needs)),

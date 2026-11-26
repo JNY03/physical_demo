@@ -32,6 +32,7 @@ from ds_resources import gpu_executor as ge
 from ds_resources import memory as mm
 from ds_resources import functions as fnc
 from ds_resources import placement, probe, settings
+from ds_resources import slots as slt
 from ds_resources.streams import ORCH_STREAM, StreamWriter, orch_record, reason_item
 
 REPO = Path(__file__).resolve().parent.parent
@@ -170,10 +171,30 @@ class Controller:
             if cs == "measured" and cv and cv.get("infer_ms_p90"):
                 p90[s], p90_basis[s] = float(cv["infer_ms_p90"]), "measured"
             else:                                           # 레지스트리 기본값 (조합이면 큰 쪽 합)
-                p90[s] = float(sum((self.reg["options"].get(m, {}).get("p90_ms") or {}).get(bucket, 500) for m in models))
+                p90[s] = float(sum(self._p90(m, bucket) for m in dict.fromkeys(models)))
                 p90_basis[s] = "registry"
         return {"need_mb": round(req), "basis": basis, "estimate_mb": est, "needs": need,
                 "p90_ms": p90, "p90_basis": p90_basis, "cfg_hash": h}
+
+    def _p90(self, m, bucket):
+        """레지스트리 p90 (ms) — 선택지가 먼저, 역할 슬롯으로 고른 새 모델(models.<키>.p90_ms)이 다음. 모르면 500"""
+        o = (self.reg.get("options") or {}).get(m)
+        if o is None:
+            o = (self.reg.get("models") or {}).get(m) or {}
+        p = o.get("p90_ms")
+        if isinstance(p, (int, float)) and not isinstance(p, bool):
+            return float(p)
+        return (p or {}).get(bucket, 500)
+
+    def slot_selection(self, functions=None, profile=None):
+        """고른 기능의 역할 슬롯 — 프로필 functions 칸이 이기고 없으면 기본값. 틀린 프로필은 ValueError"""
+        contract = self.function_contract()
+        names = None
+        if functions:
+            names = ({n for v in functions.values() for n in (v or ())} if isinstance(functions, dict)
+                     else set(functions))
+        picks = slt.check_picks(self.reg, contract, (profile or {}).get("functions"))
+        return slt.effective(self.reg, contract, picks, names)
 
     def local_caps(self):
         """이 기기의 특성 · 온도 (배치가 보는 칸). 특성은 잘 안 바뀌어 한 번만 읽고, 온도는 THERMAL_TTL_S 마다.
@@ -372,7 +393,22 @@ class Controller:
                 info[key].setdefault("notes", {})[m] = {"note": spec.get("note"), "device": spec.get("device"),
                                                         "files": [str(x) for x in (spec.get("files") or [])],
                                                         "packages": list(spec.get("packages") or [])}
-        return {"ok": ok, "why": why, "mode": "k3s" if ok else "local", "function_options": fnopts, "model_info": info,
+        # 역할 슬롯 (slots/1) — 기능 → 단계 → 역할 → 고를 수 있는 모델. 런처 Fn-Slots 가 읽는다(옛 function_options 는 그대로)
+        try:
+            fslots = slt.function_slots(self.reg, contract, names=set(fnopts) | {
+                n for n, g in contract.items() if any(st.get("slots") for st in g["stages"].values())})
+        except Exception as e:  # noqa: BLE001 — 슬롯을 못 구해도 목록은 낸다
+            self.log("역할 슬롯을 구하지 못함: %s" % e)
+            fslots = {}
+        extra = {"function_slots": fslots}
+        try:
+            sel = self.slot_selection(functions, profile)
+            extra["slot_selection"] = sel
+            extra["slot_costs"] = slt.stage_costs(self.reg, sel)
+        except Exception as e:  # noqa: BLE001
+            self.log("역할 슬롯 선택을 구하지 못함: %s" % e)
+        return {**extra, "ok": ok, "why": why, "mode": "k3s" if ok else "local", "function_options": fnopts,
+                "model_info": info,
                 # source = 그 노드가 맡은 기기 이름(ds.source · nodes.json). 사람이 노드 이름보다 이것으로 알아본다 —
                 # 이 기기는 data_stream 서버다. 화면에 붙일 말은 읽는 쪽(런처)이 고른다(언어가 있으니)
                 "nodes": [dict({"name": n["name"], "role": n.get("role"), "ready": bool(n.get("ready")),
@@ -485,6 +521,13 @@ class Controller:
             req["manual"] = dict(manual)
         self._specs = {t["task"]: t for t in specs}
         plan = placement.plan(req, snapshot, self.reg_hash, self.local)
+        if functions:
+            # 역할 슬롯 고른 것 — 기기 단계 것도 오케스트레이터가 보도록 계획에 싣는다 (비전은 서버 쪽만 따른다)
+            try:
+                plan["slots"] = self.slot_selection(functions, profile)
+            except ValueError as e:
+                plan["slots"] = {}
+                self.log("역할 슬롯 선택이 틀림 — 계획에 싣지 않음: %s" % e)
         placed = {s for u in plan["gpu_units"] for s in u["sources"]}
         plan["waiting"] = [reason_item("input:%s" % s, "input_wait", "입력 대기 — 영상 없음. 들어오면 바로 처리")
                            for s in waiting if s in placed or not models] + list(plan.get("waiting") or [])

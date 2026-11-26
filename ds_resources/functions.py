@@ -16,6 +16,15 @@
   pairs(stages, placed)    → {기능: {verdict: ok | degraded | rejected, ...}}. 판정만 돌려준다 — 스트림에 쓰지 않는다
   as_cpu_task(stage)       → placement.place_cpu 가 받는 작업 사전 (옛 cpu_tasks 와 같은 칸 이름 · 같은 뜻)
 
+역할 슬롯 (slots/1, 2026-11-27) — 단계마다 「어떤 능력의 모델이 들어갈 자리」를 선언한다.
+  stages.<단계>.slots.<역할>: {label, label_en, needs: [능력], optional, multi, size: small|any,
+                              default, choices: [명시 선택지], auto}
+  읽은 단계에는 `slots` 목록(역할 이름순이 아니라 적은 순서)이 붙는다. 선택지 계산은 ds_resources/slots.py 가 한다
+  (여기서는 선언만 고르게 편다 — 모델 표를 모른다).
+  옛 칸은 그대로 읽히고 슬롯으로도 바뀐다(별칭):
+    functions.<기능>.options: [선택지]   → 서버 단계 `model` 슬롯 (choices = options, 기본 = 첫째)
+    cue_model_choices.<근거>             → targeted_detect 서버 단계의 `ovd` · `depth` 슬롯
+
 옛 cpu_tasks.<이름> 도 단일 단계 기능으로 읽힌다(별칭). 그 별칭 단계의 unit 은 기능 이름 그대로여서
 배치표 · 가시화가 쓰던 이름(cpu:<이름>)이 바뀌지 않는다. functions 에 같은 이름이 있으면 functions 가 이긴다.
 그 밖의 단계는 unit 이 「<기능>.<단계>」 다 — 한 기능이 기기 · 서버 둘에 놓일 수 있으니 이름이 갈려야 한다.
@@ -59,7 +68,15 @@ NEEDS_KEYS = ("arch", "sensors", "accel", "cores")
 RESOURCE_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms", "roles", "placement",
                  "image", "command", "local_command", "env")
 STAGE_KEYS = ("pin", "needs", "deadline_ms", "egress_kb", "state", "optional", "note",
-              "per_source") + RESOURCE_KEYS
+              "per_source", "slots") + RESOURCE_KEYS
+#: 역할 슬롯 칸 (slots/1) — 칸 추가만 한다
+SLOT_KEYS = ("label", "label_en", "needs", "optional", "multi", "size", "default", "choices", "auto")
+SLOT_SIZES = ("small", "any")
+#: 옛 options 가 바뀌어 들어가는 슬롯 역할 · 옛 cue_model_choices 가 들어가는 기능
+MODEL_ROLE = "model"
+CUE_SLOT_FUNCTION = "targeted_detect"
+#: cue_model_choices 근거 → 슬롯 이름표 (런처 · 카드)
+CUE_SLOT_LABELS = {"ovd": ("OVD 동의 모델", "OVD agreement"), "depth": ("거리 모델", "distance model")}
 #: 수로 적는 자원 칸 (없으면 null)
 NUMERIC_KEYS = ("cpu_m", "mem_mb", "frame_kb", "fps", "proc_ms")
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -140,6 +157,73 @@ def _needs(value, what):
             "cores": _opt_num(body, "cores", what)}
 
 
+# ---------------------------------------------------------------- 역할 슬롯
+def _slot(role, body, what):
+    """slots.<역할> 선언 → 고르게 편 사전. 선택지 계산(모델 표)은 slots.py 몫이다"""
+    if not NAME_RE.match(str(role)):
+        raise ValueError("%s 의 역할 이름 %r 은 영어 소문자 snake_case 여야 한다" % (what, role))
+    body = _dict({} if body is None else body, SLOT_KEYS, what)
+    needs = [str(x) for x in _list(body.get("needs"), what + ".needs")]
+    choices = [str(x) for x in _list(body.get("choices"), what + ".choices")]
+    multi = _bool(body.get("multi", False), what + ".multi")
+    default = body.get("default")
+    if default is not None:
+        if multi:
+            default = [str(x) for x in (default if isinstance(default, (list, tuple)) else [default])]
+        elif isinstance(default, (list, tuple)):
+            raise ValueError("%s.default 는 multi 가 아니라서 하나여야 한다 (받은 것: %r)" % (what, default))
+        else:
+            default = str(default)
+    return {"role": str(role), "label": str(body.get("label") or role),
+            "label_en": str(body.get("label_en") or body.get("label") or role),
+            "needs": needs, "optional": _bool(body.get("optional", False), what + ".optional"),
+            "multi": multi, "size": _one(body.get("size", "any"), SLOT_SIZES, what + ".size"),
+            "default": default, "choices": choices,
+            # auto: 능력(needs)으로 모델 표에서 저절로 채우는가. 적지 않으면 needs 가 있을 때만 그렇다
+            "auto": _bool(body.get("auto", bool(needs)), what + ".auto"),
+            "origin": "slots"}
+
+
+def _slots(body, what):
+    if body is None:
+        return []
+    if not isinstance(body, dict):
+        raise ValueError("%s 는 역할 → 슬롯 사전이어야 한다 (받은 것: %s)" % (what, type(body).__name__))
+    return [_slot(r, b, "%s.%s" % (what, r)) for r, b in body.items()]
+
+
+def _legacy_model_slot(stage, options):
+    """옛 options → 서버 단계 `model` 슬롯. 이미 model 슬롯이 있으면 options 를 명시 선택지 앞에 얹는다"""
+    slots = stage.setdefault("slots", [])
+    have = next((x for x in slots if x["role"] == MODEL_ROLE), None)
+    if have is None:
+        slots.insert(0, {"role": MODEL_ROLE, "label": "모델", "label_en": "model", "needs": [], "optional": False,
+                         "multi": False, "size": "any", "default": options[0], "choices": list(options),
+                         "auto": False, "origin": "options"})
+        return
+    have["choices"] = list(dict.fromkeys(list(options) + have["choices"]))
+    if have["default"] is None:
+        have["default"] = options[0]
+
+
+def _cue_slots(stage, cue_choices):
+    """옛 cue_model_choices → targeted_detect 서버 단계의 근거 모델 슬롯 (이미 적었으면 그것이 이긴다)"""
+    slots = stage.setdefault("slots", [])
+    roles = {x["role"] for x in slots}
+    for need, ch in (cue_choices or {}).items():
+        if need in roles or not isinstance(ch, dict):
+            continue
+        choices = [str(m) for m in (ch.get("choices") or [])]
+        if not choices:
+            continue
+        multi = bool(ch.get("multi"))
+        lab, lab_en = CUE_SLOT_LABELS.get(need, (need, need))
+        slots.append({"role": str(need), "label": lab, "label_en": lab_en, "needs": [],
+                      "optional": True, "multi": multi, "size": "any",
+                      "default": [choices[0]] if multi else choices[0], "choices": choices,
+                      "auto": False, "origin": "cue_model_choices"})
+
+
 # ---------------------------------------------------------------- 읽기
 def _stage(fn, side, body, what):
     body = _dict({} if body is None else body, STAGE_KEYS, what)
@@ -160,7 +244,8 @@ def _stage(fn, side, body, what):
           "image": None if body.get("image") is None else str(body["image"]),
           "command": _cmd(body.get("command"), what + ".command"),
           "local_command": _cmd(body.get("local_command"), what + ".local_command"),
-          "env": _env(body.get("env"), what + ".env")}
+          "env": _env(body.get("env"), what + ".env"),
+          "slots": _slots(body.get("slots"), what + ".slots")}
     for k in NUMERIC_KEYS:
         st[k] = _opt_num(body, k, what)
     if st["pin"] not in ("none", side):
@@ -199,7 +284,7 @@ def _rules(what, fn):
                                      % (what, side, k, p))
 
 
-def _function(name, body):
+def _function(name, body, cue_choices=None):
     what = "functions.%s" % name
     if not NAME_RE.match(str(name)):
         raise ValueError("기능 이름 %r 은 영어 소문자 snake_case 여야 한다" % name)
@@ -227,6 +312,18 @@ def _function(name, body):
         if side in fn["stages"]:
             raise ValueError("%s 는 %s 단계를 두면 안 된다 (forbid: %s)" % (what, side, ", ".join(fn["forbid"])))
     _rules(what, fn)
+    # 옛 칸 → 역할 슬롯 (별칭). options 는 서버 단계의 model 슬롯이 된다 — 서버 단계가 없으면 기기 단계
+    if fn["options"]:
+        side = "server" if "server" in fn["stages"] else ("device" if "device" in fn["stages"] else None)
+        if side is not None:
+            _legacy_model_slot(fn["stages"][side], fn["options"])
+    if name == CUE_SLOT_FUNCTION and "server" in fn["stages"]:
+        _cue_slots(fn["stages"]["server"], cue_choices)
+    for side, st in fn["stages"].items():
+        roles = [x["role"] for x in st["slots"]]
+        dup = sorted({r for r in roles if roles.count(r) > 1})
+        if dup:
+            raise ValueError("%s.stages.%s.slots 에 같은 역할이 둘: %s" % (what, side, ", ".join(dup)))
     for s in fn["stages"].values():                 # 단계가 혼자서도 읽히게 — 배치 쪽은 단계만 들고 간다
         s.update({"pattern": fn["pattern"], "criticality": fn["criticality"], "trigger": fn["trigger"],
                   "priority_class": fn["priority_class"]})
@@ -262,6 +359,7 @@ def load(src=None):
     """레지스트리(경로 · 사전) → {기능: 기능 계약}. 이름순이다. 어긴 계약은 ValueError"""
     reg = _registry(src)
     funcs = {}
+    cue_choices = reg.get("cue_model_choices") or {}
     for section, maker in (("functions", _function), ("cpu_tasks", _from_cpu_task)):
         body = reg.get(section) or {}
         if not isinstance(body, dict):
@@ -269,7 +367,8 @@ def load(src=None):
         for name, item in sorted(body.items()):
             if name in funcs:                       # functions 에 같은 이름이 있으면 그것이 이긴다
                 continue
-            funcs[name] = maker(name, item)
+            funcs[name] = (_function(name, item, cue_choices) if section == "functions"
+                           else _from_cpu_task(name, item))
     return dict(sorted(funcs.items()))
 
 

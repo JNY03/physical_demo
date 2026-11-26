@@ -108,6 +108,28 @@ MODEL_SHOWN = {m: str(o.get("shown", m)) for m, o in _REG["options"].items()}
 OPTION_GPU_MB = {m: int(o.get("gpu_mb") or 0) for m, o in _REG["options"].items()}
 
 
+def _runner_kinds(reg):
+    """runner(「모듈:클래스」)가 있는 모델 → 종류 (slots/1 · vision/runners). 선택지 키와 겹치면 선택지가 이긴다"""
+    out = {}
+    for k, m in (reg.get("models") or {}).items():
+        if not isinstance(m, dict) or k in reg["options"] or ":" not in str(m.get("runner") or ""):
+            continue
+        kind = m.get("kind")
+        if not kind:
+            caps = set(m.get("provides") or ())
+            kind = ("depth" if caps & {"depth_metric", "depth_relative", "depth"} else
+                    next((c for c in ("segment", "detect", "track", "vlm", "embed") if c in caps), None))
+        out[str(k)] = str(kind) if kind else None
+    return out
+
+
+#: 역할 슬롯에서 고를 수 있는 **새 모델**(runner 가 있는 것) → 종류. 검출 꼴은 detect · segment, 깊이 꼴은 depth.
+#: 옛 MODELS · DETECT_MODELS 는 선택지만 담는다(런처 카탈로그 모양을 지킨다) — 새 모델은 여기서 따로 본다
+RUNNER_MODELS = _runner_kinds(_REG)
+RUNNER_DETECT = tuple(k for k, v in RUNNER_MODELS.items() if v in ("detect", "segment"))
+RUNNER_DEPTH = tuple(k for k, v in RUNNER_MODELS.items() if v == "depth")
+
+
 class ProfileError(ValueError):
     """프로필이 틀렸다. 메시지는 사람이 읽는 한 줄 — 런처 상태 줄에 그대로 나간다."""
 
@@ -549,11 +571,11 @@ LABEL_TOKENS = ("name", "lead", "conf", "cls", "id", "depth", "range", "dist", "
 def overlay_options(models, targeted_distance=True, targets=()):
     """모델 → {항목: 쓸 수 있는가(True) 또는 못 쓰는 이유(글)}. 런처와 검증이 함께 쓴다(§4)."""
     models = list(models)
-    depth_on = any(m in DEPTH_MODELS for m in models)
+    depth_on = any(m in DEPTH_MODELS or m in RUNNER_DEPTH for m in models)
     out = {}
     for m in models:
         o = {}
-        det = m in DETECT_MODELS
+        det = m in DETECT_MODELS or m in RUNNER_DETECT
         o["name"] = True
         o["conf"] = det or "검출 모델이 아님"
         o["id"] = det or "검출 모델이 아님"
@@ -573,7 +595,7 @@ def overlay_options(models, targeted_distance=True, targets=()):
         o["show_rejected"] = (True if (m == "targeted" and "demo_box" in targets)
                               else "demo_box 를 고를 때")
         o["title"] = True
-        o["pose"] = True if m in DEPTH_MODELS else "깊이 모델 전용"
+        o["pose"] = True if (m in DEPTH_MODELS or m in RUNNER_DEPTH) else "깊이 모델 전용"
         out[m] = o
     return out
 
@@ -624,7 +646,7 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     profile = copy.deepcopy(profile or {})
     if not isinstance(profile, dict):
         raise ProfileError("프로필은 JSON 사전이어야 한다")
-    bad = set(profile) - {"profile_version", "label", "models", "devices", "features", "_doc", "saved_at"}
+    bad = set(profile) - {"profile_version", "label", "models", "devices", "features", "functions", "_doc", "saved_at"}
     if bad:
         raise ProfileError("프로필에 모르는 칸: %s" % ", ".join(sorted(bad)))
     pm = profile.get("models") or {}
@@ -658,6 +680,9 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     tpart = pm.get("targeted") or {}
     distance = bool(tpart.get("distance", tcfg.get("distance", True)))
     setup = check_cue_setup(tpart.get("cue_setup"))
+    # 역할 슬롯 (M4, slots/1) — functions: {기능: {단계: {역할: 모델 | [모델]}}}. 고를 수 있는 것은 레지스트리에서 계산한다
+    result["slots"] = check_slots(profile.get("functions"))
+    _slots_to_cue_setup(result["slots"], setup)
     if "targeted" in models:
         specs = tpart.get("targets")
         if specs is None:
@@ -742,6 +767,51 @@ def resolve_profile(profile, cfg, models, targets_db=None):
     return result
 
 
+def _functions():
+    """기능 계약 (ds_resources/functions.py) — 한 번만 읽는다. 모델 표는 이 파일의 _REG 와 같은 것"""
+    if "_funcs" not in _CACHE:
+        from ds_resources import functions as fnc
+        _CACHE["_funcs"] = fnc.load(_REG)
+    return _CACHE["_funcs"]
+
+
+_CACHE = {}
+#: 옛 cue_setup 과 같은 자리의 슬롯 — targeted_detect 서버 단계의 ovd · depth (functions.CUE_SLOT_FUNCTION)
+CUE_SLOT_FUNCTION = "targeted_detect"
+
+
+def check_slots(picks):
+    """프로필 functions 칸 검사 → {기능: {단계: {역할: 값}}}. 틀리면 ProfileError (까닭은 slots.check_picks 가 적는다)"""
+    if picks in (None, {}):
+        return {}
+    from ds_resources import slots as sl
+    try:
+        return sl.check_picks(_REG, _functions(), picks)
+    except ValueError as exc:
+        raise ProfileError(str(exc))
+
+
+def _slots_to_cue_setup(picks, setup):
+    """targeted_detect.server.{ovd, depth} 슬롯 = 옛 cue_setup.models (별칭). 둘 다 적었는데 다르면 거절한다"""
+    srv = ((picks or {}).get(CUE_SLOT_FUNCTION) or {}).get("server") or {}
+    for need in CUE_CHOICES:
+        if need not in srv:
+            continue
+        v = srv[need]
+        if v is None or v == []:
+            continue                                   # 비운 슬롯 — 옛 규칙(자동)에 맡긴다
+        if CUE_CHOICES[need]["multi"]:
+            v = [str(x) for x in (v if isinstance(v, list) else [v])]
+        else:
+            v = str(v[0] if isinstance(v, list) else v)
+        old = setup["models"].get(need)
+        if old is not None and old != v:
+            raise ProfileError("근거 모델 %s 를 두 곳에서 다르게 골랐다 — cue_setup.models.%s=%s, "
+                               "functions.%s.server.%s=%s (하나만 적는다)"
+                               % (need, need, old, CUE_SLOT_FUNCTION, need, v))
+        setup["models"][need] = v
+
+
 def needed_models(resolved, tcfg):
     """확정된 targeted 설정이 적재해야 할 모델 키 집합."""
     files = model_files(tcfg)
@@ -765,12 +835,23 @@ def needed_models(resolved, tcfg):
 
 
 def gpu_mb(models, need=()):
-    """비전 프로세스 하나의 GPU 메모리 어림(MB)."""
+    """비전 프로세스 하나의 GPU 메모리 어림(MB).
+
+    선택지는 선택지 몫(OPTION_GPU_MB)을, 역할 슬롯으로 고른 새 모델(runner 가 있는 것)은 그 모델 몫(GPU_MB)을 더한다.
+    **같은 모델은 한 번만 센다** — 새 모델 키와 근거 모델(need)이 겹치면 하나로. 선택지만 고르면 예전 값 그대로다"""
     mb = GPU_MB["base"]
+    parts = set()
     for m in models:
-        mb += OPTION_GPU_MB.get(m, 0)
+        if m in OPTION_GPU_MB:
+            mb += OPTION_GPU_MB[m]
+        elif m in RUNNER_MODELS:
+            parts.add(m)
     for n in need:
+        if n in parts:
+            continue
         mb += GPU_MB.get(n, 0)
+    for m in parts:
+        mb += GPU_MB.get(m, 0)
     return mb
 
 
