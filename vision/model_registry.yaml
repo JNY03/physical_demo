@@ -383,7 +383,7 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: "{registry}/ds-device-runner:95c423e"
+        image: "{registry}/ds-device-runner:0165c53"
         command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.detector}", --fps, "{fps}", --imgsz, "320"]
         note: 1~5 fps · 1~2 스레드. 파이마다 성능이 달라 placement 는 measured — 비교 측정 전에는 옮기지 않는다. 실행체는 ds-device-runner (vision/device_stage.py) — 슬롯 detector 에 고른 모델을 돌린다
         slots:
@@ -421,7 +421,7 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: "{registry}/ds-device-runner:95c423e"
+        image: "{registry}/ds-device-runner:0165c53"
         command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.detector}", --fps, "{fps}", --imgsz, "320"]
         note: 미리 굳힌 프롬프트 임베딩만 — 새 프롬프트는 서버에서. 실행체는 ds-device-runner (vision/device_stage.py) — 슬롯 detector 에 고른 모델을 돌린다
         slots:
@@ -527,7 +527,7 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: "{registry}/ds-device-runner:95c423e"
+        image: "{registry}/ds-device-runner:0165c53"
         command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.segmenter}", --fps, "{fps}", --imgsz, "320"]
         slots:
           segmenter: {label: 기기 분할 모델, label_en: on-device segmenter, needs: [segment], size: small, optional: true}
@@ -563,7 +563,7 @@ functions:
         mem_mb: 512
         roles: [robot, sensor, small, gpu]
         placement: measured
-        image: "{registry}/ds-device-runner:95c423e"
+        image: "{registry}/ds-device-runner:0165c53"
         command: [python, /ds/vision/device_stage.py, --function, "{function}", --source, "{source}", --model, "{slot.depth}", --fps, "{fps}", --imgsz, "320"]
         note: 상대 깊이 · 근거리 판단만 — 거리값으로 쓰지 않는다. 실행체는 ds-device-runner (vision/device_stage.py) — 슬롯 depth 에 고른 모델을 돌린다
         slots:
