@@ -14,6 +14,12 @@ check() 는 (ok, why) 또는 (ok, why, caps) 를 돌려준다(M11 R2a — 옛 �
 applied 와 running 은 다르다. running 은 (1) 프로세스가 살아 있고 (2) 비전 보고에 처리한 장이 있으며
 (3) 맡은 소스의 입력 영상(camera_stream)이 INPUT_FRESH_S 안의 것일 때만 남긴다.
 
+GPU 우선순위 (2026-11-26, 「GPU 는 오케스트레이터가 우선순위로 판단」) — GPU 묶음은 맡은 기능의 가장 높은
+criticality(gpu_priority — 옛 요청은 mission)와 trigger 를 갖는다. 실행 직전 메모리가 모자라면 더 낮은 우선순위
+단위를 멈추고(stopped · code gpu_preempted) 들인다(admit_by_priority). 들이지 못한 on_request 묶음과 밀려난 단위는
+미룬 목록에 들어가(degraded · code gpu_deferred) GPU 단위가 멈추거나 끝난 poll · DEFERRED_RETRY_S 마다 우선순위순으로
+다시 들인다(applied · detail.resumed). 밀려난 단위는 READMIT_HOLD_S 동안 다시 들이지 않는다(되풀이 방지).
+
 실행에 꼭 필요한 상태는 StateFile(state/orchestrator_state.json). 스트림을 못 쓰면 outbox 에 쌓았다가
 다음 poll 에서 다시 쓴다(Redis 장애 동안 이벤트를 잃지 않는다).
 """
@@ -203,7 +209,12 @@ class Controller:
             load1 = 0.0
         import os
         caps, therm = self.local_caps()
+        # 이미 적재된 GPU 단위 — 배치가 우선순위로 판단할 때 더 낮은 것을 비울 수 있는 몫으로 센다 (있을 때만 칸이 생긴다)
+        loaded = [{"unit_id": k, "rank": ge.unit_rank(u), "mem_mb": round(ge.GpuExecutor.freeable_mb(u)),
+                   "gpu_util": float(u.get("gpu_util") or 0)}
+                  for k, u in sorted(self.ex.active_units().items()) if u.get("status") == "loaded"]
         return {"name": self.local, "role": "gpu", "ready": bool(g), "stale": not g,
+                **({"gpu_loaded": loaded} if loaded else {}),
                 "caps": caps, "thermal": therm,
                 "gpus": [{"mem_total_mb": x["mem_total_mb"], "mem_used_mb": x["mem_used_mb"]} for x in g],
                 "gpu_util_committed": sum(float(u.get("gpu_util") or 0) for u in active),
@@ -252,6 +263,28 @@ class Controller:
                 continue
             groups.setdefault(tuple(ms), []).append(s)
         return [{"models": list(k), "sources": sorted(v)} for k, v in sorted(groups.items())], off
+
+    def gpu_priority(self, models, sources, functions):
+        """GPU 묶음이 맡은 기능의 우선순위 → {criticality, trigger, functions} 또는 {} (옛 요청 — 배치가 mission 으로 본다).
+
+        맡은 기능 = 고른 기능 중 선택지(options)에 이 묶음의 모델이 있는 것(소스마다 고른 경우에는 이 묶음의 소스에
+        고른 것만). criticality 는 그중 가장 높은 것, trigger 는 그 중요도의 기능들 중 가장 급한 것
+        (always → on_activity → periodic → on_request — 하나라도 상시면 미루지 않는다)."""
+        if not functions:
+            return {}
+        contract = self.function_contract()
+        if isinstance(functions, dict):
+            names = sorted({f for s in sources for f in (functions.get(s) or ())})
+        else:
+            names = sorted(functions)
+        serve = [contract[f] for f in names if f in contract and set(contract[f].get("options") or ()) & set(models)]
+        if not serve:
+            return {}
+        top = min(placement.PRIORITY_RANK.get(g["criticality"], placement.DEFAULT_RANK) for g in serve)
+        tops = [g for g in serve if placement.PRIORITY_RANK.get(g["criticality"], placement.DEFAULT_RANK) == top]
+        eager = ("always", "on_activity", "periodic", "on_request")
+        trig = min((g.get("trigger") for g in tops), key=lambda t: eager.index(t) if t in eager else -1)
+        return {"criticality": tops[0]["criticality"], "trigger": trig, "functions": sorted(g["function"] for g in serve)}
 
     def places(self, limits=None, functions=None, sources=None, assign=None, manual=None, profile=None):
         """수동 배치가 고를 것 — {nodes, units} (읽기만, 아무것도 띄우지 않는다).
@@ -442,7 +475,9 @@ class Controller:
         req = {"request_id": request_id,
                "gpu": [{"models": g["models"], "sources": g["sources"],
                         "target_fps": {s: fps[s] for s in g["sources"]},
-                        "waiting": sorted(set(g["sources"]) & set(waiting))} for g in groups],
+                        "waiting": sorted(set(g["sources"]) & set(waiting)),
+                        # 맡은 기능의 우선순위 (기능 없이 온 옛 요청이면 칸이 없다 — 배치가 mission 으로 본다)
+                        **self.gpu_priority(g["models"], g["sources"], functions)} for g in groups],
                "cpu": specs}
         if stages:
             req["functions"] = stages
@@ -463,7 +498,8 @@ class Controller:
                          manual=manual, limits=limits)
         for u in p["plan"]["gpu_units"]:
             c = p["snapshot"]["costs"]["+".join(u["models"])]
-            ok, why, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"])
+            # rank 를 주면 모자랄 때 비울 단위(evict)도 계산해 보여 준다 — admit 은 읽기만 한다
+            ok, why, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"], rank=u.get("rank"))
             u["admit"] = {"ok": ok, "why": why, **calc}
             u["p90_ms"], u["p90_basis"] = c["p90_ms"], c["p90_basis"]
         return p
@@ -511,22 +547,41 @@ class Controller:
                 self.emit("failed", rid, execution_id=xid, mode=mode, reason=item["reason"], code=item["code"])
                 continue
             c = snapshot["costs"]["+".join(u["models"])]
-            okk, why2, calc = self.ex.admit(u["need_mb"], c["basis"], c["estimate_mb"])
+            spec = {"devices": u["sources"], "models": u["models"], "profile_path": profile_path,
+                    "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
+                    **({"limit_mode": u["limit_mode"]} if u.get("limit_mode") else {}),
+                    **{k: u[k] for k in ("rank", "criticality", "trigger") if u.get(k) is not None},
+                    "execution_id": xid}
+            okk, why2, calc = self.admit_by_priority(u["unit"], spec, u["need_mb"], c["basis"], c["estimate_mb"], rid)
             if not okk:
+                if u.get("trigger") in placement.DEFERRABLE_TRIGGERS:   # 요청 때 부르는 일 — 미뤄 두고 메모리가 비면
+                    self.defer_gpu(rid, xid, mode, u["unit"], spec, u["need_mb"], c["basis"], c["estimate_mb"], why2)
+                    continue
                 item = reason_item(u["unit"], calc.get("code") or "gpu_mem", why2, stage="admit")
                 late.append(item)
                 self.emit("failed", rid, execution_id=xid, mode=mode, reason=why2, code=item["code"], detail=calc)
                 continue
-            uid = self.ex.launch({"devices": u["sources"], "models": u["models"], "profile_path": profile_path,
-                                  "fps_cap": u["fps_cap"], "gpu_util": u["gpu_util"], "request_id": rid,
-                                  **({"limit_mode": u["limit_mode"]} if u.get("limit_mode") else {}),
-                                  "execution_id": xid}, u["need_mb"], calc)
+            uid = self.ex.launch(spec, u["need_mb"], calc)
             where = self.gpu_where(u["node"])
             self.emit("applied", rid, execution_id=xid, mode=mode,
                       reason="실행: %s, %s, %s (pid %s)%s" % (
                           "+".join(u["models"]), _fps_text(u["fps_cap"]), where,
                           (self.state.units().get(uid) or {}).get("pid", "?"), (" — " + why2) if why2 else ""),
                       detail={"unit_id": uid, "admit": calc, "fps_cap": u["fps_cap"], "node": u["node"], "where": where})
+        # 배치표가 미룬 묶음(gpu_deferred — on_request 인데 다른 일이 메모리를 쥐고 있음): 메모리가 비면 들인다
+        for item in plan.get("waiting") or []:
+            if item.get("code") != "gpu_deferred":
+                continue
+            c = snapshot["costs"].get("+".join(item["models"])) or {}
+            spec = {"devices": item["sources"], "models": item["models"], "profile_path": profile_path,
+                    "fps_cap": item.get("target_fps") or {},
+                    "gpu_util": round(sum(f * float((c.get("p90_ms") or {}).get(s) or 0) / 1000.0
+                                          for s, f in (item.get("target_fps") or {}).items()), 3),
+                    "request_id": rid,
+                    **{k: item[k] for k in ("rank", "criticality", "trigger") if item.get(k) is not None},
+                    "execution_id": xid}
+            self.defer_gpu(rid, xid, mode, item["item"], spec, item["need_mb"], c.get("basis") or "estimate",
+                           c.get("estimate_mb"), item["reason"], emit=False)   # degraded 는 위에서 이미 남겼다
         if late:
             self.state.put_request(rid, dict(req_rec, refused=refused + late))
         qual = {n: g.get("quality") for n, g in (plan.get("functions") or {}).items()}
@@ -535,6 +590,85 @@ class Controller:
                 u = dict(u, quality=qual[u["function"]])
             self.launch_cpu(rid, xid, mode, u)
         return rid
+
+    # ------------------------------------------------------------ GPU 우선순위 — 밀어내기 · 미루기 · 다시 들이기
+    def admit_by_priority(self, unit, spec, need_mb, basis, estimate, rid):
+        """실행 직전 들이기 — 메모리가 모자라면 **더 낮은** 우선순위 단위를 멈추고(밀어내기) 다시 잰다.
+
+        같거나 높은 우선순위는 멈추지 않는다(Executor admit 이 그것을 제안하지 않는다). 밀려난 단위마다 그 단위의
+        요청으로 stopped(code gpu_preempted) 를 남기고, 그 단위는 미룬 목록에 들어가 메모리가 비면 다시 들어온다.
+        → (들였나, 이유, 계산 근거) — 계산 근거에 preempted(멈춘 unit_id 목록)가 붙는다(밀어냈을 때만)."""
+        rank = ge.unit_rank(spec)
+        okk, why, calc = self.ex.admit(need_mb, basis, estimate, rank=rank)
+        if okk or not calc.get("evict"):
+            return okk, why, calc
+        names = ", ".join(calc["evict"])
+        reason = "우선순위가 더 높은 %s(%s, 요청 %s)에 GPU 메모리를 내주려 멈춤 — 메모리가 비면 %d초 뒤부터 다시 들임" % (
+            unit, spec.get("criticality") or placement.GPU_DEFAULT_CRITICALITY, rid, ge.READMIT_HOLD_S)
+        gone = self.ex.preempt(calc["evict"], reason, by={"unit": unit, "request_id": rid, "rank": rank})
+        for v in gone:
+            self.emit("stopped", v.get("request_id") or "-", execution_id=v.get("execution_id"), reason=reason,
+                      code="gpu_preempted",
+                      detail={"unit_id": v["unit_id"], "preempted": True, "rank": ge.unit_rank(v),
+                              "by": {"unit": unit, "request_id": rid, "rank": rank},
+                              "freed_mb": round(ge.GpuExecutor.freeable_mb(v)),
+                              "hold_s": ge.READMIT_HOLD_S})
+        okk, why2, calc2 = self.ex.admit(need_mb, basis, estimate)  # 비운 뒤 지금 다시 잰다 (기억한 값만으로 들이지 않는다)
+        calc2["preempted"] = [v["unit_id"] for v in gone]
+        why2 = ("낮은 우선순위 단위 %s 를 멈추고 들임" % names + ((" — " + why2) if why2 else "")) if okk else why2
+        return okk, why2, calc2
+
+    def defer_gpu(self, rid, xid, mode, unit, spec, need_mb, basis, estimate, why, emit=True):
+        """GPU 묶음을 미룬다 — 메모리가 비면 retry_deferred 가 우선순위순으로 들인다 (code gpu_deferred)."""
+        key = "def-" + uuid.uuid4().hex[:8]
+        self.ex.defer(key, {"unit_id": None, "unit": unit, "spec": spec, "need_mb": float(need_mb), "basis": basis,
+                            "estimate_mb": estimate, "rank": ge.unit_rank(spec), "trigger": spec.get("trigger"),
+                            "request_id": rid, "execution_id": xid, "since": self.clock(), "hold_until": 0.0,
+                            "reason": why, "code": "gpu_deferred"})
+        if emit:
+            self.emit("degraded", rid, execution_id=xid, mode=mode, code="gpu_deferred",
+                      reason="미룸: %s — 요청 때 부르는 일이라 GPU 메모리가 비면 들임 (%s)" % (unit, why),
+                      detail={"unit": unit, "deferred": key, "rank": ge.unit_rank(spec)})
+        return key
+
+    def retry_deferred(self, force=False):
+        """미룬 GPU 단위를 우선순위순(rank → 단위 이름 → 열쇠)으로 다시 들여 본다. 들인 것마다 applied 를 남긴다.
+
+        언제: force(GPU 단위가 멈추거나 끝나 메모리가 풀렸다) 또는 지난 시도에서 DEFERRED_RETRY_S 가 지났을 때.
+        밀려난 단위는 hold_until(밀린 뒤 READMIT_HOLD_S) 전에는 들이지 않는다 — 되풀이 방지.
+        다시 들일 때도 더 낮은 우선순위 단위는 비울 수 있다(같은 규칙 — admit_by_priority)."""
+        now = self.clock()
+        if not force and now - getattr(self, "_deferred_at", -1e18) < ge.DEFERRED_RETRY_S:
+            return []
+        self._deferred_at = now
+        events = []
+        for key, e in sorted(self.ex.deferred().items(),
+                             key=lambda kv: (int(kv[1].get("rank", placement.DEFAULT_RANK)), kv[1].get("unit") or "",
+                                             kv[0])):
+            if now < float(e.get("hold_until") or 0):
+                continue
+            spec = dict(e["spec"])
+            rid, xid = e.get("request_id") or spec.get("request_id") or "-", e.get("execution_id")
+            okk, why, calc = self.admit_by_priority(e.get("unit") or "gpu", spec, e["need_mb"], e.get("basis") or "estimate",
+                                                    e.get("estimate_mb"), rid)
+            if not okk:
+                continue                                     # 아직 — 조용히 다음 차례에 (매 poll 기록을 쌓지 않는다)
+            self.ex.undefer(key)
+            if e.get("unit_id"):                             # 밀려났던 단위 — 같은 unit_id 로 되살린다
+                spec.update(unit_id=e["unit_id"], restarts=0, resumed_from=e.get("code"))
+            uid = self.ex.launch(spec, e["need_mb"], calc)
+            node = spec.get("node") or self.local
+            where = self.gpu_where(node)
+            events.append(self.emit("applied", rid, execution_id=xid, mode="local",
+                                    reason="다시 들임: %s, %s, %s (pid %s) — %s (%d초 기다림)%s" % (
+                                        "+".join(spec.get("models") or []), _fps_text(spec.get("fps_cap")), where,
+                                        (self.state.units().get(uid) or {}).get("pid", "?"),
+                                        "밀려났던 단위" if e.get("code") == "gpu_preempted" else "미뤄 둔 단위",
+                                        now - float(e.get("since") or now), (" — " + why) if why else ""),
+                                    detail={"unit_id": uid, "admit": calc, "fps_cap": spec.get("fps_cap"),
+                                            "node": node, "where": where, "resumed": True,
+                                            "resumed_from": e.get("code"), "deferred_since": e.get("since")}))
+        return events
 
     # ------------------------------------------------------------ CPU 작업
     def launch_cpu(self, rid, xid, mode, u, replaces=None):
@@ -667,8 +801,13 @@ class Controller:
     def pending_sources(self, rid):
         """예산이 모자라 빠진 채 영상을 기다리는 소스 — 돌 것이 없어도 끝내지 않고 기다릴 이유"""
         req = self.state.data["requests"].get(rid) or {}
-        return [x["item"].split(":", 1)[1] for x in (req.get("plan") or {}).get("waiting", [])
-                if x.get("code") == "input_wait_unbudgeted"]
+        out = [x["item"].split(":", 1)[1] for x in (req.get("plan") or {}).get("waiting", [])
+               if x.get("code") == "input_wait_unbudgeted"]
+        # 미룬 · 밀려난 GPU 단위의 소스도 기다릴 이유다 — 메모리가 비면 다시 들어온다 (2026-11-26)
+        for e in self.ex.deferred().values():
+            if e.get("request_id") == rid:
+                out += [s for s in (e.get("spec") or {}).get("devices") or [] if s not in out]
+        return out
 
     def replan_if_needed(self, rid):
         """빠졌던 입력 대기 소스에 영상이 들어오면 같은 요청을 다시 배치한다. 새 request_id 를 돌려준다(없으면 None).
@@ -697,6 +836,10 @@ class Controller:
             else:
                 events.append(self.emit("failed" if change == "failed" else "stopped", rid, execution_id=xid,
                                         reason=u.get("reason", change), detail={"unit_id": uid}))
+                self._gpu_freed = True                      # GPU 메모리가 풀렸다 — 미룬 단위를 바로 들여 본다
+        # 미룬 · 밀려난 GPU 단위 — 메모리가 풀렸으면 바로, 아니면 DEFERRED_RETRY_S 마다 우선순위순으로 다시 들인다
+        freed, self._gpu_freed = getattr(self, "_gpu_freed", False), False
+        events += self.retry_deferred(force=freed)
         now = self.clock()
         for uid, u in self.ex.active_units().items():
             if u.get("status") != "loaded":
@@ -776,6 +919,8 @@ class Controller:
                     self.cpu_ex.stop(u)
                 self.state.update_unit(uid, status="stopped", reason=reason, ended_at=self.clock())
                 n += 1
+        for key in self.ex.deferred():                      # 지난 실행이 미뤄 둔 GPU 단위 — 새 run 에서 들이지 않는다
+            self.ex.undefer(key)
         return n
 
     def stop(self, request_id, reason="요청"):
@@ -793,5 +938,11 @@ class Controller:
                 self.ex.stop(uid, reason)
                 self.emit("stopped", request_id, execution_id=u.get("execution_id"), reason=reason,
                           detail={"unit_id": uid})
+                self._gpu_freed = True                      # 다음 poll 에서 미룬 단위를 바로 들여 본다
                 n += 1
+        for key, e in self.ex.deferred().items():           # 그 요청의 미룬 · 밀려난 단위도 거둔다 (다시 들이지 않게)
+            if e.get("request_id") == request_id:
+                self.ex.undefer(key)
+                if e.get("unit_id"):
+                    self.state.update_unit(e["unit_id"], status="stopped", reason=reason, ended_at=self.clock())
         return n

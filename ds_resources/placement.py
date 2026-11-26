@@ -8,6 +8,15 @@ GPU 작업  선택지 묶음 하나 = 프로세스 하나(그 요청의 소스�
                    Σ 소스(목표 fps × p90 ms / 1000) ≤ gpu_budget (GPU 하나에 도는 모든 프로세스 합, 권장 GPU_BUDGET)
                    넘치면 소스별 fps 를 같은 비율로 낮추고(FPS_FLOOR 아래로는 안 낮춤), 그래도 넘치면
                    소스를 이름 역순으로 빼며 이유를 남긴다. GPU 노드가 없으면 파이로 옮기지 않고 거절한다.
+          우선순위 (2026-11-26, 「GPU 는 오케스트레이터가 우선순위로 판단」) — 묶음은 그것이 맡은 기능의 가장 높은
+                   criticality 를 갖는다(기능 없이 온 옛 요청은 mission). 묶음을 safety → mission → best_effort
+                   (같으면 이름순) 으로 놓는다. 메모리가 모자라면
+                     · 노드에 이미 적재된(loaded) **더 낮은** 우선순위 단위(node["gpu_loaded"])를 비울 수 있는 것으로
+                       센다 — 낮은 우선순위 → 큰 메모리 → unit_id 순으로 골라 evict: [unit_id] 를 단위에 적는다.
+                       같거나 높은 우선순위는 절대 비우지 않는다.
+                     · 그래도 안 되는데 다른 GPU 일이 없으면 들어갔을 것이면(다툼) trigger on_request 는 미룬다
+                       (waiting 에 gpu_deferred — 메모리가 비면 불러 온다), 그 밖에는 더 높은 우선순위 일이 자리를
+                       쥐고 있으면 gpu_preempted, 같은 우선순위끼리면 예전처럼 gpu_mem 으로 거절한다.
 CPU 작업  둘로 갈린다 — eligible(하드 조건: 어기면 후보가 아니다, 코드가 남는다) 과 score(소프트: 클수록 좋다).
           하드   role 이 허용된 · ready · stale 아닌 노드 · cpu_tasks 가 꺼지지 않은 노드. pin(기기 전용 · 서버 전용),
                  작업 특성 needs(arch · sensors · accel), 온도 가드(THERMAL_MAX_C · throttle), CPU · 메모리
@@ -91,6 +100,10 @@ LIMIT_MODES = ("capped", "none")
 #: 중요도 → 놓는 순서 (작을수록 먼저). 안전이 먼저 자리를 잡고, 남은 자리를 임무 · 그 밖이 나눈다
 PRIORITY_RANK = {"safety": 0, "mission": 1, "best_effort": 2}
 DEFAULT_RANK = PRIORITY_RANK["best_effort"]
+#: GPU 묶음의 기본 중요도 — 기능 없이 온 옛 요청(모델만 고른 것)은 임무로 본다
+GPU_DEFAULT_CRITICALITY = "mission"
+#: 밀려도 거절하지 않고 미룰 trigger — 요청이 있을 때 부르는 일이라 메모리가 비면 그때 불러 오면 된다
+DEFERRABLE_TRIGGERS = ("on_request",)
 
 
 def server_node(node, local_node):
@@ -125,6 +138,28 @@ def task_rank(task):
     return PRIORITY_RANK.get(task.get("criticality"), DEFAULT_RANK)
 
 
+def gpu_rank(x):
+    """GPU 묶음 · 적재된 단위의 놓는 순서 (작을수록 먼저). rank 칸이 있으면 그것, 없으면 criticality,
+    둘 다 없으면 옛 요청 — mission"""
+    if x.get("rank") is not None:
+        return int(x["rank"])
+    return PRIORITY_RANK.get(x.get("criticality") or GPU_DEFAULT_CRITICALITY, DEFAULT_RANK)
+
+
+def gpu_victims(loaded, rank, short_mb, taken=()):
+    """비울 단위 고르기 — rank 보다 **낮은**(수가 큰) 우선순위만, 낮은 우선순위 → 큰 메모리 → unit_id 순으로
+    short_mb 이상 풀릴 때까지. 모자라면 None (헛되이 비우지 않는다). loaded: [{unit_id, rank, mem_mb, ...}]"""
+    cands = sorted((u for u in loaded if u["unit_id"] not in taken and gpu_rank(u) > rank),
+                   key=lambda u: (-gpu_rank(u), -float(u.get("mem_mb") or 0), u["unit_id"]))
+    out, freed = [], 0.0
+    for u in cands:
+        if freed >= short_mb:
+            break
+        out.append(u)
+        freed += float(u.get("mem_mb") or 0)
+    return out if freed >= short_mb else None
+
+
 def digest(obj):
     return hashlib.sha1(json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:12]
 
@@ -141,7 +176,8 @@ def _room(node, reserved):
 
 
 def place_gpu(request, nodes, costs, out):
-    """request: {models, sources: [이름], target_fps: {소스: fps}}
+    """request: {models, sources: [이름], target_fps: {소스: fps}} + (기능에서 왔으면) {criticality, trigger, functions}
+    nodes 의 gpu_loaded: [{unit_id, rank, mem_mb, gpu_util}] 이미 적재된 단위 — 더 낮은 우선순위면 비울 수 있다
     costs: {"need_mb": MB, "basis": ..., "p90_ms": {소스: ms}}  — 선택지 묶음 하나의 비용"""
     models = sorted(request["models"])
     srcs = sorted(request["sources"])
@@ -152,22 +188,88 @@ def place_gpu(request, nodes, costs, out):
                                               "쓸 수 있는 GPU 노드가 없음 — GPU 작업은 파이로 옮기지 않는다"))
         return
     need = float(costs["need_mb"])
+    key = "+".join(models)
+    rank = gpu_rank(request)
+    trigger = request.get("trigger")
+    # 배치표 · 단위에 남길 우선순위 칸 (칸 추가만) — 기능 없이 온 옛 요청도 rank · criticality(mission) 는 적는다
+    prio = dict({"rank": rank, "criticality": request.get("criticality") or GPU_DEFAULT_CRITICALITY},
+                **({"trigger": trigger} if trigger else {}),
+                **({"functions": list(request["functions"])} if request.get("functions") else {}))
     ledger = out.setdefault("_ledger", {})               # 이 배치표 안에서 앞서 놓은 묶음의 몫 (노드 → [MB, 사용률])
+    held = out.setdefault("_gpu_held", {})               # 노드 → [(rank, MB)] 이 배치표 안에서 앞서 놓은 묶음
+    gone = out.setdefault("_gpu_evicted", set())         # 앞선 묶음이 이미 비우기로 한 적재 단위
     for n in gnodes:
         ledger.setdefault(n["name"], [0.0, float(n.get("gpu_util_committed") or 0.0)])
     reserved = {k: v[0] for k, v in ledger.items()}
     util = {k: v[1] for k, v in ledger.items()}
+    loaded = {n["name"]: [u for u in (n.get("gpu_loaded") or []) if u["unit_id"] not in gone] for n in gnodes}
     fits = [n for n in gnodes if need <= _room(n, reserved[n["name"]])]
     exclusive = False
-    if not fits and costs.get("basis", "estimate") == "estimate" and costs.get("estimate_mb") is not None:
+    est = None
+    if costs.get("basis", "estimate") == "estimate" and costs.get("estimate_mb") is not None:
+        est = float(costs["estimate_mb"])
+    if not fits and est is not None:
         # 실측이 없어 여유분(×1.2)까지는 안 들어가지만 추정치 자체는 들어간다 — GPU Executor 의 단독 측정(exclusive)과
         # 같은 규칙으로 배치표에도 놓는다. 그 노드에 이 배치표 · 이미 도는 몫이 없을 때만 (2026-11-25 실측: 5580 > 5298)
-        est = float(costs["estimate_mb"])
         fits = [n for n in gnodes if not reserved[n["name"]] and not util[n["name"]]
                 and est <= _room(n, reserved[n["name"]])]
         exclusive = bool(fits)
     if not fits:
+        # 이미 적재된 **더 낮은** 우선순위 단위를 비우면 들어가는가 — 비울 것이 적은 노드 → 남는 여유가 큰 노드 → 이름순
+        opts = []
+        for n in gnodes:
+            r0 = _room(n, reserved[n["name"]])
+            v = gpu_victims(loaded[n["name"]], rank, need - r0)
+            if v is not None:
+                freed = sum(float(u.get("mem_mb") or 0) for u in v)
+                opts.append((len(v), -(r0 + freed), n["name"], n, v, False))
+                continue
+            low = [u for u in loaded[n["name"]] if gpu_rank(u) > rank]
+            low_mb = sum(float(u.get("mem_mb") or 0) for u in low)
+            if (est is not None and low and len(low) == len(loaded[n["name"]]) and not held.get(n["name"])
+                    and util[n["name"]] - sum(float(u.get("gpu_util") or 0) for u in low) <= 1e-9
+                    and est <= r0 + low_mb):
+                # 낮은 것을 모두 비우면 단독 측정으로는 들어간다 (그 노드에 다른 일이 하나도 남지 않을 때만)
+                opts.append((len(low), -(r0 + low_mb), n["name"], n, low, True))
+        if opts:
+            _k, _r, _nm, enode, victims, exclusive = min(opts, key=lambda o: o[:3])
+            evict = sorted(u["unit_id"] for u in victims)
+            gone.update(evict)
+            ledger[enode["name"]][0] -= sum(float(u.get("mem_mb") or 0) for u in victims)
+            ledger[enode["name"]][1] -= sum(float(u.get("gpu_util") or 0) for u in victims)
+            reserved = {k: v[0] for k, v in ledger.items()}
+            util = {k: v[1] for k, v in ledger.items()}
+            fits = [enode]
+            prio["evict"] = evict
+            prio["evict_reason"] = "우선순위가 낮은 적재 단위 %s 를 비우고 들임" % ", ".join(evict)
+    if not fits:
         best = max(gnodes, key=lambda n: (_room(n, reserved[n["name"]]), n["name"]))
+        # 다툼인가 — 이 배치표에서 앞서 놓은 묶음 · 이미 적재된 단위가 없었으면 들어갔을 것인가
+        contended = []
+        for n in gnodes:
+            r0 = _room(n, reserved[n["name"]])
+            others = (sum(mb for _r, mb in held.get(n["name"]) or ())
+                      + sum(float(u.get("mem_mb") or 0) for u in loaded[n["name"]]))
+            if others and (need <= r0 + others or (est is not None and est <= r0 + others)):
+                contended.append(n)
+        holders = ([r for n in contended for r, _mb in (held.get(n["name"]) or ())]
+                   + [gpu_rank(u) for n in contended for u in loaded[n["name"]]])
+        if contended and trigger in DEFERRABLE_TRIGGERS:
+            out.setdefault("waiting", []).append(reason_item(
+                "gpu:%s" % key, "gpu_deferred",
+                "GPU 메모리를 다른 일이 쓰는 중 — 요청 때 부르는 일(on_request)이라 미뤄 두고 메모리가 비면 불러 옴 "
+                "(필요 %d MB > 여유 %d MB, %s)" % (need, _room(best, reserved[best["name"]]), best["name"]),
+                models=models, sources=srcs, need_mb=round(need),
+                target_fps={s: float(request.get("target_fps", {}).get(s, 10.0)) for s in srcs}, **prio))
+            return
+        if contended and any(h < rank for h in holders):
+            out["refused"].append(reason_item(
+                "gpu:%s" % key, "gpu_preempted",
+                "GPU 메모리를 우선순위가 더 높은 일이 쓰는 중 — 낮은 우선순위(%s)라 들이지 않음 "
+                "(필요 %d MB > 여유 %d MB, %s)" % (prio["criticality"], need, _room(best, reserved[best["name"]]),
+                                                 best["name"]),
+                rank=rank, criticality=prio["criticality"]))
+            return
         out["refused"].append(reason_item("gpu:%s" % "+".join(models), "gpu_mem",
                                           "GPU 메모리 부족: 필요 %d MB > 여유 %d MB (%s)" % (
                                               need, _room(best, reserved[best["name"]]), best["name"])))
@@ -186,11 +288,12 @@ def place_gpu(request, nodes, costs, out):
         load = sum(fps[s] * p90[s] / 1000.0 for s in srcs)
         ledger[node["name"]][0] += need
         ledger[node["name"]][1] += load
+        held.setdefault(node["name"], []).append((rank, need))
         out["gpu_units"].append({"unit": "gpu:%s" % "+".join(models), "node": node["name"], "models": models,
                                  "sources": srcs, "fps_cap": fps, "need_mb": round(need),
                                  "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load, 3),
                                  "limit_mode": "none", "reason": "한도 면제: 서버 — GPU 처리량 예산 없음 (fps 낮춤 · 빼기 없음)",
-                                 **({"exclusive": True} if exclusive else {})})
+                                 **({"exclusive": True} if exclusive else {}), **prio})
         return
     GPU_BUDGET_ = float(gpu_budget)
     room = max(0.0, GPU_BUDGET_ - util[node["name"]])
@@ -228,10 +331,11 @@ def place_gpu(request, nodes, costs, out):
         return
     ledger[node["name"]][0] += need
     ledger[node["name"]][1] += load(fps)
+    held.setdefault(node["name"], []).append((rank, need))
     out["gpu_units"].append({"unit": "gpu:%s" % "+".join(models), "node": node["name"], "models": models,
                              "sources": sorted(fps), "fps_cap": fps, "need_mb": round(need),
                              "need_basis": costs.get("basis", "estimate"), "gpu_util": round(load(fps), 3),
-                             **({"exclusive": True} if exclusive else {})})
+                             **({"exclusive": True} if exclusive else {}), **prio})
     for s in degraded:
         out["degraded"].append(reason_item("gpu:%s:%s" % ("+".join(models), s), "fps_lowered",
                                            "fps %.1f 에서 %.2f 로 (p90 %.0f ms 기준 예산)" % (
@@ -717,7 +821,8 @@ def plan(request, snapshot, registry_hash, local_node):
                       "snapshot": digest(snapshot), "registry": registry_hash},
            "gpu_units": [], "cpu_units": [], "refused": [], "degraded": []}
     nodes = snapshot.get("nodes") or []
-    bundles = sorted(request.get("gpu") or [], key=lambda g: "+".join(sorted(g["models"])))
+    # 우선순위순(safety → mission → best_effort, 같으면 이름순)으로 놓는다 — 옛 요청은 모두 mission 이라 예전처럼 이름순
+    bundles = sorted(request.get("gpu") or [], key=lambda g: (gpu_rank(g), "+".join(sorted(g["models"]))))
     total_srcs = sum(len(g.get("sources") or ()) for g in bundles) or 1
     for g in bundles:
         key = "+".join(sorted(g["models"]))
@@ -738,4 +843,6 @@ def plan(request, snapshot, registry_hash, local_node):
         judge_functions(stages, out)
     out.pop("_ledger", None)
     out.pop("_cpu_ledger", None)
+    out.pop("_gpu_held", None)
+    out.pop("_gpu_evicted", None)
     return out

@@ -47,6 +47,8 @@ REASON_CODES = {
     "gpu_throughput": "GPU 처리량 예산을 fps 하한까지 낮춰도 넘음",
     "gpu_exclusive": "단독 측정 실행 중이라 다른 GPU 작업을 들이지 않음",
     "gpu_unreadable": "nvidia-smi 를 못 읽어 들이지 않음",
+    "gpu_preempted": "GPU 메모리가 모자라 우선순위가 더 높은 일에 자리를 내줌 (배치표에서 들이지 않음 · 적재된 단위를 멈춤)",
+    "gpu_deferred": "GPU 메모리가 빌 때까지 미룸 — 메모리가 비면 우선순위순으로 다시 들인다 (요청 때 부르는 일 · 밀려난 단위)",
     "no_gpu_node": "쓸 수 있는 GPU 노드가 없음",
     "remote_gpu": "원격 GPU Executor 없음",
     "no_cost": "비용표에 그 모델 조합이 없음",
