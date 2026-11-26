@@ -66,6 +66,23 @@ def __call__(self, bgr: np.ndarray, fov_x: float | None = None) -> tuple[dict, n
 - `info`: `{"infer_ms": float, "checkpoint": str, ...}`
 - `depth`: H×W float32 **미터**, 원본 크기로 되돌린 것. 0 또는 비유한값 = 무효 픽셀
 - `K`: 3×3 float 내부 행렬 (원본 px 기준 — 줄여 돌렸으면 되돌린 것)
+- **상대 깊이(provides: depth_relative)** 실행기도 같은 꼴로 돌려주되 미터가 아니다 — `info["relative"] = True`,
+  `info["units"] = "relative"`. depth 는 「클수록 멀다」 · 중앙값 1.0 으로 맞춘 값. 순서 · 근거리 판단에만 쓴다
+  (`depth_anything_cpu.py`)
+
+### CPU 실행기 (기기 · 서버 CPU 여유분, 2026-11-27)
+
+`runs_on: [cpu_arm64, cpu_x86]` · `size: small` 인 실행기는 기기(파이) 컨테이너에 **파일 하나만 복사해도** 돌게
+numpy · cv2 · onnxruntime(· ncnn)만 쓰고 저장소 모듈을 import 하지 않는다. 상대 경로(`models/…`)는 스스로
+`DS_HOME`(없으면 저장소 루트) 기준으로 푼다. 매개변수 `threads` (기본 4 — 파이 5 코어 수).
+
+| 파일 | 레지스트리 키 | 능력 |
+|---|---|---|
+| `yolo_seg_cpu.py` | `yolo26n_seg_cpu` · `yoloe26n_vocab_cpu` | detect · segment (· open_vocab — 어휘를 굳힌 ONNX) |
+| `depth_anything_cpu.py` | `da3_small_cpu` · `dav2_small_cpu` | depth_relative |
+| `clip_embed_cpu.py` | `mobileclip_s0_cpu` | embed |
+
+ONNX 는 `tools/export_cpu_models.py` 로 굳힌다(서버에서 — ultralytics 가 있는 venv).
 
 ### track · vlm · embed
 

@@ -624,6 +624,9 @@ functions:
         roles: [robot, sensor, small, gpu]
         image: null
         command: null
+        slots:
+          # 기기가 상자마다 작은 임베딩을 뽑아 보낸다 (2026-11-27 CPU 모델 — mobileclip_s0_cpu 등 provides: embed)
+          embedder: {label: 기기 임베딩 모델, label_en: on-device embedder, needs: [embed], size: small, optional: true}
       server:
         needs: {accel: gpu}
         deadline_ms: 500
@@ -657,6 +660,9 @@ functions:
         image: null
         command: null
         note: 실행체 없음 — 계약만
+        slots:
+          # 기기가 상자마다 작은 임베딩을 뽑아 보낸다 (2026-11-27 CPU 모델 — mobileclip_s0_cpu 등 provides: embed)
+          embedder: {label: 기기 임베딩 모델, label_en: on-device embedder, needs: [embed], size: small, optional: true}
       server:
         needs: {accel: gpu}
         deadline_ms: 2000
@@ -1122,3 +1128,117 @@ models:
     - {path: models/lightglue_superpoint, hf: ETH-CVG/lightglue_superpoint, rev: 5f5f626efee99f37dbc9eafea879d24d297aeab8,
        include: [config.json, model.safetensors, preprocessor_config.json], sha256: 69a8f2157741f6adc5ba83e1864e3d61add45fbb22b50b321d8f2630f5c9407d}
     - {path: models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model_quantized.onnx, sha256: 583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299}
+
+  # ── CPU 모델 (2026-11-27) — 기기(파이 · GPU 없음) 슬롯과 서버 CPU 여유분 ───────────────────────────────
+  # 실행기는 numpy · cv2 · onnxruntime(· ncnn)만 쓴다 — 파일 하나를 기기 컨테이너에 복사하면 돈다(vision/runners/README.md).
+  # cpu_ms(p50) · p90_ms 는 **x86 4스레드 어림 (파이 실측 아님)**: i7-13700H 코어 0-3(물리 P코어 2 개 × SMT) taskset,
+  # intra-op 4, 640×360 프레임 · 2026-11-27. 구간은 입력 크기다 — s = 기기 기본 입력(320 급), m = 640 급 입력으로 올렸을 때.
+  # 파이 5(A76 4 코어)는 이보다 느리다(어림 2~3 배) — 파이에 올리면 실측으로 바꾼다. bench.x86_8t 는 코어 0-7 · 8 스레드
+  # [p50, p90] (다른 작업과 겹쳐 4 스레드보다 느렸다 → 서버 CPU 에서도 threads 4 를 권한다). mem_mb = 프로세스 최대 RSS(기본 입력).
+  # 서버 단계 슬롯은 지금 모두 needs.accel: gpu 라 cpu_x86 모델이 뜨지 않는다 — GPU 가 찼을 때 CPU 로 내릴 자리는
+  # 오케스트레이터가 runs_on 의 cpu_x86 을 보고 정한다.
+  yolo26n_seg_cpu:
+    shown: YOLO26n-seg (CPU)
+    note: YOLO26n-seg ONNX(end2end, NMS 없음) — 기기 분할 · 탐지. COCO 80종. 320 이 기본, 640 은 imgsz 로. NCNN 판도 있다(backend ncnn — x86 에선 ONNX 가 빨랐다, 파이에선 비교 실측 필요)
+    runner: yolo_seg_cpu:Yolo26nSegCpuRunner
+    kind: segment
+    provides: [detect, segment]
+    runs_on: [cpu_arm64, cpu_x86]
+    size: small
+    license: AGPL-3.0 (ultralytics)
+    cpu_ms: {s: 13.6, m: 56.1}
+    p90_ms: {s: 21.1, m: 80.7}
+    mem_mb: 134
+    bench: {basis: x86 4스레드 어림 (파이 실측 아님), rss_mb: {s: 134, m: 229}, x86_8t: {s: [26.8, 29.4], m: [90.8, 116.9]},
+            ncnn_4t: {s: [18.7, 22.0], m: [77.1, 101.5]}}
+    config: {model: "models/yolo26n-seg/yolo26n-seg_{imgsz}.onnx", imgsz: 320, conf: 0.25, threads: 4}
+    files: [models/yolo26n-seg/yolo26n-seg_320.onnx, models/yolo26n-seg/yolo26n-seg_640.onnx]
+    device: cpu
+    packages: [onnxruntime]
+    source:
+    - {path: models/yolo26n-seg/yolo26n-seg.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-seg.pt, sha256: 361fbfabab285c3237700b6bb91d7ecfa602cd945fffda8dbe1242829b71e73f}
+    - {path: models/yolo26n-seg/yolo26n-seg_320.onnx, manual: "tools/export_cpu_models.py yolo26n_seg (ultralytics 8.4.170 · opset 17 · nms=False)", sha256: 0aaae51871c0e23445988a1a8334c12793dbb34eccc4adaa3085668020ae8c05}
+    - {path: models/yolo26n-seg/yolo26n-seg_640.onnx, manual: "tools/export_cpu_models.py yolo26n_seg", sha256: 304d1823cce57c441172d1ec0cbec0cad9a718e3fa156431cc653c650eb8b7b3}
+    - {path: models/yolo26n-seg/yolo26n-seg_ncnn_320, manual: "tools/export_cpu_models.py yolo26n_seg --ncnn (선택 — backend ncnn)", optional: true, sha256: 9248bf5585da4fa437106ef6547320eceb8cf2a1817cad75ddbaf7b5707c2718}
+    - {path: models/yolo26n-seg/yolo26n-seg_ncnn_640, manual: "tools/export_cpu_models.py yolo26n_seg --ncnn (선택)", optional: true, sha256: ea76f557bbead17075a5f837135b50db2aeeccea0fba58997a96c4cb0f7cbde9}
+  yoloe26n_vocab_cpu:
+    shown: YOLOE-26n 굳힌 어휘 (CPU)
+    note: YOLOE-26n-seg 에 어휘(기본 30 개 — models/yoloe-26n-seg/yoloe-26n-seg-vocab.txt)의 글 임베딩을 녹여 굳힌 ONNX — 기기에는 글 인코더가 없다. 새 어휘는 서버에서 tools/export_cpu_models.py yoloe26n_vocab --vocab … 로 다시 굳혀 내려보낸다. 속도는 YOLO26n-seg 와 같다
+    runner: yolo_seg_cpu:Yoloe26nVocabCpuRunner
+    kind: segment
+    provides: [detect, segment, open_vocab]
+    runs_on: [cpu_arm64, cpu_x86]
+    size: small
+    license: AGPL-3.0 (ultralytics)
+    cpu_ms: {s: 13.6, m: 58.3}
+    p90_ms: {s: 18.6, m: 102.1}
+    mem_mb: 135
+    bench: {basis: x86 4스레드 어림 (파이 실측 아님), rss_mb: {s: 135, m: 229}, x86_8t: {s: [27.8, 33.6], m: [101.4, 111.7]}}
+    config: {model: "models/yoloe-26n-seg/yoloe-26n-seg-vocab_{imgsz}.onnx", imgsz: 320, conf: 0.25, threads: 4}
+    files: [models/yoloe-26n-seg/yoloe-26n-seg-vocab_320.onnx, models/yoloe-26n-seg/yoloe-26n-seg-vocab_640.onnx]
+    device: cpu
+    packages: [onnxruntime]
+    source:
+    - {path: models/yoloe-26n-seg/yoloe-26n-seg.pt, url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26n-seg.pt, sha256: 1741c1f8da3cea47e2c01829c334a50dc0b9bbd05e685b90a3ce84fae32c8c1b}
+    - {path: models/yoloe-26n-seg/yoloe-26n-seg-vocab_320.onnx, manual: "tools/export_cpu_models.py yoloe26n_vocab (기본 어휘 · 글 인코더 models/mobileclip2_b.ts)", sha256: 2b177a9662cb77ca434ba697684e5e598bafff0a2af010d6a612c3ea815b8134}
+    - {path: models/yoloe-26n-seg/yoloe-26n-seg-vocab_640.onnx, manual: "tools/export_cpu_models.py yoloe26n_vocab", sha256: 4b970efe6facfb9db6ccfa5285c62b57cc4059996c4fd1f503b5d440e755a4c0}
+  da3_small_cpu:
+    shown: Depth Anything 3 Small (CPU · 상대)
+    note: DA3-Small ONNX fp32 — 상대 깊이(클수록 멂, 중앙값 1.0) + 내부 행렬 추정. 미터가 아니다(info.relative). 긴 변 308(14 배수)이 기본 — 기기 단계 마감 500 ms 는 파이에서 빠듯하다(어림 2~3 배) → 파이에선 input 252 를 먼저 재 본다
+    runner: depth_anything_cpu:DepthAnything3SmallCpuRunner
+    kind: depth
+    provides: [depth_relative]
+    runs_on: [cpu_arm64, cpu_x86]
+    size: small
+    license: Apache-2.0
+    cpu_ms: {s: 111.1, m: 399.6}
+    p90_ms: {s: 122.2, m: 424.6}
+    mem_mb: 254
+    bench: {basis: "x86 4스레드 어림 (파이 실측 아님) — s 입력 308 · m 입력 518", rss_mb: {s: 254, m: 375}, x86_8t: {s: [205.9, 223.7], m: [647.9, 724.4]}}
+    config: {input: 308, threads: 4}
+    files: [models/depth-anything-v3-small-onnx/onnx/model.onnx, models/depth-anything-v3-small-onnx/onnx/model.onnx_data]
+    device: cpu
+    packages: [onnxruntime]
+    source:
+    - {path: models/depth-anything-v3-small-onnx, hf: onnx-community/depth-anything-v3-small, rev: 0b6a7f3bf5595f9950b91389e0da3a0de130324c,
+       include: [config.json, onnx/model.onnx, onnx/model.onnx_data], sha256: 61bbf371b1bcb6c211d73e365d11b1fde9a65d37a63b3ec2894482c4f4f46f3a}
+  dav2_small_cpu:
+    shown: Depth Anything V2 Small (CPU · 상대)
+    note: DA-V2-Small ONNX fp32 — 상대 역깊이를 1/x 로 바꾼 값(순서만 믿는다). K 는 fov_x. DA3 보다 x86 에서 느리다 — 대안. int8 판(model_int8.onnx)은 x86 에선 더 느렸지만(195 ms) 메모리가 적고(182 MB) 파이(sdot)에선 빠를 수 있다 — config.model 로 바꿔 잰다
+    runner: depth_anything_cpu:DepthAnything2SmallCpuRunner
+    kind: depth
+    provides: [depth_relative]
+    runs_on: [cpu_arm64, cpu_x86]
+    size: small
+    license: Apache-2.0
+    cpu_ms: {s: 156.5, m: 467.0}
+    p90_ms: {s: 186.6, m: 497.0}
+    mem_mb: 282
+    bench: {basis: "x86 4스레드 어림 (파이 실측 아님) — s 입력 308 · m 입력 518", rss_mb: {s: 282, m: 361}, x86_8t: {s: [190.6, 212.2], m: [555.5, 675.4]},
+            int8_4t: {s: [195.3, 222.4], rss_mb: 182}, int8_8t: {s: [299.9, 335.3]}}
+    config: {input: 308, threads: 4}
+    files: [models/depth-anything-v2-small/onnx/model.onnx]
+    device: cpu
+    packages: [onnxruntime]
+    source:
+    - {path: models/depth-anything-v2-small/onnx/model.onnx, hf: onnx-community/depth-anything-v2-small, rev: 4472b7362082ad9968fee890ca0f1e5aca36b93d, file: onnx/model.onnx, sha256: afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c}
+    - {path: models/depth-anything-v2-small/onnx/model_int8.onnx, hf: onnx-community/depth-anything-v2-small, rev: 4472b7362082ad9968fee890ca0f1e5aca36b93d, file: onnx/model_int8.onnx, sha256: 01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001, optional: true}
+  mobileclip_s0_cpu:
+    shown: MobileCLIP-S0 임베딩 (CPU)
+    note: MobileCLIP-S0 이미지 인코더 ONNX fp32 — 상자마다 512 차원(L2 정규화). 시간은 상자 하나(256×256) 기준이라 구간과 무관 — 상자 수만큼 늘어난다. 글 임베딩은 같은 저장소 text_model 로 서버에서 미리 계산해 내려보낸다. Xenova int8 판은 깨져 있어(fp32 와 코사인 0.07~0.16) 쓰지 않는다
+    runner: clip_embed_cpu:MobileClipS0EmbedRunner
+    kind: embed
+    provides: [embed]
+    runs_on: [cpu_arm64, cpu_x86]
+    size: small
+    license: apple-amlr (Apple MobileCLIP 가중치 — 안내만)
+    cpu_ms: {s: 57.9, m: 57.9}
+    p90_ms: {s: 69.9, m: 69.9}
+    mem_mb: 187
+    bench: {basis: "x86 4스레드 어림 (파이 실측 아님) — 상자 하나", x86_8t: {s: [82.7, 91.1]}}
+    config: {threads: 4}
+    files: [models/mobileclip-s0/onnx/vision_model.onnx]
+    device: cpu
+    packages: [onnxruntime]
+    source:
+    - {path: models/mobileclip-s0/onnx/vision_model.onnx, hf: Xenova/mobileclip_s0, rev: 757d59c9c6870a76a4b0306f05f5061bca15c39f, file: onnx/vision_model.onnx, sha256: 17d3c037b1d488c10c50e09f6009ea5a198caef4e0e8f4ea5617b7cb2d067ac0}
