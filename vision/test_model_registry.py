@@ -13,6 +13,7 @@ sys.path.insert(0, str(HERE))
 import cue_catalog as cc  # noqa: E402
 
 GOLD_GPU_MB = {"base": 400, "yoloe_text": 900, "yoloe_free": 500, "clip": 350, "yolo_world": 500,
+               "rf_detr_s": 200, "rf_detr_m": 300, "rf_detr_seg_s": 200, "rf_detr_seg_m": 250,
                "grounding_dino": 1300, "gdino": 1300, "reid": 700, "depth": 1300, "trained": 120}
 GOLD_FILE_KEYS = {"yoloe_text", "yoloe_free", "clip", "yolo_world", "gdino", "depth", "trained", "reid"}
 

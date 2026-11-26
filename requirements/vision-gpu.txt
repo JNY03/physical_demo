@@ -20,6 +20,7 @@ cuda-bindings==12.9.7
 cuda-pathfinder==1.6.0
 cuda-toolkit==12.6.3
 cycler==0.12.1
+defusedxml==0.7.1         # supervision(rfdetr) 이 쓴다 — 2026-11-26
 einops==0.8.2
 filelock==3.32.3
 flatbuffers==25.12.19     # onnxruntime-gpu 가 쓴다 — 지금 venv 에 있었으나 옛 requirements.txt 에 빠져 있던 것
@@ -89,6 +90,7 @@ psutil==7.2.2
 py360convert==1.0.4
 pydantic==2.13.5
 pydantic_core==2.46.5
+pyDeprecate==0.9.0        # rfdetr 가 쓴다 — 2026-11-26
 Pygments==2.21.0
 pyparsing==3.3.3
 python-dateutil==2.9.0.post0
@@ -96,12 +98,14 @@ PyYAML==6.0.3
 redis==8.1.0
 regex==2026.9.29
 requests==2.34.2
+rfdetr==1.12.1            # RF-DETR (Apache-2.0) — vision/runners/rf_detr.py · 2026-11-26
 rich==15.0.0
 safetensors==0.8.0
 scipy==1.18.1
 setuptools==78.1.0
 shellingham==1.5.4
 six==1.17.0
+supervision==0.32.3       # rfdetr 결과 형식(Detections) — 2026-11-26
 sympy==1.14.0
 tabulate==0.10.0
 termcolor==3.3.0

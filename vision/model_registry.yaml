@@ -1063,3 +1063,69 @@ models:
     - {path: models/lightglue_superpoint, hf: ETH-CVG/lightglue_superpoint, rev: 5f5f626efee99f37dbc9eafea879d24d297aeab8,
        include: [config.json, model.safetensors, preprocessor_config.json], sha256: 69a8f2157741f6adc5ba83e1864e3d61add45fbb22b50b321d8f2630f5c9407d}
     - {path: models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model_quantized.onnx, sha256: 583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299}
+  # RF-DETR (Roboflow, ICLR 2026) — COCO 80종. vision/runners/rf_detr.py · rfdetr==1.12.1 (2026-11-26 측정)
+  # 받을 곳은 rfdetr 패키지(assets/model_weights.py)가 쓰는 repo.roboflow.com 주소 그대로다. 판 번호가 없는
+  # 주소라 md5(= 패키지가 검증하는 값 · GCS etag)를 주석에 둔다. 탐지 체크포인트는 학습 상태까지 든
+  # 원본이라 크다(S 386MB · M 405MB, GPU 에 올라가는 것은 fp16 가중치뿐).
+  # p90_ms 는 기본 설정(eager fp16, preresize) — 공유 기기(load 6~8)에서 잰 값이라 흔들림이 크다.
+  # compile: cudagraph 면 S · M 모두 p90 약 16 ms(적재 +15 초, GPU +200 MB).
+  rf_detr_s:
+    note: RF-DETR Small (COCO 80종, 512²) — YOLOE pf 보다 어휘는 좁고 빠르다. 장면 · 조명 같은 이름이 없다
+    files: [models/rf-detr/rf-detr-small.pth]
+    provides: [detect]
+    runs_on: [gpu]
+    runner: rf_detr:Runner
+    config: {variant: small}
+    license: Apache-2.0
+    gpu_mb: 200
+    p90_ms: {s: 28, m: 21, l: 25, xl: 27}
+    device: gpu
+    packages: [rfdetr]
+    source:
+    # md5 fb37061c1af7bace359c91b723a8d5c1 · 386,045,550 B
+    - {path: models/rf-detr/rf-detr-small.pth, url: https://repo.roboflow.com/rfdetr/small_coco/checkpoint_best_regular.pth, sha256: d81979a9213a2109345158ce9232668df4c1ae52e9b8db3f2ec0a8cbad959b33}
+  rf_detr_m:
+    note: RF-DETR Medium (COCO 80종, 576²) — S 와 결과가 거의 같고 사람 · 작은 물체를 조금 더 잡는다
+    files: [models/rf-detr/rf-detr-medium.pth]
+    provides: [detect]
+    runs_on: [gpu]
+    runner: rf_detr:Runner
+    config: {variant: medium}
+    license: Apache-2.0
+    gpu_mb: 300
+    p90_ms: {s: 27, m: 53, l: 32, xl: 34}       # m 53 은 다른 작업과 겹친 흔들림 — cudagraph 로는 16
+    device: gpu
+    packages: [rfdetr]
+    source:
+    # md5 7223f764a87b863f02eb8d52bf0ce2ee · 404,992,918 B
+    - {path: models/rf-detr/rf-detr-medium.pth, url: https://repo.roboflow.com/rfdetr/medium_coco/checkpoint_best_regular.pth, sha256: 749ff6071828aaffac63e204c4f4135ed3d6cdae4d702e086c360edc3b5768c8}
+  rf_detr_seg_s:
+    note: RF-DETR Seg Small (COCO 80종 인스턴스 분할) — det 에 _poly(외곽선)가 붙는다
+    files: [models/rf-detr/rf-detr-seg-small.pt]
+    provides: [detect, segment]
+    runs_on: [gpu]
+    runner: rf_detr:Runner
+    config: {variant: seg-small}
+    license: Apache-2.0
+    gpu_mb: 200
+    p90_ms: {s: 31, m: 33, l: 57, xl: 62}
+    device: gpu
+    packages: [rfdetr]
+    source:
+    # md5 0a2a3006381d0c42853907e700eadd08 · 135,042,342 B
+    - {path: models/rf-detr/rf-detr-seg-small.pt, url: https://repo.roboflow.com/rfdetr/rf-detr-seg-s-ft.pth, sha256: 6de3da31b2572cac214a1c76cce4a92a13966d56390ac2b3a3de9a8dc2b2bca3}
+  rf_detr_seg_m:
+    note: RF-DETR Seg Medium (COCO 80종 인스턴스 분할) — det 에 _poly(외곽선)가 붙는다
+    files: [models/rf-detr/rf-detr-seg-medium.pt]
+    provides: [detect, segment]
+    runs_on: [gpu]
+    runner: rf_detr:Runner
+    config: {variant: seg-medium}
+    license: Apache-2.0
+    gpu_mb: 250
+    p90_ms: {s: 44, m: 37, l: 36, xl: 55}
+    device: gpu
+    packages: [rfdetr]
+    source:
+    # md5 a49af1562c3719227ad43d0ca53b4c7a · 143,024,058 B
+    - {path: models/rf-detr/rf-detr-seg-medium.pt, url: https://repo.roboflow.com/rfdetr/rf-detr-seg-m-ft.pth, sha256: 3ad325094735f431aee9962a8d204d68eb5bfc393d53e7e836e70998fef5ea58}
