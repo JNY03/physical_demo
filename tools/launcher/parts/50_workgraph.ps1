@@ -227,8 +227,14 @@ function WG-AlignPlan($w) {
     $out = @()
     $fns = @($w.functions)
     for ($i = 1; $i -lt $fns.Count; $i++) {
+        # 백엔드가 기능마다 「그 슬롯에서 고를 키」(align)를 주면 그것을 쓴다 — 같은 가중치라도 기능마다 키가 다르다
+        # (거리 추정 unidepth ↔ 지정 물체 탐지 unidepth_l). 없으면 models[0] 을 그대로 (2026-11-27)
+        $al = $null
+        if ($null -ne $w.align) { $al = $w.align.($fns[$i]) }
+        $want = $(if ($null -ne $al -and $al.model) { [string]$al.model } else { $m0 })
         foreach ($sl in @(Fn-Slots $fns[$i])) {
-            if (@(@($sl.choices) | ForEach-Object { [string]$_.v }) -contains $m0) { $out += @{ fn = $fns[$i]; slot = $sl; v = $m0 }; break }
+            if ($null -ne $al -and $al.role -and $sl.role -and [string]$sl.role -ne [string]$al.role) { continue }
+            if (@(@($sl.choices) | ForEach-Object { [string]$_.v }) -contains $want) { $out += @{ fn = $fns[$i]; slot = $sl; v = $want }; break }
         }
     }
     return $out

@@ -1644,30 +1644,36 @@ $directAdd.Add_Click({ Add-Direct $directBox.Text })
 $distOn.Add_CheckedChanged({ if ($script:Building) { return }; $script:TargetsTouched = $true; Build-CueBoxes; Build-Overlay; Changed })
 
 # ================================================================ 오버레이 탭
+# 왼쪽 = 오버레이 고르기, 오른쪽 = 실제로 그려 본 미리보기 (2026-11-27 — 미리보기를 오른쪽에 크게).
+# 탭 쪽 크기(New-Tab 이 미리 맞춘다)에 맞춰 놓고 Anchor 로 창과 함께 늘어난다
+$overW = 606
+$pageW = [Math]::Max(900, $tOver.ClientSize.Width)
+$pageH = [Math]::Max(400, $tOver.ClientSize.Height)
 $overPanel = New-Object System.Windows.Forms.Panel
 $overPanel.Location = New-Object System.Drawing.Point(4, 4)
-$overPanel.Size = New-Object System.Drawing.Size(606, 286)
+$overPanel.Size = New-Object System.Drawing.Size($overW, ($pageH - 44))
 $overPanel.AutoScroll = $true
-$overPanel.Anchor = "Top, Left, Right"
+$overPanel.Anchor = "Top, Bottom, Left"
 $tOver.Controls.Add($overPanel)
 $overPreview = New-Object System.Windows.Forms.Button
-$overPreview.Location = New-Object System.Drawing.Point(4, 512)
+$overPreview.Location = New-Object System.Drawing.Point(4, ($pageH - 34))
 $overPreview.Width = 150
 [void](Reg $overPreview "b_preview_overlay")
 $overPreview.Anchor = "Bottom, Left"
 $tOver.Controls.Add($overPreview)
-# 고른 오버레이가 실제로 어떻게 보이는지 — 저장된 장에 그려 바로 아래에 둔다 (고칠 때마다 다시 그린다)
+# 고른 오버레이가 실제로 어떻게 보이는지 — 저장된 장에 그려 오른쪽에 둔다 (고칠 때마다 다시 그린다)
+$overX = $overW + 14
 $overPic = New-Object System.Windows.Forms.PictureBox
-$overPic.Location = New-Object System.Drawing.Point(4, 296)
-$overPic.Size = New-Object System.Drawing.Size(606, 188)
+$overPic.Location = New-Object System.Drawing.Point($overX, 4)
+$overPic.Size = New-Object System.Drawing.Size(($pageW - $overX - 6), ($pageH - 34))
 $overPic.SizeMode = "Zoom"
 $overPic.BorderStyle = "FixedSingle"
 $overPic.Anchor = "Top, Bottom, Left, Right"
 $tOver.Controls.Add($overPic)
 $overCap = New-Object System.Windows.Forms.Label
 $overCap.AutoSize = $false
-$overCap.Location = New-Object System.Drawing.Point(4, 488)
-$overCap.Size = New-Object System.Drawing.Size(606, 20)
+$overCap.Location = New-Object System.Drawing.Point($overX, ($pageH - 26))
+$overCap.Size = New-Object System.Drawing.Size(($pageW - $overX - 6), 20)
 $overCap.Anchor = "Bottom, Left, Right"
 $tOver.Controls.Add($overCap)
 # 라벨 · 깃발 글은 번역표에서 (키는 그대로 — 프로필에 들어가는 것은 키다)
