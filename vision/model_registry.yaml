@@ -1063,3 +1063,27 @@ models:
     - {path: models/lightglue_superpoint, hf: ETH-CVG/lightglue_superpoint, rev: 5f5f626efee99f37dbc9eafea879d24d297aeab8,
        include: [config.json, model.safetensors, preprocessor_config.json], sha256: 69a8f2157741f6adc5ba83e1864e3d61add45fbb22b50b321d8f2630f5c9407d}
     - {path: models/clip-vit-base-patch32/onnx/vision_model_quantized.onnx, hf: Xenova/clip-vit-base-patch32, rev: 6b7c523703ae26e39be4b03774966f8571c7f523, file: onnx/vision_model_quantized.onnx, sha256: 583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299}
+  qwen3_vl_2b:
+    # 2026-11-26 RTX 4050 6GB 실측 (bf16, max_pixels 640×32×32 ≈ 0.65MP → 모델 입력 최대 1056×576, 러너가 cv2 로 미리 줄인다).
+    # gpu_mb = torch 최대 예약 4328 + CUDA 컨텍스트 150. p90_ms = 한 장 · 한국어 한 문장 설명 · 새 토큰 64 개까지,
+    # 조용할 때 값. 생성은 토큰마다 CPU 몫이 커서 CPU 가 바쁘면(부하 7~8) s 3.7 s · m 7.0 s · l 8.4 s 까지 늘었다.
+    # l 은 모델 입력이 m 과 같아(미리 줄임) m 에 축소 몫만 더한 어림. 상자 찾기(최대 384 토큰)는 조용할 때 약 4 s, 바쁠 때 7~20 s.
+    # 올리기 8~16 s (디스크 캐시 따라), 내리기(close) 0.5 s → reserved 20MB 로 돌아온다.
+    # 4bit(nf4, bitsandbytes 0.50.2, cfg quant: 4bit): 최대 예약 1870MB · 속도 비슷 · 상자 목록이 길게 늘어지고 헛것이 늘어 기본으로 쓰지 않는다.
+    note: Qwen3-VL-2B-Instruct (Apache-2.0) — 상황 분석 · 근거 설명 · 말로 찾는 물체 상자. 요청이 있을 때만 올리고 GPU 가 모자라면 내린다
+    files: [models/qwen3-vl-2b-instruct/config.json, models/qwen3-vl-2b-instruct/model.safetensors]
+    provides: [vlm, ground]
+    runs_on: [gpu]
+    runner: qwen3_vl:Runner
+    license: Apache-2.0
+    gpu_mb: 4480
+    p90_ms: {s: 1600, m: 2400, l: 2600}
+    trigger_hint: on_request
+    device: gpu
+    packages: [transformers]
+    source:
+    - {path: models/qwen3-vl-2b-instruct, hf: Qwen/Qwen3-VL-2B-Instruct, rev: 89644892e4d85e24eaac8bacfd4f463576704203,
+       include: [chat_template.json, config.json, generation_config.json, merges.txt, model.safetensors, preprocessor_config.json,
+                 tokenizer.json, tokenizer_config.json, video_preprocessor_config.json, vocab.json],
+       sha256: a1538c4474af8b1684be8fa866c4b30560e8b3bf48f5349f7ba3e4d48c9cce2e}
+       # model.safetensors 하나의 sha256 = 7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0 (4,255,140,312 B)

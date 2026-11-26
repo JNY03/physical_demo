@@ -25,7 +25,8 @@ def test_options_and_kinds():
 
 
 def test_gpu_estimates_unchanged():
-    assert cc.GPU_MB == GOLD_GPU_MB
+    # 있던 값은 그대로여야 한다. 새 모델(예: qwen3_vl_2b, 요청 때만 올리는 VLM)은 더해져도 된다
+    assert {k: cc.GPU_MB.get(k) for k in GOLD_GPU_MB} == GOLD_GPU_MB
     assert cc.gpu_mb(["yoloe"]) == 1300 and cc.gpu_mb(["river"]) == 2800
     assert cc.gpu_mb(["unidepth"]) == 1900 and cc.gpu_mb(["moge2_aerial"]) == 1900
     assert cc.gpu_mb(["targeted"], ["yoloe_text", "clip"]) == 400 + 900 + 350
