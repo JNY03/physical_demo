@@ -135,6 +135,22 @@ def brief(p):
     return "\n".join(lines)
 
 
+def plan_json(p):
+    """기계가 읽는 배치 미리보기 (런처가 창 안에 그린다) — 배치표 칸(gpu_units · cpu_units · refused · degraded ·
+    waiting · functions, GPU 단위의 admit) 그대로에 방식 · 근거와 스냅숏 노드 요약을 **더하기만** 한다.
+    옛 칸(mode · basis · why · caps)은 이름도 자리도 그대로다."""
+    plan = p["plan"]
+    nodes = []
+    for n in (p.get("snapshot") or {}).get("nodes") or []:
+        one = {"name": n.get("name"), "role": n.get("role"), "ready": bool(n.get("ready")),
+               "stale": bool(n.get("stale")), "source": n.get("source")}
+        one.update(ctl.Controller._node_gpu(n))
+        nodes.append(one)
+    return dict(plan, mode=p["mode"], basis=p["basis"], why=p["why"], caps=p.get("caps") or {},
+                ok=bool(p.get("ok")), vision_off=list(p.get("vision_off") or []), nodes=nodes,
+                waiting=list(plan.get("waiting") or []), functions=plan.get("functions") or {})
+
+
 def refused_codes(req):
     """요청 기록의 거절 이유 코드들 — requests.<id>.refused (배치표 + admit), 없으면(옛 기록) plan.refused"""
     items = req.get("refused")
@@ -261,9 +277,7 @@ def main(argv=None):
         k = build(a, writer=False)
         p = k.preview(a.sources, a.models, profile, cpu_tasks=a.cpu_tasks, functions=funcs,
                       assign=assign, manual=manual, limits=limits)
-        print(json.dumps(p["plan"] | {"mode": p["mode"], "basis": p["basis"], "why": p["why"], "caps": p.get("caps") or {}},
-                         ensure_ascii=False)
-              if a.json else brief(p))
+        print(json.dumps(plan_json(p), ensure_ascii=False) if a.json else brief(p))
         return 0
 
     k = build(a, writer=True)
