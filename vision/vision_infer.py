@@ -2803,10 +2803,17 @@ class TargetedRunner:
         for t in self.targets:
             log("    %s: %s" % (t["name"], ", ".join("%s=%s" % kv for kv in t["cues"].items())))
 
-    def reconfigure(self, resolved):
-        """대상 · 근거 · 거리를 바꾼다. 무거운 모델은 캐시에서 다시 쓴다."""
+    def reconfigure(self, resolved, forget=None):
+        """대상 · 근거 · 거리를 바꾼다. 무거운 모델은 캐시에서 다시 쓴다.
+        forget = 거리 기억을 비울 기기 목록 (None = 전부). 스캔 판(2026-11-27)은 판 기기만 비운다 — 같은 프로세스의
+        다른 기기는 대상이 그대로라 트랙 · 거리가 이어져야 한다."""
+        keep = {}
+        if forget is not None:
+            if self.depth is not None and self._stream is not None:      # 지금 기기의 기억은 실행기 안에 있다
+                self._streams[self._stream] = {"d_mem": self.depth._mem, "d_n": self.depth._n}
+            keep = {k: v for k, v in self._streams.items() if k[0] not in set(forget)}
         self._build(resolved)
-        self._streams, self._stream = {}, None
+        self._streams, self._stream = keep, None
 
     def prewarm(self, resolved):
         """**새로 필요한 무거운 모델만 미리 적재한다**(다른 스레드에서). 그동안 옛 설정으로 계속 돈다.
@@ -3970,7 +3977,9 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
                             "show_non_suspect": bool(mblk.get("show_non_suspect", True))}
     if cfg.get("_profile_label") is not None or cfg.get("_profile_version") is not None or cfg.get("_scan"):
         rec["profile"] = {"label": cfg.get("_profile_label"), "version": cfg.get("_profile_version")}
-        if cfg.get("_scan") and det_model == "targeted":      # 스캔 판의 대상으로 낸 결과 · 몇 번째 각도 표시 뒤인지
+        # 스캔 판의 대상으로 낸 결과 · 몇 번째 각도 표시 뒤인지 — **판 기기의 결과에만**(2026-11-27). 같은 프로세스의
+        # 다른 기기 결과에 붙으면 가시화 · 창구가 그 기기 결과를 판 결과로 읽는다
+        if cfg.get("_scan") and det_model == "targeted" and device in (cfg.get("_scan_devices") or ()):
             rec["profile"]["scan"] = cfg["_scan"]
             rec["profile"]["mark"] = (cfg.get("_scan_mark") or {}).get(device)
     title = "%s  %s/%s #%s" % (det_model, device, base.get("run") or "live", base.get("n"))
@@ -4570,7 +4579,7 @@ class LiveRunner:
     def _finish(self, kind, resolved, error, meta):
         if not error:
             try:
-                self.swap_profile(resolved)
+                self.swap_profile(resolved, (meta or {}).get("forget"))
             except Exception as exc:
                 error = "%s: %s" % (type(exc).__name__, exc)
         what = {"file": "프로필", "scan": "스캔 대상", "restore": "원래 대상"}[kind]
@@ -4585,6 +4594,7 @@ class LiveRunner:
             if not error:
                 self.scan = meta
                 self.cfg["_scan"] = meta["scan_id"]
+                self.cfg["_scan_devices"] = list(meta["forget"])     # 판 번호를 실을 기기 = 판 기기 중 내 기기
                 self.cfg["_scan_mark"] = {}
                 self.mark_seen = {}
                 self._depth_every_frame(True)
@@ -4594,12 +4604,15 @@ class LiveRunner:
         elif kind == "restore" and self.watch is not None and not error:
             self.watch.status(True, "반영됨", resolved.get("version"))
 
-    def swap_profile(self, resolved):
+    def swap_profile(self, resolved, forget=None):
+        """확정된 설정으로 바꾼다. forget = targeted 트랙 · 이름 · 거리 기억을 비울 기기 (None = 전부).
+        스캔 판의 시작 · 끝은 판 기기만 비운다(2026-11-27) — 다른 기기의 대상은 그대로라 상자 번호가 이어져야 한다."""
         tr = self.runners.get("targeted")
         if tr is not None and resolved.get("targeted") is not None:
-            tr.reconfigure(resolved["targeted"])
+            tr.reconfigure(resolved["targeted"], forget)
             for store in ("_asm", "_stab", "_lab", "_axes"):
-                for k in [k for k in (self.cfg.get(store) or {}) if k[2] == "targeted"]:
+                for k in [k for k in (self.cfg.get(store) or {})
+                          if k[2] == "targeted" and (forget is None or k[0] in forget)]:
                     del self.cfg[store][k]
         apply_profile(self.cfg, resolved)
 
@@ -4639,16 +4652,30 @@ class LiveRunner:
                 self._ack(spec.get("scan_id"), str(exc), None)
                 self.scan_failed = spec.get("scan_id")
                 return
-            self._start("scan", resolved, {"scan_id": spec.get("scan_id"), "devices": list(spec.get("devices") or [])})
+            self._start("scan", resolved, {"scan_id": spec.get("scan_id"), "devices": list(spec.get("devices") or []),
+                                           "forget": self._scan_mine(spec)})
         elif self.scan is not None and self.job is None:
             back = self.deferred or self.before
             log("스캔 %s 끝 — %s" % (self.scan["scan_id"], "미룬 프로필로" if self.deferred else "원래 대상으로"))
+            # 판 전 설정으로 돌아가면 판 기기 기억만 비운다. 미룬 파일 프로필은 설정 자체가 바뀐 것이라 전부
+            forget = None if self.deferred else self.scan.get("forget")
             self.scan, self.deferred, self.before = None, None, None
             self.cfg.pop("_scan", None)
+            self.cfg.pop("_scan_devices", None)
             self.cfg.pop("_scan_mark", None)
             self._depth_every_frame(False)
             if back is not None:
-                self._start("restore", back)
+                self._start("restore", back, {"forget": forget})
+
+    def _scan_mine(self, spec):
+        """판 기기 중 이 프로세스의 기기 (판 순서가 아니라 내 기기 순서)."""
+        want = set(spec.get("devices") or [])
+        return [dv for dv in self.devices if dv in want]
+
+    def _runs_targeted(self, dv):
+        """그 기기가 targeted 를 돌리는지 (--device-models 가 없으면 프로세스의 모델 전부)."""
+        dmods = (self.cfg.get("_device_models") or {}).get(dv)
+        return "targeted" in self.models if not dmods else "targeted" in dmods
 
     def _depth_every_frame(self, on):
         """판 동안 UniDepth 를 **매 장** 잰다 — 주기(기본 5장)로 재면 각도 표시 0.5초 뒤 잡힌 장의 거리가 앞 장에서
@@ -4664,23 +4691,77 @@ class LiveRunner:
             self.depth_period = None
 
     def scan_profile(self, spec):
-        """판 전 프로필(원문) 위에 판 대상만 바꾼 것 → 확정. 판 대상에 맞지 않는 targeted 오버레이는 빼고 다시 해 본다."""
+        """판 전 프로필(원문) 위에 판 대상을 **판 기기에만** 건 것 → 확정 (2026-11-27, 스캔판대상_장비별_요청_VZ_261126).
+
+        targeted 는 「전체 대상으로 한 번 찾고 기기마다 거른다」라, 같은 프로세스에 판 기기가 아닌 기기(targeted 를 도는)가
+        있으면 최상위 대상 = 판 전 대상 ∪ 판 대상으로 두고 기기마다 가른다:
+          판 기기 → devices.<기기>.models.targeted.targets = 판 대상
+          다른 기기 → 장비별 대상이 있으면 그대로(빈 목록 = 찾지 않음 포함), 없었으면 판 전 대상을 명시(판 대상이 끼지 않게)
+        판 전 대상의 거리는 판 전 설정 그대로 적는다(판 대상만 거리 켬). 판 기기뿐이면 예전처럼 최상위 = 판 대상.
+        확정이 실패하면 판 기기의 targeted 오버레이 → 최상위 targeted 오버레이 순으로 빼고 다시 해 본다
+        — **다른 기기의 대상은 지우지 않는다**(그래도 안 되면 판을 거절한다)."""
         import copy
         import cue_catalog as cc
-        base = (self.deferred or self.cfg.get("_active") or {}).get("_raw") or {}
+        src = self.deferred or self.cfg.get("_active") or {}
+        base = src.get("_raw") or {}
         targets = spec.get("targets")
         if not isinstance(targets, list) or not targets:
             raise cc.ProfileError("스캔 대상이 없음")
+        scan_specs = [{"name": t} if isinstance(t, str) else dict(t) for t in targets]
+        scan_names = [s.get("name") for s in scan_specs]
+        mine = self._scan_mine(spec)
+        others = [dv for dv in self.devices if dv not in mine and self._runs_targeted(dv)]
         prof = copy.deepcopy(base)
         tm = prof.setdefault("models", {}).setdefault("targeted", {})
-        tm["targets"], tm["distance"] = targets, True
+        if others:
+            before = tm.get("targets")
+            if before is None:                           # 판 전에 대상을 적지 않았다 = 기본 대상 — 확정된 이름으로 명시
+                act = src.get("targeted")
+                if act is None:
+                    act = cc.resolve_profile(copy.deepcopy(base), self.cfg, self.models).get("targeted") or {}
+                before = [t["name"] for t in act.get("targets") or []]
+            before = [{"name": s} if isinstance(s, str) else dict(s) for s in before]
+            before_names = [s.get("name") for s in before]
+            tcfg = (self.cfg.get("models") or {}).get("targeted") or {}
+            bdist = bool(tm.get("distance", tcfg.get("distance", True)))
+            kept = []
+            for s in before:
+                if s.get("name") in scan_names:          # 같은 이름은 판 대상 정의로 — 판 기기의 판정이 예전과 같게
+                    continue
+                s["distance"] = bdist and bool(s.get("distance", True))
+                kept.append(s)
+            tm["targets"] = kept + scan_specs
+        else:
+            before_names = []
+            tm["targets"] = scan_specs
+        tm["distance"] = True
+        devs = prof.get("devices")
+        if devs is None:
+            devs = prof["devices"] = {}
+        if isinstance(devs, dict):                       # 사전이 아니면 확정이 틀렸다고 알린다
+
+            def dev_targeted(dv):
+                part = devs[dv] = devs.get(dv) or {}
+                dm = part["models"] = part.get("models") or {}
+                tp = dm["targeted"] = dm.get("targeted") or {}
+                return tp
+
+            for dv in mine:
+                dev_targeted(dv)["targets"] = list(scan_names)
+            for dv in others:
+                tp = dev_targeted(dv)
+                if "targets" not in tp:
+                    tp["targets"] = list(before_names)
         try:
             resolved = cc.resolve_profile(prof, self.cfg, self.models)
         except cc.ProfileError:
-            tm.pop("overlay", None)
-            for part in (prof.get("devices") or {}).values():
-                ((part or {}).get("models") or {}).pop("targeted", None)
-            resolved = cc.resolve_profile(prof, self.cfg, self.models)
+            for dv in (mine if isinstance(devs, dict) else ()):     # 판 대상에 맞지 않는 판 기기 오버레이부터
+                (((devs.get(dv) or {}).get("models") or {}).get("targeted") or {}).pop("overlay", None)
+            try:
+                resolved = cc.resolve_profile(prof, self.cfg, self.models)
+            except cc.ProfileError:
+                tm.pop("overlay", None)
+                resolved = cc.resolve_profile(prof, self.cfg, self.models)
         resolved["_raw"] = base                          # 판이 끝나도 되돌릴 원문은 판 전 것
         return resolved
 

@@ -32,3 +32,13 @@ def test_device_targets_filter_only_that_device():
     cfg = {"models": {}, "_targets_dev": {"pi12": ["chair"]}}
     assert _names(_run(dict(cfg), "pi12")) == ["chair"]
     assert _names(_run(dict(cfg), "robot1")) == ["chair", "person"]      # 적지 않은 기기는 전부
+
+
+def test_scan_id_only_on_scan_device():
+    """스캔 판 번호(profile.scan)는 판 기기의 targeted 결과에만 (2026-11-27, 스캔판대상_장비별_요청_VZ_261126)."""
+    cfg = {"models": {}, "_profile_version": 7, "_scan": "S1", "_scan_devices": ["robot1"],
+           "_scan_mark": {"robot1": 2}}
+    on = _run(dict(cfg), "robot1")[0][1]["profile"]
+    off = _run(dict(cfg), "pi12")[0][1]["profile"]
+    assert on["scan"] == "S1" and on["mark"] == 2
+    assert "scan" not in off and "mark" not in off and off["version"] == 7

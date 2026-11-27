@@ -37,15 +37,16 @@ class FakeRedis:
 
 class FakeTargeted:
     def __init__(self, fail=False):
-        self.fail, self.prewarmed, self.built, self.forgot = fail, 0, [], []
+        self.fail, self.prewarmed, self.built, self.forgot, self.reforget = fail, 0, [], [], []
 
     def prewarm(self, resolved):
         self.prewarmed += 1
         if self.fail:
             raise RuntimeError("CUDA out of memory")
 
-    def reconfigure(self, resolved):
+    def reconfigure(self, resolved, forget=None):
         self.built.append([t["name"] for t in resolved["targets"]])
+        self.reforget.append(forget)
 
     def forget_device(self, dv):
         self.forgot.append(dv)
@@ -196,6 +197,164 @@ def test_depth_every_frame_during_scan():
     lr.r.delete("vision_scan")
     tick(lr)
     assert lr.runners["targeted"].depth.period == 5
+
+
+# ---------------------------------------------------------------- 판 기기만 판 대상 (2026-11-27, 스캔판대상_장비별_요청_VZ_261126)
+STORES = ("_asm", "_stab", "_lab", "_axes")
+
+
+def runner2(dev_targets=None, distance=None):
+    """robot1(go1) · pi12 가 한 프로세스 — 판 전 대상 person · chair, 기기별 대상 dev_targets."""
+    lr = runner()
+    lr.devices = ["robot1", "pi12"]
+    tm = {"targets": [{"name": "person"}, {"name": "chair"}]}
+    if distance is not None:
+        tm["distance"] = distance
+    prof = {"profile_version": 7, "models": {"targeted": tm}}
+    if dev_targets:
+        prof["devices"] = {dv: {"models": {"targeted": {"targets": t}}} for dv, t in dev_targets.items()}
+    vi.apply_profile(lr.cfg, resolve(prof))
+    return lr
+
+
+def test_scan_targets_only_the_scan_device():
+    lr = runner2({"robot1": ["person"], "pi12": ["chair"]})
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert ack(lr)["ok"]
+    assert lr.runners["targeted"].built[-1] == ["person", "chair", "demo_box"]     # 최상위는 합친다
+    assert lr.cfg["_targets_dev"] == {"robot1": ["demo_box"], "pi12": ["chair"]}  # pi12 는 판 전 그대로
+    assert lr.cfg["_scan_devices"] == ["robot1"]
+    lr.r.delete("vision_scan")
+    tick(lr)
+    assert lr.runners["targeted"].built[-1] == ["person", "chair"]
+    assert lr.cfg["_targets_dev"] == {"robot1": ["person"], "pi12": ["chair"]}
+    assert "_scan_devices" not in lr.cfg
+
+
+def test_device_without_own_targets_keeps_before_targets():
+    """장비별 대상이 없던 기기(= 전부 찾던 기기)는 판 전 대상을 명시 — 판 대상이 끼지 않는다."""
+    lr = runner2({"robot1": ["person"]})
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert lr.cfg["_targets_dev"] == {"robot1": ["demo_box"], "pi12": ["person", "chair"]}
+
+
+def test_device_without_own_targets_and_default_targets():
+    """판 전 프로필에 대상을 적지 않았으면(기본 대상) 확정된 이름으로 명시한다."""
+    lr = runner()
+    lr.devices = ["robot1", "pi12"]
+    vi.apply_profile(lr.cfg, resolve({"profile_version": 7}))
+    before = [t["name"] for t in lr.cfg["models"]["targeted"]["_resolved"]["targets"]]
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert ack(lr)["ok"]
+    assert lr.cfg["_targets_dev"]["pi12"] == [n for n in before]
+    assert lr.cfg["_targets_dev"]["robot1"] == ["demo_box"]
+
+
+def test_empty_device_targets_stay_empty_during_scan():
+    lr = runner2({"robot1": ["person"], "pi12": []})
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert lr.cfg["_targets_dev"] == {"robot1": ["demo_box"], "pi12": []}
+
+
+def test_scan_device_without_own_targets():
+    lr = runner2({"pi12": ["chair"]})
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert lr.cfg["_targets_dev"] == {"robot1": ["demo_box"], "pi12": ["chair"]}
+
+
+def test_before_targets_keep_before_distance():
+    """판 전 거리 끔이면 판 전 대상은 거리 끔 그대로 — 판 대상만 거리를 잰다."""
+    lr = runner2({"robot1": ["person"], "pi12": ["chair"]}, distance=False)
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    r = lr.cfg["models"]["targeted"]["_resolved"]
+    assert r["distance"] is True
+    assert {t["name"]: t["distance"] for t in r["targets"]} == {"person": False, "chair": False, "demo_box": True}
+
+
+def test_same_name_uses_the_scan_target():
+    lr = runner()
+    lr.devices = ["robot1", "pi12"]
+    vi.apply_profile(lr.cfg, resolve({"profile_version": 7, "models": {"targeted": {
+        "targets": [{"name": "chair"}, {"name": "demo_box", "distance": False}]}}}))
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    r = lr.cfg["models"]["targeted"]["_resolved"]
+    assert [t["name"] for t in r["targets"]] == ["chair", "demo_box"]
+    assert {t["name"]: t["distance"] for t in r["targets"]}["demo_box"] is True
+    assert lr.cfg["_targets_dev"] == {"robot1": ["demo_box"], "pi12": ["chair", "demo_box"]}
+
+
+def test_device_not_running_targeted_is_not_merged():
+    """--device-models 로 targeted 를 돌지 않는 기기만 함께 있으면 예전처럼 판 대상만."""
+    lr = runner2()
+    lr.cfg["_device_models"] = {"pi12": ["yoloe"]}
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert lr.runners["targeted"].built[-1] == ["demo_box"]
+
+
+def test_single_device_process_is_unchanged():
+    """대조군 — 판 기기가 프로세스의 유일한 기기면 최상위 = 판 대상 (합치지 않는다)."""
+    lr = runner()
+    vi.apply_profile(lr.cfg, resolve({"profile_version": 7, "models": {"targeted": {"targets": [{"name": "person"}]}},
+                                      "devices": {"robot1": {"models": {"targeted": {"targets": ["person"]}}}}}))
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    assert ack(lr)["ok"] and lr.runners["targeted"].built[-1] == ["demo_box"]
+    assert lr.cfg["_targets_dev"] == {"robot1": ["demo_box"]}
+    assert lr.runners["targeted"].reforget[-1] == ["robot1"]
+
+
+def test_scan_start_and_end_clear_only_scan_device_memory():
+    lr = runner2({"robot1": ["person"], "pi12": ["chair"]})
+    keys = {("robot1", "r", "targeted"), ("pi12", "r", "targeted"), ("pi12", "r", "yoloe")}
+    for s in STORES:
+        lr.cfg[s] = {k: 1 for k in keys}
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    for s in STORES:
+        assert set(lr.cfg[s]) == keys - {("robot1", "r", "targeted")}             # pi12 트랙 번호가 이어진다
+    assert lr.runners["targeted"].reforget[-1] == ["robot1"]
+    lr.cfg["_stab"][("robot1", "r", "targeted")] = 1
+    lr.r.delete("vision_scan")
+    tick(lr)
+    assert set(lr.cfg["_stab"]) == keys - {("robot1", "r", "targeted")}
+    assert lr.runners["targeted"].reforget[-1] == ["robot1"]
+
+
+def test_deferred_profile_after_scan_clears_all_memory():
+    w = FakeWatch()
+    lr = runner2({"robot1": ["person"], "pi12": ["chair"]})
+    lr.watch = w
+    put_scan(lr, targets=("demo_box",))
+    tick(lr)
+    lr.cfg["_stab"] = {("pi12", "r", "targeted"): 1}
+    w.next = resolve({"profile_version": 8, "models": {"targeted": {"targets": [{"name": "chair"}]}}})
+    lr.check_profile()
+    lr.r.delete("vision_scan")
+    tick(lr)
+    assert lr.runners["targeted"].reforget[-1] is None and lr.cfg["_stab"] == {}
+
+
+def test_runner_reconfigure_keeps_other_device_depth_memory():
+    class Dp:
+        _mem, _n = {}, 0
+    tr = vi.TargetedRunner.__new__(vi.TargetedRunner)
+    tr._build = lambda resolved: setattr(tr, "_streams", {}) or setattr(tr, "_stream", None)
+    tr.depth = Dp()
+    tr._streams = {("robot1", "r"): {"d_mem": {1: "a"}, "d_n": 3}}
+    tr._stream = ("pi12", "r")
+    tr.depth._mem, tr.depth._n = {7: "b"}, 2                                     # 지금 기기(pi12)의 기억
+    tr.reconfigure({}, forget=["robot1"])
+    assert tr._streams == {("pi12", "r"): {"d_mem": {7: "b"}, "d_n": 2}} and tr._stream is None
+    tr.reconfigure({})
+    assert tr._streams == {}
 
 
 # ---------------------------------------------------------------- 각도 표시
