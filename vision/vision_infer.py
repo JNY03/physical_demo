@@ -2636,6 +2636,7 @@ class TargetedRunner:
         if resolved is None:
             from cue_catalog import resolve_profile
             resolved = resolve_profile({}, {"models": {"targeted": cfg}}, ["targeted"])["targeted"]
+        self.fast_devices = set()      # 거리를 **매 장** 잴 기기 (스캔 판 기기) — 다시 세워도(_build) 남는다
         self._build(resolved)
 
     def _build(self, resolved):
@@ -2772,11 +2773,14 @@ class TargetedRunner:
             except _ArmMissing as exc:
                 self.missing.append(("grounding_dino", str(exc)))
         self.ovd_rules = {t["name"]: (t.get("ovd_rules") or {}) for t in ovd_t}
+        self.ovd_names = {t["name"] for t in ovd_t}    # OVD 가 맡은 대상 (YOLO-World · GroundingDINO 모두 같은 목록)
         # 거리
-        self.depth = None
+        self.depth, self.depth_period0 = None, None
         dist_names = [t["name"] for t in self.targets if t.get("distance")]
         if self.distance and dist_names:
             dspec = dict(cfg.get("depth") or {}, enabled=True, classes=dist_names)
+            # 원래 주기는 설정에서 — 추적기는 캐시로 함께 쓰는 객체라 그 period 는 판 동안 1 일 수 있다 (DepthTracker 와 같은 식)
+            self.depth_period0 = max(1, int(dspec.get("period") or 5))
             mid = cc.depth_model_id(cue_models, files)
             if mid:                                       # 근거 표에서 고른 거리 모델 (같은 UniDepth 코드, 가중치만)
                 dspec["model_id"] = mid
@@ -2859,16 +2863,35 @@ class TargetedRunner:
             self.depth._mem = {}
 
     def use_stream(self, key):
-        """기기마다 거리 기억을 따로 둔다(river 와 같은 이유)."""
+        """기기마다 거리 기억을 따로 둔다(river 와 같은 이유). 거리 주기도 기기마다 건다 — 스캔 판 기기(fast_devices)는
+        매 장, 나머지는 원래 주기 (2026-11-27, 판 동안 같은 프로세스의 다른 기기까지 매 장 재지 않게)."""
         if key == self._stream or self.depth is None:
             self._stream = key
-            return
-        dp = self.depth
-        if self._stream is not None:
-            self._streams[self._stream] = {"d_mem": dp._mem, "d_n": dp._n}
-        st = self._streams.get(key) or {}
-        dp._mem, dp._n = st.get("d_mem") or {}, st.get("d_n") or 0
-        self._stream = key
+        else:
+            dp = self.depth
+            if self._stream is not None:
+                self._streams[self._stream] = {"d_mem": dp._mem, "d_n": dp._n}
+            st = self._streams.get(key) or {}
+            dp._mem, dp._n = st.get("d_mem") or {}, st.get("d_n") or 0
+            self._stream = key
+        if self.depth is not None and getattr(self, "depth_period0", None) is not None:
+            fast = key is not None and key[0] in (getattr(self, "fast_devices", None) or ())
+            self.depth.period = 1 if fast else self.depth_period0
+
+    def _need(self, allow):
+        """그 기기가 받을 대상 + same_as 짝 (None = 전부). 짝은 같은 자리를 두 대상이 다툴 때 점수로 하나를 고르므로
+        (resolve_same_as) 짝을 먼저 버리면 고르는 결과가 바뀐다 — 함께 남기고, 기기 거름은 _detect_one 이 마지막에 한다."""
+        if allow is None:
+            return None
+        need = set(allow)
+        for n, p in self.same_as.items():
+            if n in need or p in need:
+                need |= {n, p}
+        return need
+
+    def _wanted(self, need, name):
+        """그 대상(또는 그 후보를 복사해 받는 alias 대상)을 이 기기가 받는가."""
+        return need is None or name in need or any(a in need for a in self.alias.get(name, ()))
 
     def _merge(self, raw, img_area):
         kept = []
@@ -2897,10 +2920,15 @@ class TargetedRunner:
                     ba[word] = (det["conf"], bool(det.get("similar")))
         return kept
 
-    def __call__(self, bgr, roi_crop=None):
+    def __call__(self, bgr, roi_crop=None, allow=None):
         """roi_crop = [x1, y1, x2, y2] 이면 텍스트 · 프리 · OVD arm 은 그 안을 잘라 돌리고 좌표를 되돌린다.
-        학습 검출기(demo_box)는 **늘 전체 프레임** — 관문 상수가 Go1 테두리 crop 좌표계에 묶여 있다."""
+        학습 검출기(demo_box)는 **늘 전체 프레임** — 관문 상수가 Go1 테두리 crop 좌표계에 묶여 있다.
+
+        allow = 이 기기가 받을 대상 (None = 전부, 2026-11-27). 받지 않는 대상의 학습 검출기 · OVD 는 돌리지 않고,
+        후보는 거리 · 근거를 재기 **전에** 거른다. 후보 합치기 · 중복 지우기 · OVD 후보는 같은 대상끼리만 보므로
+        받는 대상의 후보는 전부를 찾을 때와 같다. 빈 목록이면 아무 arm 도 돌리지 않는다."""
         t0 = time.perf_counter()
+        need = self._need(allow)
         raw, arm_ms, decoyed = [], {}, 0
         if roi_crop is not None:
             ox, oy = roi_crop[0], roi_crop[1]
@@ -2918,7 +2946,7 @@ class TargetedRunner:
                 if d.get("poly") is not None:
                     d["poly"] = np.asarray(d["poly"], np.float32) + np.array([ox, oy], np.float32)
             return found
-        for label, arm in self.arms:
+        for label, arm in (self.arms if need is None or need else ()):    # 텍스트 · 프리는 대상 전부를 한 번에 찾는다
             a0 = time.perf_counter()
             try:
                 found = back(arm(sub))
@@ -2933,6 +2961,8 @@ class TargetedRunner:
                 raw.append(dict(d, arm=label))
         rejected, by_gates = [], []
         for name, arm in self.trained:
+            if not self._wanted(need, name):           # 이 기기가 받지 않는 대상의 학습 검출기
+                continue
             try:
                 found, rej, byg, ms = arm(bgr)
             except Exception as exc:
@@ -2943,7 +2973,8 @@ class TargetedRunner:
             by_gates += [dict(r, target=name) for r in byg]
             raw += [dict(d, arm=name) for d in found]
         ovd = {}
-        for arm in self.ovd:
+        run_ovd = any(self._wanted(need, n) for n in getattr(self, "ovd_names", ())) if need is not None else True
+        for arm in (self.ovd if run_ovd else ()):
             a0 = time.perf_counter()
             try:
                 found = back(arm(sub))
@@ -2994,6 +3025,8 @@ class TargetedRunner:
         dets += self._ovd_proposals(dets, raw, ovd, img_area)
         dets.sort(key=lambda d: -d["conf"])
         del dets[self.max_det:]
+        if need is not None:                           # 자른 **뒤에** 거른다 — 받는 대상의 후보가 전부를 찾을 때와 같게
+            dets = [d for d in dets if d["name"] in need]
         depth_ms = 0.0
         if self.distance:
             box_cm = [d for d in dets if (d.get("box_distance") or {}).get("distance_cm") is not None]
@@ -3899,7 +3932,8 @@ def _detect_one(det_model, bgr, base, header, device, runners, cfg, ocfg, roi, w
     crop = roi_crop_box(rects, W, H) if rects else None
     with _upscale_crop(runner, crop is not None):
         if det_model == "targeted":
-            info, dets = runner(bgr, roi_crop=crop)
+            # 그 기기의 대상만 받게 — 받지 않는 대상의 학습 검출기 · 거리 · 근거를 돌리지 않는다 (아래 거름은 안전장치)
+            info, dets = runner(bgr, roi_crop=crop, allow=(cfg.get("_targets_dev") or {}).get(device))
         elif crop is not None:
             info, dets = runner(np.ascontiguousarray(bgr[crop[1]:crop[3], crop[0]:crop[2]]))
             dets = roi_offset(dets, crop[0], crop[1])
@@ -4336,7 +4370,6 @@ class LiveRunner:
         self.job = None                                 # (종류, 확정 프로필, 적재 스레드, 덧붙임) — 반영 한 건
         self.scan = self.deferred = self.before = None  # 스캔 판 · 판 동안 미룬 파일 프로필 · 판 전 설정
         self.scan_t, self.mark_seen, self.scan_failed = 0.0, {}, None
-        self.depth_period = None                        # 판 동안 바꾼 거리 주기 (DepthTracker, 원래 주기)
         self.redis_mod = redis
         lc = cfg.get("live", {}) or {}
         self.lc = lc
@@ -4679,16 +4712,16 @@ class LiveRunner:
 
     def _depth_every_frame(self, on):
         """판 동안 UniDepth 를 **매 장** 잰다 — 주기(기본 5장)로 재면 각도 표시 0.5초 뒤 잡힌 장의 거리가 앞 장에서
-        나른 값(carried)이라 창구가 믿지 않는다(2026-11-24 robot1 재생: 8각도 중 6각도). 끝나면 원래 주기로."""
-        dp = getattr(self.runners.get("targeted"), "depth", None)
-        if on and dp is not None:
-            if self.depth_period is None:
-                self.depth_period = (dp, dp.period)
-            dp.period = 1
-        elif not on and self.depth_period is not None:
-            obj, period = self.depth_period
-            obj.period = period
-            self.depth_period = None
+        나른 값(carried)이라 창구가 믿지 않는다(2026-11-24 robot1 재생: 8각도 중 6각도). 끝나면 원래 주기로.
+        **판 기기만**(2026-11-27) — 같은 프로세스의 다른 기기는 원래 주기. 주기는 기기가 바뀔 때마다
+        TargetedRunner.use_stream 이 건다."""
+        tr = self.runners.get("targeted")
+        if tr is None:
+            return
+        tr.fast_devices = set(self.cfg.get("_scan_devices") or ()) if on else set()
+        dp, p0 = getattr(tr, "depth", None), getattr(tr, "depth_period0", None)
+        if not on and dp is not None and p0 is not None:
+            dp.period = p0
 
     def scan_profile(self, spec):
         """판 전 프로필(원문) 위에 판 대상을 **판 기기에만** 건 것 → 확정 (2026-11-27, 스캔판대상_장비별_요청_VZ_261126).

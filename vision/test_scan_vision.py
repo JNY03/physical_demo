@@ -81,7 +81,6 @@ def runner(fail=False, watch=None):
     lr.cfg = {"models": {"targeted": {}}}
     lr.job = lr.scan = lr.deferred = lr.before = None
     lr.scan_t, lr.mark_seen, lr.scan_failed = 0.0, {}, None
-    lr.depth_period = None
     vi.apply_profile(lr.cfg, resolve({"profile_version": 7, "models": {"targeted": {"targets": [{"name": "person"}]}}}))
     return lr
 
@@ -187,16 +186,36 @@ def test_prewarm_failure_is_acked_and_not_retried():
 
 
 def test_depth_every_frame_during_scan():
+    """판 동안 매 장 재는 기기 = 판 기기만 (2026-11-27). 주기는 기기가 바뀔 때 use_stream 이 건다."""
     class Dp:
         period = 5
-    lr = runner()
-    lr.runners["targeted"].depth = Dp()
-    put_scan(lr)
+    lr = runner2({"robot1": ["person"], "pi12": ["chair"]})
+    tr = lr.runners["targeted"]
+    tr.depth, tr.depth_period0 = Dp(), 5
+    put_scan(lr, targets=("demo_box",))
     tick(lr)
-    assert lr.runners["targeted"].depth.period == 1
+    assert tr.fast_devices == {"robot1"}
+    tr.depth.period = 1                               # 판 기기 장을 처리하던 중에 판이 끝났다
     lr.r.delete("vision_scan")
     tick(lr)
-    assert lr.runners["targeted"].depth.period == 5
+    assert tr.fast_devices == set() and tr.depth.period == 5
+
+
+def test_use_stream_sets_depth_period_per_device():
+    class Dp:
+        period, _mem, _n = 5, {}, 0
+    tr = vi.TargetedRunner.__new__(vi.TargetedRunner)
+    tr.depth, tr.depth_period0, tr._streams, tr._stream = Dp(), 5, {}, None
+    tr.fast_devices = {"robot1"}
+    tr.use_stream(("robot1", "r"))
+    assert tr.depth.period == 1
+    tr.use_stream(("pi12", "r"))
+    assert tr.depth.period == 5
+    tr.use_stream(("pi12", "r"))                      # 같은 기기 — 기억은 그대로, 주기도 그대로
+    assert tr.depth.period == 5
+    tr.fast_devices = set()
+    tr.use_stream(("robot1", "r"))
+    assert tr.depth.period == 5
 
 
 # ---------------------------------------------------------------- 판 기기만 판 대상 (2026-11-27, 스캔판대상_장비별_요청_VZ_261126)
